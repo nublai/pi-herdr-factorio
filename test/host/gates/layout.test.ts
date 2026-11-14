@@ -8,6 +8,7 @@ import {
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
 	renameSync,
 	rmSync,
 	symlinkSync,
@@ -46,16 +47,16 @@ function temp(prefix: string): string {
 const compileCache = temp("layout-compile-cache-");
 
 function treeFiles(): string[] {
-	const git = spawnSync(
-		"git",
-		["-C", repo, "rev-parse", "--is-inside-work-tree"],
-		{
-			encoding: "utf8",
-			timeout: 5_000,
-		},
-	);
+	const git = spawnSync("git", ["-C", repo, "rev-parse", "--show-toplevel"], {
+		encoding: "utf8",
+		timeout: 5_000,
+	});
 
-	if (git.status === 0 && git.stdout.trim() === "true")
+	// A tree exported under another checkout belongs to that parent repository, which may ignore it.
+	if (
+		git.status === 0 &&
+		realpathSync(git.stdout.trim()) === realpathSync(repo)
+	)
 		return execFileSync(
 			"git",
 			[
