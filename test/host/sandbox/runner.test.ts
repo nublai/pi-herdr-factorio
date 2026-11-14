@@ -95,7 +95,11 @@ import {
 	STDERR_CAP_BYTES,
 } from "../../../host/sandbox/launch.ts";
 import { publishFile } from "../../../host/sandbox/receipts.ts";
-import { runVisibleTests } from "../../../host/sandbox/visible-tests.ts";
+import {
+	runVisibleTests,
+	VISIBLE_LIMIT_MS,
+	VISIBLE_WARN_MS,
+} from "../../../host/sandbox/visible-tests.ts";
 import { withSkills } from "../../../host/sandbox/executor.ts";
 import { AuditLog, type JournalRecord } from "../../../host/gateway/audit.ts";
 import {
@@ -3326,11 +3330,21 @@ describe("private build executor", () => {
 			] as const
 		).flatMap((outcome) =>
 			(outcome === "failed"
-				? [149_999, 150_000, 150_001, 179_999, 180_000]
-				: [149_999, 150_001]
+				? [
+						VISIBLE_WARN_MS - 1,
+						VISIBLE_WARN_MS,
+						VISIBLE_WARN_MS + 1,
+						VISIBLE_LIMIT_MS - 1,
+						VISIBLE_LIMIT_MS,
+					]
+				: [VISIBLE_WARN_MS - 1, VISIBLE_WARN_MS + 1]
 			).map((wallMs) => ({ outcome, wallMs, timeout: false })),
 		),
-		{ outcome: "unavailable" as const, wallMs: 150_001, timeout: true },
+		{
+			outcome: "unavailable" as const,
+			wallMs: VISIBLE_WARN_MS + 1,
+			timeout: true,
+		},
 	])
 		it(`compares visible tests with unchanged base once (${outcome}, ${wallMs} ms${timeout ? ", timeout" : ""})`, async (t) => {
 			const dir = mkdtempSync(join(tmpdir(), "factory-visible-control-"));
@@ -3536,7 +3550,7 @@ describe("private build executor", () => {
 				readFileSync(join(stateDir, "patches", RUN, "tests.json"), "utf8"),
 			);
 
-			const nearLimit = wallMs > 150_000 && wallMs < 180_000;
+			const nearLimit = wallMs > VISIBLE_WARN_MS && wallMs < VISIBLE_LIMIT_MS;
 			assert.equal(recorded.nearLimit === true, nearLimit);
 			assert.equal(recorded.wallMs, wallMs);
 			assert.deepEqual(
