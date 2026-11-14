@@ -10,7 +10,10 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { sandboxExecutor } from "../../../host/sandbox/executor.ts";
+import {
+	sandboxExecutor,
+	type SandboxExecutorConfig,
+} from "../../../host/sandbox/executor.ts";
 import { manifestDigest } from "../../../host/bundle/manifest.ts";
 import {
 	BUILD_MAX_TOKENS,
@@ -37,6 +40,7 @@ import {
 	once,
 	keyed,
 	settle,
+	capAt,
 	type FakeExecutor,
 } from "./orchestrator-fixtures.ts";
 import type { StageExecutor } from "../../../src/controller/launch.ts";
@@ -144,6 +148,7 @@ describe("private build stage", () => {
 							runId: runOf(14),
 							stage: "build",
 							attempt: input.attempt,
+							wallMs: input.wallMs,
 						})
 					: null;
 			executor.preflight = async () => ready && diskExecutor.preflight();
@@ -702,6 +707,203 @@ describe("private build stage", () => {
 
 			assert.match(statuses(github, 14).at(-1) ?? "", /:budget_exhausted$/);
 		});
+
+	it("bounds a restarted build's visible tests by its builder's persisted wall, not a fresh one", {
+		timeout: NEW_TEST_MS,
+	}, async () => {
+		const { github, executor, start, wire, clock } = world();
+		github.add(labeled(14));
+		executor.behaviors = [{ kind: "pass", usage: 10 }];
+		executor.acceptBehavior = { kind: "pass", usage: 7 };
+		executor.buildBehavior = { kind: "pass", usage: 12 };
+		wire.intercept = async (command, args) =>
+			args.some((a) => a.includes("<!-- factory-build "))
+				? networkError()
+				: github.exec(command, args);
+		const first = start();
+		await once(first);
+		await once(first);
+		assert.equal(statuses(github, 14).at(-1), "6:running");
+		const disk = await keptUntestedPatch(executor);
+		const wallEnd = Date.now() + 100_000;
+		builderWindow(disk, 1, wallEnd);
+		const deadlines: (number | undefined)[] = [];
+
+		const real = diskExecutor(
+			disk,
+			async (_config, _pristine, _bytes, command, _replaces, options) => {
+				deadlines.push(options?.deadline);
+
+				return {
+					command,
+					exitCode: null,
+					reason: "visible_tests_unavailable",
+					detail: "timeout",
+					tail: "",
+					wallMs: 1,
+				};
+			},
+		);
+
+		route(executor, real);
+		executor.spentBy.set("build-1", 12);
+		wire.intercept = null;
+		clock.t += 60_000;
+		const restarted = start();
+		await restarted.tick();
+		await restarted.tick();
+		await settle();
+
+		const kept = readFileSync(
+			join(disk.state, "visible-tests", runOf(14), "build-1.deadline"),
+			"utf8",
+		);
+
+		assert.equal(Number(kept), wallEnd);
+		assert.deepEqual(deadlines, [wallEnd]);
+	});
+
+	it("aborts a recovering build's visible tests when its issue closes, holding the slot until their scope stops", {
+		timeout: NEW_TEST_MS,
+	}, async () => {
+		const { github, executor, start, clock, logs } = world();
+		capAt(github, 1);
+		github.add(labeled(14));
+		executor.behaviors = [{ kind: "pass", usage: 10 }];
+		executor.acceptBehavior = { kind: "pass", usage: 7 };
+		executor.buildBehavior = { kind: "pass", usage: 12 };
+		executor.buildExitCode = null;
+		const controller = start();
+		await once(controller);
+		await once(controller);
+		const disk = await keptUntestedPatch(executor);
+		let signal: AbortSignal | undefined;
+		let cleaned: () => void = () => undefined;
+
+		const cleanup = new Promise<void>((done) => {
+			cleaned = done;
+		});
+
+		let ended = false;
+
+		const real = diskExecutor(
+			disk,
+			async (_config, _pristine, _bytes, command, _replaces, options) => {
+				signal = options?.signal;
+				await new Promise((done) =>
+					signal?.addEventListener("abort", done, { once: true }),
+				);
+				await cleanup;
+				ended = true;
+
+				return {
+					command,
+					exitCode: null,
+					reason: "visible_tests_unavailable",
+					detail: "sandbox_unavailable",
+					tail: "",
+					wallMs: 1,
+				};
+			},
+		);
+
+		route(executor, real);
+		clock.t += 60_000;
+		await controller.tick();
+		assert.equal(controller.state.runs.get(14)?.phase.kind, "recovering");
+		github.add(labeled(15));
+		clock.t += 30_000;
+		await controller.tick();
+		assert.equal(controller.state.runs.has(15), false);
+		const issue = github.issues.get(14);
+		assert.ok(issue !== undefined);
+		issue.state = "closed";
+		clock.t += 30_000;
+		await controller.tick();
+		assert.ok(logs.some((l) => l.event === "claim_released"));
+		assert.equal(signal?.aborted, true);
+		assert.equal(ended, false);
+		clock.t += 30_000;
+		await controller.tick();
+		assert.equal(controller.state.runs.has(15), false);
+
+		let waits = 0;
+
+		await controller.drain(async () => {
+			if (++waits === 2) cleaned();
+			await settle();
+		});
+
+		assert.equal(ended, true);
+		assert.ok(waits >= 2);
+		clock.t += 30_000;
+		await controller.tick();
+		assert.equal(controller.state.runs.has(15), true);
+	});
+
+	it("keeps a held kept-patch retry idle, then tests the kept patch on attempts 2 and 3 without another builder", {
+		timeout: NEW_TEST_MS,
+	}, async () => {
+		const { github, executor, start, clock, store } = world();
+		github.add(labeled(14));
+		executor.behaviors = [{ kind: "pass", usage: 10 }];
+		executor.acceptBehavior = { kind: "pass", usage: 7 };
+		executor.buildBehavior = { kind: "pass", usage: 12 };
+		executor.buildExitCode = null;
+		const controller = start();
+		await once(controller);
+		await once(controller);
+		const disk = await keptUntestedPatch(executor);
+		let runs = 0;
+
+		const real = diskExecutor(disk, async (_c, _p, _b, command) => {
+			runs++;
+
+			return {
+				command,
+				exitCode: null,
+				reason: "visible_tests_unavailable",
+				detail: "timeout",
+				tail: "",
+				wallMs: 1,
+			};
+		});
+
+		route(executor, real);
+		const output = executor.output;
+
+		executor.output = async (input) => {
+			if (input.stage === "build" && input.attempt === 3) restoreBase(disk);
+
+			return output(input);
+		};
+
+		store.local = "disabled";
+		const restarted = start();
+
+		for (let tick = 0; tick < 3; tick++) {
+			clock.t += 60_000;
+			await restarted.tick();
+		}
+
+		assert.equal(runs, 0);
+		assert.equal(restarted.state.runs.get(14)?.attempt, 2);
+		assert.equal(restarted.state.runs.get(14)?.phase.kind, "retry_queued");
+		store.local = "enabled";
+
+		for (let tick = 0; tick < 12; tick++) {
+			clock.t += 60_000;
+			await restarted.tick();
+			await settle();
+		}
+
+		assert.equal(runs, 2);
+		assert.match(statuses(github, 14).at(-1) ?? "", /:failed$/);
+		assert.equal(
+			executor.launches.filter((l) => l.stage === "build").length,
+			1,
+		);
+	});
 });
 
 type OutputRequest = Parameters<StageExecutor["output"]>[0];
@@ -773,17 +975,50 @@ async function keptUntestedPatch(executor: FakeExecutor): Promise<KeptPatch> {
 	return { state, root };
 }
 
-/** A real disk executor whose visible-test sandbox stays open until released, then reports a timeout. */
-function gatedVisibleTests(disk: KeptPatch) {
-	let release: () => void = () => undefined;
+/** The execution window a real builder persists in its stage directory before any model call. */
+function builderWindow(disk: KeptPatch, attempt: number, deadline: number) {
+	const dir = join(disk.state, "stages", runOf(14), `build-${attempt}`);
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(
+		join(dir, "usage.json"),
+		JSON.stringify({
+			version: 1,
+			runId: runOf(14),
+			stage: "build",
+			attempt,
+			startedAt: deadline - 1_800_000,
+			deadline,
+			turns: 1,
+			usage: {
+				total: 12,
+				parent: 12,
+				children: 0,
+				gateway: null,
+				unreadChildren: 0,
+				byModel: {},
+			},
+		}),
+		{ mode: 0o600 },
+	);
+}
 
-	const gate = new Promise<void>((done) => {
-		release = done;
-	});
+/** A successful pinned-base recheckout, which this fixture has no tarball transport for. */
+function restoreBase(disk: KeptPatch): void {
+	const base = join(disk.state, "pristine", runOf(14));
+	mkdirSync(base, { recursive: true });
+	writeFileSync(join(base, "value"), "base\n");
+	mkdirSync(join(disk.state, "build-base", "checkouts"), { recursive: true });
+	writeFileSync(
+		join(disk.state, "build-base", "checkouts", `${runOf(14)}.json`),
+		"{}",
+	);
+}
 
-	let runs = 0;
-
-	const executor = sandboxExecutor({
+function diskExecutor(
+	disk: KeptPatch,
+	visibleTests: NonNullable<SandboxExecutorConfig["visibleTests"]>,
+): StageExecutor {
+	return sandboxExecutor({
 		platform: EXE_DEV_PLATFORM,
 		stateDir: disk.state,
 		root: disk.root,
@@ -796,7 +1031,23 @@ function gatedVisibleTests(disk: KeptPatch) {
 			stdout: command === "bwrap" ? "bubblewrap 0.9.0\n" : "",
 			stderr: "",
 		}),
-		visibleTests: async (_config, _pristine, _bytes, command) => {
+		visibleTests,
+	});
+}
+
+/** A real disk executor whose visible-test sandbox stays open until released, then reports a timeout. */
+function gatedVisibleTests(disk: KeptPatch) {
+	let release: () => void = () => undefined;
+
+	const gate = new Promise<void>((done) => {
+		release = done;
+	});
+
+	let runs = 0;
+
+	const executor = diskExecutor(
+		disk,
+		async (_config, _pristine, _bytes, command) => {
 			runs++;
 			await gate;
 
@@ -809,13 +1060,14 @@ function gatedVisibleTests(disk: KeptPatch) {
 				wallMs: 600_000,
 			};
 		},
-	});
+	);
 
 	return { executor, release, runs: () => runs };
 }
 
 function route(executor: FakeExecutor, disk: StageExecutor): void {
 	executor.preflight = async () => disk.preflight();
+	executor.stopTests = disk.stopTests;
 	executor.output = async (input) =>
 		input.stage === "build" ? disk.output(input) : null;
 }

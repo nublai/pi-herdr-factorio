@@ -7,7 +7,7 @@ import type { CandidateExecution } from "../candidate/state.ts";
 import type { Digest } from "../core/run.ts";
 import type { AttemptEnd } from "../ledger/schema.ts";
 import type { ActiveRun } from "./claims.ts";
-import type { StageOutput } from "./launch.ts";
+import { isTesting, isWallOut, type StageOutput } from "./launch.ts";
 import type { OrchestratorInput } from "./orchestrator.ts";
 
 /** A candidate event an execution produced, queued for the next candidate commit. */
@@ -39,23 +39,31 @@ export function queueReviewRefusal(
 	});
 }
 
+/**
+ * Turns a restored run's unsettled executions back into candidate events.
+ * It queues nothing and returns the execution while a repair's visible tests
+ * run in the background, and waits without a configured build wall to bound
+ * them; recovery is tried again later.
+ */
 export async function recoverCandidate(
 	input: Pick<OrchestratorInput, "executor" | "files">,
 	results: CandidateResult[],
 	recovery: Set<Digest>,
 	run: ActiveRun,
 	wallMs: number | undefined,
-): Promise<void> {
+): Promise<CandidateExecution | null> {
 	const state = run.handoff;
 	const executor = input.executor;
 
-	if (state?.kind !== "selected" || !(await executor.reconciled())) return;
+	if (state?.kind !== "selected" || !(await executor.reconciled())) return null;
 
 	const recovered: CandidateResult[] = [];
 
 	for (const account of state.accounts) {
 		if (account.settlement === "settled") continue;
 		const execution = account.execution;
+
+		if (execution.stage === "build" && wallMs === undefined) return null;
 
 		const tokens = await executor.spent({
 			runId: execution.runId,
@@ -89,8 +97,7 @@ export async function recoverCandidate(
 			continue;
 		}
 
-		if (output instanceof Object && output.kind === "pending" && output.testing)
-			return;
+		if (isTesting(output)) return execution;
 
 		const ended = await input.files.accounting?.readAttempt(
 			run.runId,
@@ -158,10 +165,14 @@ export async function recoverCandidate(
 					? undefined
 					: event.result.kind === "passed"
 						? "completed"
-						: "interrupted"),
+						: isWallOut(output)
+							? "budget_stop"
+							: "interrupted"),
 		});
 	}
 
 	results.push(...recovered);
 	recovery.delete(run.runId);
+
+	return null;
 }

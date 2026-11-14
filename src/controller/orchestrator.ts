@@ -174,6 +174,8 @@ import {
 	type StageExecutor,
 	type StageOutput,
 	UNPREPARED,
+	isTesting,
+	isWallOut,
 	prepareWorkspace,
 	stageInputs,
 } from "./launch.ts";
@@ -340,7 +342,17 @@ function holdsSlot(run: ActiveRun): boolean {
 		(run.phase.kind === "claimed" ||
 			run.phase.kind === "base_check" ||
 			run.phase.kind === "running" ||
-			run.phase.kind === "blocked")
+			run.phase.kind === "blocked" ||
+			testing(run))
+	);
+}
+
+/** A build recovering while its visible tests run in the background. */
+function testing(run: ActiveRun): boolean {
+	return (
+		run.stage === "build" &&
+		run.phase.kind === "recovering" &&
+		isTesting(run.phase.output)
 	);
 }
 
@@ -461,6 +473,10 @@ export class Orchestrator {
 		Digest,
 		{ readonly abort: AbortController; settled: boolean }
 	>();
+	/** The execution a restored run's repair is testing in the background, by run. */
+	readonly #recoveredTests = new Map<Digest, Digest>();
+	/** Background visible tests being stopped; each keeps a slot until its scope is cleaned up. */
+	readonly #stopping = new Set<Promise<void>>();
 	#enabled = false;
 	#last: ReportInput | null = null;
 
@@ -695,34 +711,18 @@ export class Orchestrator {
 		if (limits === null || last === null) return null;
 
 		const running = () =>
+			this.#stopping.size > 0 ||
 			[...this.#candidateExecutions.values()].some(
 				(execution) => !execution.settled,
 			) ||
 			[...this.state.runs.values()].some(
 				(run) =>
 					run.phase.kind === "running" ||
-					(run.phase.kind === "base_check" && run.phase.checking),
+					(run.phase.kind === "base_check" && run.phase.checking) ||
+					testing(run),
 			);
 
-		const testing = [...this.state.runs.values()].filter(
-			(run) =>
-				this.#enabled &&
-				run.stage === "build" &&
-				run.phase.kind === "recovering",
-		);
-
-		if (
-			!running() &&
-			this.#candidateResults.length === 0 &&
-			testing.length === 0
-		)
-			return null;
-
-		for (const run of testing) {
-			if (run.phase.kind !== "recovering") continue;
-			await this.#pollRecovering(run, run.phase.output, false);
-			await this.#sync(run);
-		}
+		if (!running() && this.#candidateResults.length === 0) return null;
 
 		while (running()) {
 			await this.#observeCandidates(false);
@@ -730,6 +730,11 @@ export class Orchestrator {
 			await this.#reconcileStages(this.#input.clock.now(), limits);
 
 			for (const run of this.state.runs.values()) {
+				if (testing(run) && run.phase.kind === "recovering") {
+					await this.#pollRecovering(run, run.phase.output);
+					await this.#sync(run);
+				}
+
 				if (run.phase.kind === "base_check") {
 					await this.#pollBase(run);
 					await this.#sync(run);
@@ -1144,7 +1149,7 @@ export class Orchestrator {
 
 			if (run.stage === "build" && !this.#enabled) return { kind: "unclaimed" };
 
-			await this.#pollRecovering(run, run.phase.output, true);
+			await this.#pollRecovering(run, run.phase.output);
 
 			return { kind: "unclaimed" };
 		}
@@ -1183,12 +1188,8 @@ export class Orchestrator {
 		return this.#confirmedBy(run);
 	}
 
-	/** Finishes a recovering stage from its kept output. A build's visible tests run in the background unless `background` is false. */
-	async #pollRecovering(
-		run: ActiveRun,
-		kept: StageOutput,
-		background: boolean,
-	): Promise<void> {
+	/** Finishes a recovering stage from its kept output. A build's visible tests run in the background. */
+	async #pollRecovering(run: ActiveRun, kept: StageOutput): Promise<void> {
 		const wallMs = this.#buildWallMs();
 
 		if (run.stage === "build" && wallMs === undefined) return;
@@ -1200,7 +1201,7 @@ export class Orchestrator {
 						stage: "build",
 						attempt: run.attempt,
 						round: run.round ?? 0,
-						background,
+						background: true,
 						wallMs,
 					})
 				: kept;
@@ -1212,7 +1213,7 @@ export class Orchestrator {
 			this.#endStage(run, "interrupted", 0, limits);
 	}
 
-	/** A fresh build attempt's wall, which its visible tests share. */
+	/** The configured build wall. An attempt that ran no builder gives its visible tests this much. */
 	#buildWallMs(): number | undefined {
 		return this.#config?.stages.build.budget.wallMs;
 	}
@@ -1287,6 +1288,12 @@ export class Orchestrator {
 	/** Aborts a running stage the run is leaving, keeping its usage so far and any it reports later. */
 	#abortRunning(run: ActiveRun): void {
 		const { phase } = run;
+
+		if (phase.kind === "recovering" && run.stage === "build") {
+			void this.#stopTests(run.runId);
+
+			return;
+		}
 
 		if (phase.kind === "base_check") {
 			phase.abort.abort();
@@ -2190,8 +2197,53 @@ export class Orchestrator {
 		this.#reserved.delete(issue);
 	}
 
+	/** Stops a run's background visible tests. Until their scope is cleaned up, it keeps a slot and drain waits for it. */
+	#stopTests(runId: Digest): Promise<void> {
+		const stopping: Promise<void> = (
+			this.#input.executor.stopTests?.(runId) ?? Promise.resolve()
+		)
+			.catch(() => undefined)
+			.finally(() => this.#stopping.delete(stopping));
+
+		this.#stopping.add(stopping);
+
+		return stopping;
+	}
+
+	/**
+	 * Tracks a restored run's repair whose visible tests run in the background
+	 * as one of its executions, so drain waits for it and `stop_execution`
+	 * aborts it. `testing` is `null` once recovery has its result.
+	 */
+	#watchRecovery(runId: Digest, testing: CandidateExecution | null): void {
+		const watched = this.#recoveredTests.get(runId);
+
+		if (watched !== undefined && watched !== testing?.id) {
+			const handle = this.#candidateExecutions.get(watched);
+
+			if (handle !== undefined) handle.settled = true;
+			this.#recoveredTests.delete(runId);
+		}
+
+		if (testing === null || this.#candidateExecutions.has(testing.id)) return;
+		const handle = { abort: new AbortController(), settled: false };
+
+		handle.abort.signal.addEventListener(
+			"abort",
+			() => {
+				void this.#stopTests(runId).then(() => {
+					handle.settled = true;
+				});
+			},
+			{ once: true },
+		);
+		this.#candidateExecutions.set(testing.id, handle);
+		this.#recoveredTests.set(runId, testing.id);
+	}
+
 	#active(): number {
 		return (
+			this.#stopping.size +
 			[...this.state.runs.values()].filter(holdsSlot).length +
 			(this.#input.cadence?.occupied() ?? 0) +
 			(this.#input.measurement?.occupied() ?? 0)
@@ -3599,7 +3651,7 @@ export class Orchestrator {
 										stage,
 										attempt,
 										round: run.round ?? 0,
-										wallMs: budget.wallMs - result.receipt.wallMs,
+										wallMs: budget.wallMs,
 										signal: abort.signal,
 										progress: () => {
 											phase.lastProgressAt = clock.now();
@@ -3608,11 +3660,7 @@ export class Orchestrator {
 									.catch(() => null)
 							: null;
 
-					const walled =
-						output instanceof Object &&
-						output.kind === "build" &&
-						output.result.kind === "unavailable" &&
-						output.result.reason === "wall";
+					const walled = isWallOut(output);
 
 					phase.result = withFamily(
 						{
@@ -3814,12 +3862,15 @@ export class Orchestrator {
 			if (!(await this.#commitCandidate(run, step.state))) continue;
 
 			if (this.#candidateRecovery.has(run.runId))
-				await recoverCandidate(
-					this.#input,
-					this.#candidateResults,
-					this.#candidateRecovery,
-					run,
-					this.#buildWallMs(),
+				this.#watchRecovery(
+					run.runId,
+					await recoverCandidate(
+						this.#input,
+						this.#candidateResults,
+						this.#candidateRecovery,
+						run,
+						this.#buildWallMs(),
+					),
 				);
 
 			for (let index = 0; index < this.#candidateResults.length; ) {
@@ -4442,18 +4493,12 @@ export class Orchestrator {
 								execution,
 								workflowSha: execution.workflowSha,
 								workflowDigest: execution.workflowDigest,
-								wallMs:
-									config.stages[execution.stage].budget.wallMs -
-									result.receipt.wallMs,
+								wallMs: config.stages[execution.stage].budget.wallMs,
 								signal: abort.signal,
 							})
 						: null;
 
-				const walled =
-					output instanceof Object &&
-					output.kind === "build" &&
-					output.result.kind === "unavailable" &&
-					output.result.reason === "wall";
+				const walled = isWallOut(output);
 
 				let event: CandidateEvent;
 
@@ -4953,10 +4998,7 @@ export class Orchestrator {
 
 			if (!(output instanceof Object) || output.kind !== "build") return false;
 
-			if (
-				output.result.kind === "unavailable" &&
-				output.result.reason === "wall"
-			) {
+			if (isWallOut(output)) {
 				this.#stop(run, budgetCause(stage, SANDBOX_CAPS.wall));
 				recordAttempt(run, "budget_stop");
 				this.#input.log("stage_ended", {
