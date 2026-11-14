@@ -16,9 +16,10 @@ import { stopScopeArgv } from "../isolation/scope.ts";
 import { freshDir, launchSandbox, type SandboxHostConfig } from "./launch.ts";
 import { boundedText } from "./receipts.ts";
 
-export const VISIBLE_LIMIT_MS = 180_000;
+// The full suite under one CPU outgrew 180 s on the 2-CPU nubl-factory (#735 pilot, 2026-11-14); Giuseppe approved 600 s.
+export const VISIBLE_LIMIT_MS = 600_000;
 
-const VISIBLE_WARN_MS = 150_000;
+export const VISIBLE_WARN_MS = 450_000;
 
 export function visibleBudget<T extends VisibleTests>(tests: T) {
 	return tests.exitCode !== null &&
