@@ -46,7 +46,16 @@ function temp(prefix: string): string {
 const compileCache = temp("layout-compile-cache-");
 
 function treeFiles(): string[] {
-	if (existsSync(join(repo, ".git")))
+	const git = spawnSync(
+		"git",
+		["-C", repo, "rev-parse", "--is-inside-work-tree"],
+		{
+			encoding: "utf8",
+			timeout: 5_000,
+		},
+	);
+
+	if (git.status === 0 && git.stdout.trim() === "true")
 		return execFileSync(
 			"git",
 			[
