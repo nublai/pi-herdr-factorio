@@ -99,6 +99,7 @@ import {
 	runVisibleTests,
 	VISIBLE_LIMIT_MS,
 	VISIBLE_WARN_MS,
+	type VisibleRunOptions,
 } from "../../../host/sandbox/visible-tests.ts";
 import { withSkills } from "../../../host/sandbox/executor.ts";
 import { AuditLog, type JournalRecord } from "../../../host/gateway/audit.ts";
@@ -3103,6 +3104,7 @@ describe("private build executor", () => {
 					runId: digest(RUN),
 					stage: "build",
 					attempt: 1,
+					wallMs: 1_800_000,
 				});
 
 				assert.ok(
@@ -3131,6 +3133,7 @@ describe("private build executor", () => {
 					runId: digest(RUN),
 					stage: "build",
 					attempt: 1,
+					wallMs: 1_800_000,
 				});
 				assert.equal(tests, 1);
 			},
@@ -3286,6 +3289,7 @@ describe("private build executor", () => {
 					runId: digest(RUN),
 					stage: "build",
 					attempt: 1,
+					wallMs: 1_800_000,
 				}),
 				/simulated kill/,
 			);
@@ -3306,6 +3310,7 @@ describe("private build executor", () => {
 			runId: digest(RUN),
 			stage: "build",
 			attempt: 2,
+			wallMs: 1_800_000,
 		});
 
 		assert.ok(
@@ -3510,6 +3515,7 @@ describe("private build executor", () => {
 				runId: digest(RUN),
 				stage: "build" as const,
 				attempt: 1,
+				wallMs: 1_800_000,
 			};
 
 			if (outcome === "restart" || outcome === "base_missing") {
@@ -3728,7 +3734,7 @@ describe("visible tests inside the build wall", () => {
 		const visibleTests: NonNullable<
 			executorModule.SandboxExecutorConfig["visibleTests"]
 		> = async (_config, _pristine, patch, command, _replaces, options) => {
-			limits.push(options?.limitMs);
+			limits.push(limitOf(options));
 
 			if (patch.length > 0) {
 				t.mock.timers.tick(500_000);
@@ -3791,7 +3797,7 @@ describe("visible tests inside the build wall", () => {
 		const executor = executorFor(
 			kept,
 			async (_config, _pristine, _patch, command, _replaces, options) => {
-				limits.push(options?.limitMs);
+				limits.push(limitOf(options));
 
 				return {
 					command,
@@ -3843,7 +3849,189 @@ describe("visible tests inside the build wall", () => {
 		assert.equal(ended.result.kind, "found");
 		assert.equal(runs, 1);
 	});
+
+	for (const evidence of ["window", "fresh", "unreadable", "none"] as const)
+		it(`takes the visible wall end from ${evidence === "window" ? "the builder's persisted window" : evidence === "fresh" ? "a fresh wall when the attempt ran no builder" : evidence === "unreadable" ? "nothing when the builder's window is unreadable" : "nowhere, and waits, without a window or a configured wall"}`, {
+			timeout: 30_000,
+		}, async (t) => {
+			const kept = await keptPatch(t);
+			const deadlines: (number | undefined)[] = [];
+
+			const executor = executorFor(
+				kept,
+				async (_config, _pristine, _patch, command, _replaces, options) => {
+					deadlines.push(options?.deadline);
+
+					return { command, exitCode: 0, tail: "ok", wallMs: 1 };
+				},
+			);
+
+			const stage = join(kept.stateDir, "stages", RUN, "build-1");
+			const now = Date.now();
+
+			if (evidence === "window" || evidence === "unreadable") {
+				mkdirSync(stage, { recursive: true });
+				writeFileSync(
+					join(stage, "usage.json"),
+					evidence === "unreadable"
+						? "{"
+						: JSON.stringify({
+								version: 1,
+								runId: RUN,
+								stage: "build",
+								attempt: 1,
+								startedAt: now - 1_700_000,
+								deadline: now + 100_000,
+								turns: 1,
+								usage: {
+									total: 1,
+									parent: 1,
+									children: 0,
+									gateway: null,
+									unreadChildren: 0,
+									byModel: {},
+								},
+							}),
+					{ mode: 0o600 },
+				);
+			}
+
+			assert.equal(await executor.preflight(), true);
+
+			const output = await executor.output({
+				...request,
+				background: true,
+				wallMs: evidence === "none" ? undefined : 1_800_000,
+			});
+
+			assert.deepEqual(
+				output,
+				evidence === "none"
+					? { kind: "pending" }
+					: { kind: "pending", testing: true },
+			);
+			await new Promise((done) => setImmediate(done));
+
+			const ended = await executor.output({
+				...request,
+				background: true,
+				wallMs: evidence === "none" ? undefined : 1_800_000,
+			});
+
+			const file = join(
+				kept.stateDir,
+				"visible-tests",
+				RUN,
+				"build-1.deadline",
+			);
+
+			if (evidence === "none") {
+				assert.deepEqual(ended, { kind: "pending" });
+				assert.equal(deadlines.length, 0);
+				assert.equal(existsSync(file), false);
+
+				return;
+			}
+
+			if (evidence === "unreadable") {
+				assert.deepEqual(ended, {
+					kind: "build",
+					result: { kind: "unavailable", reason: "wall" },
+				});
+				assert.equal(deadlines.length, 0);
+
+				return;
+			}
+
+			assert.ok(ended instanceof Object && ended.kind === "build");
+			assert.equal(ended.result.kind, "found");
+			assert.equal(deadlines.length, 1);
+			const deadline = deadlines[0] ?? 0;
+			assert.equal(Number(readFileSync(file, "utf8")), deadline);
+
+			if (evidence === "window") assert.equal(deadline, now + 100_000);
+			else
+				assert.ok(
+					deadline >= now + 1_800_000 && deadline <= Date.now() + 1_800_000,
+				);
+		});
+
+	it("ends a visible run that settles past the build wall as a wall-out, even when it passed", {
+		timeout: 30_000,
+	}, async (t) => {
+		const kept = await keptPatch(t);
+
+		const executor = executorFor(kept, async (_c, _p, _b, command) => {
+			t.mock.timers.tick(200_000);
+
+			return { command, exitCode: 0, tail: "ok", wallMs: 200_000 };
+		});
+
+		assert.equal(await executor.preflight(), true);
+		t.mock.timers.enable({ apis: ["Date"], now: 1_000_000 });
+
+		assert.deepEqual(await executor.output({ ...request, wallMs: 100_000 }), {
+			kind: "build",
+			result: { kind: "unavailable", reason: "wall" },
+		});
+		assert.equal(
+			existsSync(join(kept.stateDir, "patches", RUN, "tests.json")),
+			false,
+		);
+	});
+
+	it("stops and joins a run's background visible tests on request", {
+		timeout: 30_000,
+	}, async (t) => {
+		const kept = await keptPatch(t);
+		let signal: AbortSignal | undefined;
+		let ended = false;
+
+		const executor = executorFor(
+			kept,
+			async (_config, _pristine, _patch, command, _replaces, options) => {
+				signal = options?.signal;
+				await new Promise((done) =>
+					signal?.addEventListener("abort", done, { once: true }),
+				);
+				await new Promise((done) => setTimeout(done, 20));
+				ended = true;
+
+				return {
+					command,
+					exitCode: null,
+					reason: "visible_tests_unavailable",
+					detail: "sandbox_unavailable",
+					tail: "",
+					wallMs: 1,
+				};
+			},
+		);
+
+		assert.equal(await executor.preflight(), true);
+		const background = { ...request, background: true, wallMs: 1_800_000 };
+		assert.deepEqual(await executor.output(background), {
+			kind: "pending",
+			testing: true,
+		});
+		await new Promise((done) => setImmediate(done));
+		assert.equal(signal?.aborted, false);
+		await executor.stopTests?.(digest(RUN));
+		assert.equal(signal?.aborted, true);
+		assert.equal(ended, true);
+		assert.deepEqual(await executor.output(background), {
+			kind: "build",
+			result: { kind: "unavailable", reason: "visible_tests_unavailable" },
+		});
+	});
 });
+
+function limitOf(options: VisibleRunOptions | undefined): number {
+	return Math.min(
+		VISIBLE_LIMIT_MS,
+		(options?.deadline ?? Number.POSITIVE_INFINITY) - Date.now(),
+	);
+}
 
 describe("controller-run visible tests", () => {
 	for (const end of ["abort", "deadline"] as const)
@@ -3906,7 +4094,9 @@ describe("controller-run visible tests", () => {
 				"",
 				"npm test",
 				[],
-				end === "abort" ? { signal: abort.signal } : { limitMs: 100 },
+				end === "abort"
+					? { signal: abort.signal }
+					: { deadline: Date.now() + 100 },
 			);
 
 			assert.equal(result.exitCode, null);
@@ -3918,6 +4108,70 @@ describe("controller-run visible tests", () => {
 			assert.ok(
 				calls.filter((call) => call.includes("fixture.scope")).length >= 2,
 			);
+		});
+
+	for (const late of ["launch", "exit"] as const)
+		it(`counts preparation against the deadline and ${late === "launch" ? "refuses to launch an expired run" : "times out a run that exits after it"}`, {
+			timeout: 30_000,
+		}, async (t) => {
+			const root = mkdtempSync(join(tmpdir(), "factory-visible-late-"));
+			t.after(() => rmSync(root, { recursive: true, force: true }));
+			const base = join(root, "base");
+			mkdirSync(base);
+			writeFileSync(
+				join(base, "package.json"),
+				JSON.stringify({ scripts: { test: "node --test" } }),
+			);
+			let now = 1_000_000;
+			let calls = 0;
+
+			t.mock.method(Date, "now", () =>
+				late === "launch" && calls++ > 0 ? now + 1_000 : now,
+			);
+
+			let launched = false;
+
+			const result = await runVisibleTests(
+				{
+					platform: EXE_DEV_PLATFORM,
+					stateDir: root,
+					bundleDir: "unused",
+					workspace: "",
+					runId: digest(RUN),
+					stage: "build",
+					attempt: 1,
+					tools: [],
+					arch: "x86_64",
+					xdgRuntimeDir: "/run/user/1000",
+					assetsDigest: "e".repeat(64),
+					versions: {
+						pi: "1.4.0",
+						piHerdrAgents: "3.3.1",
+						piHerdrPstack: "0.5.0",
+					},
+					exec: async () => ({ code: 0, stdout: "", stderr: "" }),
+					launch: (config) => {
+						launched = true;
+						now += 1_000;
+						mkdirSync(config.agentDir, { recursive: true });
+						writeFileSync(join(config.agentDir, "visible-exit"), "0\n");
+
+						return {
+							unit: "fixture",
+							child: spawn(process.execPath, ["-e", "process.exit(0)"]),
+						};
+					},
+				},
+				base,
+				"",
+				"npm test",
+				[],
+				{ deadline: now + 100 },
+			);
+
+			assert.equal(launched, late === "exit");
+			assert.equal(result.exitCode, null);
+			assert.equal(result.detail, "timeout");
 		});
 
 	it("types a sandbox process exit before the test command starts as infrastructure failure", async (t) => {

@@ -48,7 +48,8 @@ import {
 	validationDir,
 } from "../../src/candidate/validation.ts";
 import { regularText } from "../../src/contract/artifacts.ts";
-import { objectOf, parseJson } from "../../src/core/json.ts";
+import { executionUsageOf } from "../../src/core/execution.ts";
+import { countOf, fieldOf, objectOf, parseJson } from "../../src/core/json.ts";
 import { FAMILY_MISSING } from "../../src/core/models.ts";
 import { blocksReview, digestOf, type Digest } from "../../src/core/run.ts";
 import type { Exec } from "../../src/github/exec.ts";
@@ -100,6 +101,7 @@ import {
 	attemptSpent,
 	boundedText,
 	buildCommands,
+	MAX_RECEIPT_BYTES,
 	publishFile,
 	readRunPatch,
 	stageName,
@@ -303,13 +305,16 @@ type VisibleRequest = {
 	readonly runId: Digest;
 	readonly attempt: number;
 	readonly round: number;
-	readonly wallMs?: number;
-	readonly signal?: AbortSignal;
+	/** The build wall's absolute end. */
+	readonly deadline: number;
+	readonly signal: AbortSignal;
 	readonly progress?: () => void;
 };
 
 type VisibleJob = {
+	readonly runId: Digest;
 	readonly attempt: number;
+	readonly abort: AbortController;
 	readonly done: Promise<StageOutput | null>;
 	settled:
 		| { readonly kind: "fulfilled"; readonly value: StageOutput | null }
@@ -318,10 +323,10 @@ type VisibleJob = {
 };
 
 function visibleJob(
-	attempt: number,
+	request: Pick<VisibleJob, "runId" | "attempt" | "abort">,
 	done: Promise<StageOutput | null>,
 ): VisibleJob {
-	const job: VisibleJob = { attempt, done, settled: null };
+	const job: VisibleJob = { ...request, done, settled: null };
 
 	done.then(
 		(value) => {
@@ -336,23 +341,105 @@ function visibleJob(
 }
 
 /**
- * The absolute end of an attempt's build wall for its visible tests, kept on
- * disk from the first visible run so a restart cannot reset it. Unbounded
- * when neither the caller nor a record gives a wall; an unreadable record
- * has no time left.
+ * The absolute end of a build attempt's wall. The newest builder execution
+ * that left evidence persisted it in `usage.json` before any model call;
+ * without that window, its receipt's `wallMs` spent counts from now. An
+ * attempt that ran no builder, such as a scheduler retry that reuses a kept
+ * patch, starts a fresh `wallMs`. `null` when `wallMs` is needed and absent;
+ * `0`, no time left, when the evidence is missing or unreadable.
+ */
+function attemptDeadline(
+	stateDir: string,
+	request: {
+		readonly runId: Digest;
+		readonly attempt: number;
+		readonly round: number;
+	},
+	wallMs: number | undefined,
+): number | null {
+	const { runId, attempt, round } = request;
+	const name = stageName("build", attempt, round);
+	const root = join(stateDir, "stages", runId);
+	const suffix = (entry: string) => Number(entry.slice(name.length + 1) || 1);
+
+	const fresh = (spent: number) =>
+		wallMs === undefined ? null : Date.now() + Math.max(0, wallMs - spent);
+
+	const executions = (existsSync(root) ? readdirSync(root) : [])
+		.filter(
+			(entry) =>
+				entry === name ||
+				(entry.startsWith(`${name}.`) &&
+					/^[0-9]+$/.test(entry.slice(name.length + 1))),
+		)
+		.sort((a, b) => suffix(b) - suffix(a))
+		.map((entry) => join(root, entry));
+
+	if (executions.length === 0) return fresh(0);
+
+	try {
+		for (const dir of executions) {
+			if (existsSync(join(dir, "usage.json")))
+				return (
+					executionUsageOf(
+						parseJson(regularText(join(dir, "usage.json"), MAX_RECEIPT_BYTES)),
+						{ runId, stage: "build", attempt },
+					)?.deadline ?? 0
+				);
+
+			if (!existsSync(join(dir, "receipt.json"))) continue;
+
+			const spent = countOf(
+				fieldOf(
+					objectOf(
+						parseJson(
+							regularText(join(dir, "receipt.json"), MAX_RECEIPT_BYTES),
+						),
+					),
+					"wallMs",
+				),
+			);
+
+			return spent === null ? 0 : fresh(spent);
+		}
+	} catch {
+		return 0;
+	}
+
+	return 0;
+}
+
+/**
+ * The absolute end of an attempt's build wall for its visible tests, from
+ * `attemptDeadline` at the first visible run and kept on disk after it, so a
+ * restart cannot reset it. `null` when there is none yet; an unreadable
+ * record has no time left.
  */
 function visibleDeadline(
 	stateDir: string,
-	runId: Digest,
-	name: string,
+	request: {
+		readonly runId: Digest;
+		readonly attempt: number;
+		readonly round: number;
+	},
 	wallMs: number | undefined,
-): number {
-	const path = join(stateDir, "visible-tests", runId, `${name}.deadline`);
+): number | null {
+	const { runId, attempt, round } = request;
 
-	if (wallMs !== undefined) {
+	const path = join(
+		stateDir,
+		"visible-tests",
+		runId,
+		`${stageName("build", attempt, round)}.deadline`,
+	);
+
+	if (!existsSync(path)) {
+		const deadline = attemptDeadline(stateDir, request, wallMs);
+
+		if (deadline === null) return null;
 		mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-		publishFile(path, `${Date.now() + Math.max(0, wallMs)}\n`);
-	} else if (!existsSync(path)) return Number.POSITIVE_INFINITY;
+		publishFile(path, `${deadline}\n`);
+	}
 
 	try {
 		const deadline = Number(regularText(path, 64).trim());
@@ -473,14 +560,10 @@ export function sandboxExecutor(config: SandboxExecutorConfig): StageExecutor {
 		found: Extract<PatchRead, { kind: "found" }>,
 		tested: { readonly bundle: Bundle; readonly arch: SeccompArch },
 	): Promise<StageOutput | null> => {
-		const { runId, attempt, round, signal } = request;
+		const { runId, attempt, deadline, signal } = request;
 
-		const deadline = visibleDeadline(
-			config.stateDir,
-			runId,
-			stageName("build", attempt, round),
-			request.wallMs,
-		);
+		const expired = () =>
+			signal.aborted ? "aborted" : Date.now() >= deadline ? "wall" : null;
 
 		const beat =
 			request.progress === undefined
@@ -503,7 +586,9 @@ export function sandboxExecutor(config: SandboxExecutorConfig): StageExecutor {
 		};
 
 		try {
-			if (deadline <= Date.now()) return stopped("wall");
+			const early = expired();
+
+			if (early !== null) return stopped(early);
 			let kept: PatchRead = found;
 			const base = join(config.stateDir, "pristine", runId);
 
@@ -589,9 +674,10 @@ export function sandboxExecutor(config: SandboxExecutorConfig): StageExecutor {
 				| { readonly kind: "ran"; readonly tests: VisibleTests }
 				| { readonly kind: "wall" | "aborted" }
 			> => {
-				const limitMs = Math.min(VISIBLE_LIMIT_MS, deadline - Date.now());
+				const before = expired();
 
-				if (limitMs <= 0) return { kind: "wall" };
+				if (before !== null) return { kind: before };
+				const startedAt = Date.now();
 
 				const tests = visibleBudget(
 					await (config.visibleTests ?? runVisibleTests)(
@@ -600,16 +686,18 @@ export function sandboxExecutor(config: SandboxExecutorConfig): StageExecutor {
 						patch,
 						found.receipt.testCommand,
 						replacesTests,
-						{ limitMs, signal },
+						{ deadline, signal },
 					),
 				);
 
-				if (signal?.aborted === true) return { kind: "aborted" };
+				const after = expired();
+
+				if (after !== null) return { kind: after };
 
 				if (
 					tests.exitCode === null &&
 					tests.detail === "timeout" &&
-					limitMs < VISIBLE_LIMIT_MS
+					deadline <= startedAt + VISIBLE_LIMIT_MS
 				)
 					return { kind: "wall" };
 
@@ -676,6 +764,14 @@ export function sandboxExecutor(config: SandboxExecutorConfig): StageExecutor {
 		async stopBase(runId) {
 			await baseChecker.stop(runId);
 			await diagnosis.stop(runId);
+		},
+		async stopTests(runId) {
+			const jobs = [...visibleJobs.values()].filter(
+				(job) => job.runId === runId,
+			);
+
+			for (const job of jobs) job.abort.abort();
+			await Promise.allSettled(jobs.map((job) => job.done));
 		},
 		candidate: controllerCandidatePort({
 			stateDir: config.stateDir,
@@ -822,12 +918,40 @@ export function sandboxExecutor(config: SandboxExecutorConfig): StageExecutor {
 					}
 
 					if (job === undefined) {
+						const deadline = visibleDeadline(
+							config.stateDir,
+							{ runId, attempt, round },
+							input.wallMs,
+						);
+
+						if (deadline === null) return { kind: "pending" };
+						const abort = new AbortController();
+
 						job = visibleJob(
-							attempt,
-							testKept({ ...input, round }, kept, ready),
+							{ runId, attempt, abort },
+							testKept(
+								{
+									runId,
+									attempt,
+									round,
+									deadline,
+									signal: abort.signal,
+									progress: input.progress,
+								},
+								kept,
+								ready,
+							),
 						);
 						visibleJobs.set(key, job);
 					}
+
+					const { abort } = job;
+
+					if (input.signal?.aborted === true) abort.abort();
+					else
+						input.signal?.addEventListener("abort", () => abort.abort(), {
+							once: true,
+						});
 
 					if (input.background === true) {
 						if (job.settled === null) return { kind: "pending", testing: true };

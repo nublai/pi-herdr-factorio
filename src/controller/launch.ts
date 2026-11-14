@@ -187,6 +187,25 @@ export type StageOutput =
 			readonly family?: FamilyInput;
 	  };
 
+/** Whether a build's visible tests are still running in the background. */
+export function isTesting(output: StageOutput | null): boolean {
+	return (
+		output instanceof Object &&
+		output.kind === "pending" &&
+		output.testing === true
+	);
+}
+
+/** Whether a build's visible tests ran out of its build wall. */
+export function isWallOut(output: StageOutput | null): boolean {
+	return (
+		output instanceof Object &&
+		output.kind === "build" &&
+		output.result.kind === "unavailable" &&
+		output.result.reason === "wall"
+	);
+}
+
 type WorkflowPin = Pick<ActiveRun, "workflowSha" | "workflowDigest">;
 
 export interface StageExecutor {
@@ -194,6 +213,8 @@ export interface StageExecutor {
 		input: import("../candidate/diagnosis.ts").BaseCheckInput,
 	): Promise<import("../candidate/diagnosis.ts").BaseCheckProgress>;
 	stopBase?(runId: Digest): Promise<void>;
+	/** Aborts a run's background visible tests and resolves once their scope is cleaned up. */
+	stopTests?(runId: Digest): Promise<void>;
 	candidate?: {
 		sweep?(repo: RepoSlug, now: number): Promise<void>;
 		observeMissing?(marker: Marker): Promise<PrObservation>;
@@ -274,9 +295,12 @@ export interface StageExecutor {
 	 * The final text of an execution of the attempt that passed and kept it,
 	 * so a restart can finish a stage without running it again. Untrusted.
 	 * `pending` resumes a recorded session sequence in the same attempt.
-	 * A build's visible tests run here, bounded by `wallMs`, the attempt's
-	 * build wall left. `background` returns `pending` while one run per run
-	 * and round goes on outside the caller; tick-path callers must set it.
+	 * A build's visible tests run here, inside the attempt's build wall: the
+	 * end its builder persisted when it started, or, for an attempt that ran
+	 * no builder, `wallMs` from its first visible run. Without either they do
+	 * not start, and the result is `pending`. `background` returns `pending`
+	 * while one run per run and round goes on outside the caller; tick-path
+	 * callers must set it.
 	 */
 	output(
 		input: {
@@ -285,6 +309,7 @@ export interface StageExecutor {
 			readonly round?: number;
 			readonly execution?: CandidateExecution;
 			readonly background?: boolean;
+			/** The configured build wall, `budget.wallMs`. */
 			readonly wallMs?: number;
 			readonly signal?: AbortSignal;
 			/** Called every few seconds while visible tests run. */
