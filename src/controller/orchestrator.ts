@@ -2213,12 +2213,12 @@ export class Orchestrator {
 	/**
 	 * Tracks a restored run's repair whose visible tests run in the background
 	 * as one of its executions, so drain waits for it and `stop_execution`
-	 * aborts it. `testing` is `null` once recovery has its result.
+	 * aborts it, until recovery has queued its result.
 	 */
 	#watchRecovery(runId: Digest, testing: CandidateExecution | null): void {
 		const watched = this.#recoveredTests.get(runId);
 
-		if (watched !== undefined && watched !== testing?.id) {
+		if (watched !== undefined && !this.#candidateRecovery.has(runId)) {
 			const handle = this.#candidateExecutions.get(watched);
 
 			if (handle !== undefined) handle.settled = true;
