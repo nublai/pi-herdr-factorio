@@ -129,7 +129,11 @@ export type PatchRead =
 	| { readonly kind: "absent" }
 	| {
 			readonly kind: "unavailable";
-			readonly reason: "visible_tests_unavailable" | "build_disk_limit";
+			/** `wall`: the attempt's build wall ran out during visible tests. */
+			readonly reason:
+				| "visible_tests_unavailable"
+				| "build_disk_limit"
+				| "wall";
 	  }
 	| {
 			readonly kind: "blocked";

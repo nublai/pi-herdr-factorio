@@ -16,9 +16,10 @@ import { stopScopeArgv } from "../isolation/scope.ts";
 import { freshDir, launchSandbox, type SandboxHostConfig } from "./launch.ts";
 import { boundedText } from "./receipts.ts";
 
-export const VISIBLE_LIMIT_MS = 180_000;
+// The full suite under one CPU outgrew 180 s on the 2-CPU nubl-factory (#735 pilot, 2026-11-14); Giuseppe approved 600 s.
+export const VISIBLE_LIMIT_MS = 600_000;
 
-const VISIBLE_WARN_MS = 150_000;
+export const VISIBLE_WARN_MS = 450_000;
 
 export function visibleBudget<T extends VisibleTests>(tests: T) {
 	return tests.exitCode !== null &&
@@ -28,27 +29,69 @@ export function visibleBudget<T extends VisibleTests>(tests: T) {
 		: tests;
 }
 
+export type VisibleRunOptions = {
+	/**
+	 * The build wall's absolute end, in ms since the epoch. The run ends at
+	 * the earlier of it and `VISIBLE_LIMIT_MS` after the run starts, with
+	 * preparation, gateway start and launch inside that time.
+	 */
+	readonly deadline?: number;
+	/** Aborting stops the run and its scope; it ends unavailable. */
+	readonly signal?: AbortSignal;
+};
+
 export async function runVisibleTests(
 	config: SandboxHostConfig,
 	base: string,
 	patch: string | Uint8Array,
 	command: string,
 	replacesTests: readonly { readonly path: string }[] = [],
+	options: VisibleRunOptions = {},
 ): Promise<VisibleTests> {
 	const start = Date.now();
+
+	const end = Math.min(
+		start + VISIBLE_LIMIT_MS,
+		options.deadline ?? Number.POSITIVE_INFINITY,
+	);
+
 	const dir = join(config.stateDir, "visible-tests", config.runId);
 	mkdirSync(dir, { recursive: true, mode: 0o700 });
 	const execution = freshDir(join(dir, "execution"));
 	const workspace = join(execution, "tree");
 	let gateway: GatewayHandle | null = null;
 	let unit: string | null = null;
-	let timer: ReturnType<typeof setTimeout> | null = null;
 	let tail = Buffer.alloc(0);
-	let timedOut = false;
 	let environment: VisibleTests["environment"];
+	const { signal } = options;
+	const stop = new AbortController();
+	let timedOut = false;
+
+	const timer = setTimeout(
+		() => {
+			timedOut = true;
+			stop.abort();
+		},
+		Math.max(0, end - Date.now()),
+	);
+
+	const cancel = () => stop.abort();
+	signal?.addEventListener("abort", cancel, { once: true });
+
+	if (signal?.aborted === true) stop.abort();
+
+	const live = () => {
+		if (Date.now() >= end) timedOut = true;
+
+		if (timedOut) throw new Error("timeout");
+
+		if (stop.signal.aborted) throw new Error("aborted");
+	};
 
 	try {
+		live();
 		await patchedTree(base, workspace, patch);
+		live();
 		command = trustedVisiblePlan(
 			base,
 			workspace,
@@ -95,6 +138,7 @@ export async function runVisibleTests(
 
 		if (!started.ok) throw new Error("gateway_unavailable");
 		gateway = started.handle;
+		live();
 
 		const launched = (config.launch ?? launchSandbox)({
 			...config,
@@ -119,23 +163,26 @@ export async function runVisibleTests(
 		launched.child.stdout?.on("data", keep);
 		launched.child.stderr?.on("data", keep);
 		launched.child.stdin?.end();
-		timer = setTimeout(() => {
-			timedOut = true;
 
+		const halt = () => {
 			if (unit !== null) {
 				const [cmd, ...args] = stopScopeArgv(unit);
 				void config.exec(cmd ?? "systemctl", args);
 			}
 
 			launched.child.kill("SIGKILL");
-		}, VISIBLE_LIMIT_MS);
+		};
+
+		stop.signal.addEventListener("abort", halt, { once: true });
+
+		if (stop.signal.aborted) halt();
 
 		const exitCode = await new Promise<number | null>((done) => {
 			launched.child.once("close", done);
 			launched.child.once("error", () => done(null));
 		});
 
-		if (timedOut) throw new Error("timeout");
+		live();
 
 		const resultPath = join(execution, "agent", "visible-exit");
 
@@ -179,7 +226,8 @@ export async function runVisibleTests(
 			wallMs: Date.now() - start,
 		};
 	} finally {
-		if (timer !== null) clearTimeout(timer);
+		clearTimeout(timer);
+		signal?.removeEventListener("abort", cancel);
 
 		if (unit !== null) {
 			const [cmd, ...args] = stopScopeArgv(unit);

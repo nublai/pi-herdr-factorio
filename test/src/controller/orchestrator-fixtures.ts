@@ -442,6 +442,7 @@ export class FakeExecutor implements StageExecutor {
 		this.baseStops.push(runId);
 	}
 
+	stopTests?: StageExecutor["stopTests"];
 	candidate?: StageExecutor["candidate"];
 	readonly candidateSpent = new Map<string, number>();
 	prepareReview?: StageExecutor["prepareReview"];

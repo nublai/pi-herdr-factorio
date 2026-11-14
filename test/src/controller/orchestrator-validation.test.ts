@@ -5,6 +5,7 @@ import {
 	cpSync,
 	existsSync,
 	mkdirSync,
+	renameSync,
 	symlinkSync,
 	readFileSync,
 	statSync,
@@ -13,6 +14,7 @@ import {
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { sandboxExecutor } from "../../../host/sandbox/executor.ts";
+import { manifestDigest } from "../../../host/bundle/manifest.ts";
 import type { JsonValue } from "../../../src/core/json.ts";
 import type { FeedbackObservation } from "../../../src/candidate/feedback.ts";
 import { readAttention } from "../../../src/views/attention.ts";
@@ -129,6 +131,7 @@ import {
 	validationOf,
 	reportOf,
 	refusedReceipt,
+	type FakeExecutor,
 	type HandoffSeen,
 } from "./orchestrator-fixtures.ts";
 
@@ -539,6 +542,189 @@ describe("controller-only validate", () => {
 					launches,
 				);
 			});
+
+	it("recovers candidate executions in the background and retries while visible tests run", {
+		timeout: 30_000,
+	}, async () => {
+		const f = await reviewingRun();
+		f.executor.spentBy.set("review-1", 10);
+		f.executor.behaviors = [{ kind: "hang" }];
+		await f.controller.tick();
+		const requests: Parameters<StageExecutor["output"]>[0][] = [];
+
+		f.executor.output = async (input) => {
+			requests.push(input);
+
+			return { kind: "pending", testing: true };
+		};
+
+		const restarted = f.start();
+		await restarted.tick();
+		await restarted.tick();
+		assert.ok(requests.length >= 2);
+		assert.ok(requests.every((input) => input.background === true));
+		assert.ok(
+			requests.some((input) => input.wallMs === 1_800_000) &&
+				requests.every(
+					(input) => input.wallMs === undefined || input.wallMs === 1_800_000,
+				),
+		);
+		const waiting = f.files.claims.get(runOf(14))?.handoff;
+		assert.ok(waiting?.kind === "selected");
+		assert.notEqual(waiting.work.kind, "held");
+
+		f.executor.output = async () => {
+			throw new ReviewEvidenceUnavailable("review capture unavailable");
+		};
+
+		await restarted.tick();
+		await restarted.tick();
+		const held = f.files.claims.get(runOf(14))?.handoff;
+		assert.ok(held?.kind === "selected");
+		assert.equal(held.work.kind, "held");
+		assert.equal(held.accounts.length, 1);
+	});
+
+	for (const end of ["drain", "wall", "close"] as const)
+		it(`${end === "close" ? "stops" : "drains"} a recovered repair's background visible tests${end === "drain" ? " and saves their result before returning" : end === "wall" ? " and records their wall-out as a budget stop" : " when its issue closes"}`, {
+			timeout: 30_000,
+		}, async () => {
+			const f = await reviewingRun("fail");
+			f.files.accounting = fileRunFiles(f.files.artifactRoot).accounting;
+			f.executor.behaviors = [{ kind: "pass", usage: 11 }];
+			await once(f.controller);
+			f.executor.buildBehavior = { kind: "hang" };
+			await f.controller.tick();
+			const before = f.files.claims.get(runOf(14))?.handoff;
+			assert.ok(before?.kind === "selected");
+			assert.equal(before.work.kind, "rebuilding");
+
+			const repair = before.accounts.find(
+				(account) =>
+					account.execution.stage === "build" && account.execution.round === 1,
+			)?.execution;
+
+			assert.ok(repair !== undefined);
+			f.executor.candidateSpent.set(repair.id, 11);
+			const disk = await repairDisk(f.executor);
+			const wallEnd = Date.now() + 2_000;
+
+			if (end === "wall")
+				builderWindow(disk.state, `build-r1-${repair.attempt}`, {
+					attempt: repair.attempt,
+					deadline: wallEnd,
+				});
+
+			let runs = 0;
+			let signal: AbortSignal | undefined;
+			let release: () => void = () => undefined;
+
+			const gate = new Promise<void>((done) => {
+				release = done;
+			});
+
+			const real = sandboxExecutor({
+				platform: EXE_DEV_PLATFORM,
+				stateDir: disk.state,
+				root: disk.root,
+				xdgRuntimeDir: "/run/user/1000",
+				arch: "x64",
+				usernsLimit: async () => "15000",
+				log: () => {},
+				exec: async (command) => ({
+					code: 0,
+					stdout: command === "bwrap" ? "bubblewrap 0.9.0\n" : "",
+					stderr: "",
+				}),
+				visibleTests: async (_c, _p, _b, command, _r, options) => {
+					runs++;
+					signal = options?.signal;
+					await Promise.race([
+						gate,
+						new Promise((done) =>
+							signal?.addEventListener("abort", done, { once: true }),
+						),
+					]);
+
+					return {
+						command,
+						exitCode: null,
+						reason: "visible_tests_unavailable",
+						detail: "timeout",
+						tail: "",
+						wallMs: 1,
+					};
+				},
+			});
+
+			const walls: (number | undefined)[] = [];
+			const output = f.executor.output.bind(f.executor);
+
+			f.executor.output = async (input) => {
+				if (input.stage !== "build" || input.round !== 1) return output(input);
+				walls.push(input.wallMs);
+
+				return real.output(input);
+			};
+
+			const preflight = f.executor.preflight.bind(f.executor);
+			f.executor.preflight = async () =>
+				(await real.preflight()) && preflight();
+			f.executor.stopTests = real.stopTests;
+			const restarted = f.start();
+			await restarted.tick();
+			await restarted.tick();
+			assert.equal(runs, 1);
+			assert.ok(walls.length > 0);
+			assert.ok(walls.every((wall) => wall === 1_800_000));
+
+			if (end === "close") {
+				const issue = f.github.issues.get(14);
+				assert.ok(issue !== undefined);
+				issue.state = "closed";
+				await restarted.tick();
+				assert.equal(signal?.aborted, true);
+
+				for (let tick = 0; tick < 3; tick++) {
+					await settle();
+					await restarted.tick();
+				}
+			} else {
+				let waits = 0;
+
+				const report = await restarted.drain(async () => {
+					waits++;
+
+					if (end === "wall" ? Date.now() > wallEnd : waits === 3) release();
+					await new Promise((done) => setTimeout(done, 20));
+				});
+
+				assert.ok(report !== null);
+				assert.ok(waits >= 3);
+			}
+
+			assert.equal(runs, 1);
+
+			const saved = await f.files.accounting?.readAttempt(
+				runOf(14),
+				"build",
+				1,
+				repair.attempt,
+			);
+
+			assert.equal(
+				saved?.disposition,
+				end === "wall" ? "budget_stop" : "interrupted",
+			);
+			const after = f.files.claims.get(runOf(14))?.handoff;
+			assert.ok(after?.kind === "selected");
+
+			assert.equal(
+				after.accounts.find((account) => account.execution.id === repair.id)
+					?.settlement,
+				"settled",
+			);
+		});
 
 	for (const restart of [false, true])
 		it(`holds unavailable review evidence on the same known-spend account (restart=${restart})`, async () => {
@@ -5231,3 +5417,84 @@ describe("controller-only validate", () => {
 		assert.equal(executor.launches.length, 3);
 	});
 });
+
+/** The disk a real executor holds for a repair: round 0's patch, round 1's untested patch, the pristine base and an installed bundle. */
+async function repairDisk(executor: FakeExecutor) {
+	const original = executor.builds.get(`${runOf(14)}/build-1`);
+	assert.ok(original?.result.kind === "found");
+
+	const { runId, baseSha, contractDigest, acceptanceDigest } =
+		original.result.receipt;
+
+	const state = stateDir();
+	const base = join(state, "pristine", runId);
+	mkdirSync(base, { recursive: true, mode: 0o700 });
+	writeFileSync(join(base, "value"), "base\n");
+	mkdirSync(join(state, "build-base", "checkouts"), { recursive: true });
+	writeFileSync(
+		join(state, "build-base", "checkouts", `${runId}.json`),
+		JSON.stringify({ sha: baseSha, files: ["value"] }),
+	);
+
+	for (const [round, text] of [
+		[0, "patched\n"],
+		[1, "repaired\n"],
+	] as const) {
+		const tree = join(state, `round-${round}`);
+		mkdirSync(tree);
+		writeFileSync(join(tree, "value"), text);
+		const patch = await collectPatch({ base, workspace: tree });
+		assert.ok(patch.kind === "collected");
+		assert.equal(
+			storePatch(
+				state,
+				{ round, runId, baseSha, contractDigest, acceptanceDigest },
+				patch,
+				{ model: "openai/gpt-6.1-sol", observed: null, commands: [] },
+			).kind,
+			"found",
+		);
+	}
+
+	const root = join(state, "sandbox-root");
+	const staging = join(root, "staging");
+	mkdirSync(staging, { recursive: true });
+	writeFileSync(join(staging, "marker"), "bundle");
+	const hash = await manifestDigest(staging);
+	assert.ok(hash);
+	renameSync(staging, join(root, `assets-${hash}`));
+	symlinkSync(`assets-${hash}`, join(root, "current"));
+
+	return { state, root };
+}
+
+/** The execution window a real builder persists in its stage directory before any model call. */
+function builderWindow(
+	state: string,
+	name: string,
+	window: { readonly attempt: number; readonly deadline: number },
+): void {
+	const dir = join(state, "stages", runOf(14), name);
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(
+		join(dir, "usage.json"),
+		JSON.stringify({
+			version: 1,
+			runId: runOf(14),
+			stage: "build",
+			attempt: window.attempt,
+			startedAt: window.deadline - 1_800_000,
+			deadline: window.deadline,
+			turns: 1,
+			usage: {
+				total: 11,
+				parent: 11,
+				children: 0,
+				gateway: null,
+				unreadChildren: 0,
+				byModel: {},
+			},
+		}),
+		{ mode: 0o600 },
+	);
+}
