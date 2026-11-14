@@ -4096,7 +4096,7 @@ describe("controller-run visible tests", () => {
 				[],
 				end === "abort"
 					? { signal: abort.signal }
-					: { deadline: Date.now() + 100 },
+					: { deadline: Date.now() + 3_000 },
 			);
 
 			assert.equal(result.exitCode, null);
@@ -4126,7 +4126,7 @@ describe("controller-run visible tests", () => {
 			let calls = 0;
 
 			t.mock.method(Date, "now", () =>
-				late === "launch" && calls++ > 0 ? now + 1_000 : now,
+				late === "launch" && calls++ > 0 ? now + 10_000 : now,
 			);
 
 			let launched = false;
@@ -4152,7 +4152,7 @@ describe("controller-run visible tests", () => {
 					exec: async () => ({ code: 0, stdout: "", stderr: "" }),
 					launch: (config) => {
 						launched = true;
-						now += 1_000;
+						now += 10_000;
 						mkdirSync(config.agentDir, { recursive: true });
 						writeFileSync(join(config.agentDir, "visible-exit"), "0\n");
 
@@ -4166,7 +4166,7 @@ describe("controller-run visible tests", () => {
 				"",
 				"npm test",
 				[],
-				{ deadline: now + 100 },
+				{ deadline: now + 5_000 },
 			);
 
 			assert.equal(launched, late === "exit");
