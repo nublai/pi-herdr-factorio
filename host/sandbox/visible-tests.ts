@@ -29,14 +29,24 @@ export function visibleBudget<T extends VisibleTests>(tests: T) {
 		: tests;
 }
 
+export type VisibleRunOptions = {
+	/** This run's deadline from now, capped at `VISIBLE_LIMIT_MS`. */
+	readonly limitMs?: number;
+	/** Aborting stops the test scope; the run ends unavailable. */
+	readonly signal?: AbortSignal;
+};
+
 export async function runVisibleTests(
 	config: SandboxHostConfig,
 	base: string,
 	patch: string | Uint8Array,
 	command: string,
 	replacesTests: readonly { readonly path: string }[] = [],
+	options: VisibleRunOptions = {},
 ): Promise<VisibleTests> {
 	const start = Date.now();
+	const { signal } = options;
+	const aborted = () => signal?.aborted === true;
 	const dir = join(config.stateDir, "visible-tests", config.runId);
 	mkdirSync(dir, { recursive: true, mode: 0o700 });
 	const execution = freshDir(join(dir, "execution"));
@@ -44,11 +54,13 @@ export async function runVisibleTests(
 	let gateway: GatewayHandle | null = null;
 	let unit: string | null = null;
 	let timer: ReturnType<typeof setTimeout> | null = null;
+	let stop: (() => void) | null = null;
 	let tail = Buffer.alloc(0);
 	let timedOut = false;
 	let environment: VisibleTests["environment"];
 
 	try {
+		if (aborted()) throw new Error("aborted");
 		await patchedTree(base, workspace, patch);
 		command = trustedVisiblePlan(
 			base,
@@ -120,16 +132,30 @@ export async function runVisibleTests(
 		launched.child.stdout?.on("data", keep);
 		launched.child.stderr?.on("data", keep);
 		launched.child.stdin?.end();
-		timer = setTimeout(() => {
-			timedOut = true;
 
+		const halt = () => {
 			if (unit !== null) {
 				const [cmd, ...args] = stopScopeArgv(unit);
 				void config.exec(cmd ?? "systemctl", args);
 			}
 
 			launched.child.kill("SIGKILL");
-		}, VISIBLE_LIMIT_MS);
+		};
+
+		timer = setTimeout(
+			() => {
+				timedOut = true;
+				halt();
+			},
+			Math.max(
+				0,
+				Math.min(options.limitMs ?? VISIBLE_LIMIT_MS, VISIBLE_LIMIT_MS),
+			),
+		);
+		stop = halt;
+		signal?.addEventListener("abort", halt, { once: true });
+
+		if (aborted()) halt();
 
 		const exitCode = await new Promise<number | null>((done) => {
 			launched.child.once("close", done);
@@ -137,6 +163,8 @@ export async function runVisibleTests(
 		});
 
 		if (timedOut) throw new Error("timeout");
+
+		if (aborted()) throw new Error("aborted");
 
 		const resultPath = join(execution, "agent", "visible-exit");
 
@@ -181,6 +209,8 @@ export async function runVisibleTests(
 		};
 	} finally {
 		if (timer !== null) clearTimeout(timer);
+
+		if (stop !== null) signal?.removeEventListener("abort", stop);
 
 		if (unit !== null) {
 			const [cmd, ...args] = stopScopeArgv(unit);

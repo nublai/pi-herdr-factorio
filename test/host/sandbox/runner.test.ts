@@ -78,7 +78,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
-import { after, before, describe, it } from "node:test";
+import { after, before, describe, it, type TestContext } from "node:test";
 import {
 	bareModel,
 	runStage,
@@ -3650,7 +3650,276 @@ describe("private build executor", () => {
 	});
 });
 
+describe("visible tests inside the build wall", () => {
+	async function keptPatch(t: TestContext) {
+		const dir = mkdtempSync(join(tmpdir(), "factory-visible-wall-"));
+		t.after(() => rmSync(dir, { recursive: true, force: true }));
+		const stateDir = join(dir, "state");
+		const base = join(stateDir, "pristine", RUN);
+		const workspace = join(dir, "candidate");
+		mkdirSync(base, { recursive: true });
+		mkdirSync(workspace);
+		writeFileSync(join(base, "value"), "base\n");
+		writeFileSync(join(workspace, "value"), "candidate\n");
+		mkdirSync(join(stateDir, "build-base", "checkouts"), { recursive: true });
+		writeFileSync(
+			join(stateDir, "build-base", "checkouts", `${RUN}.json`),
+			JSON.stringify({ sha: "a".repeat(40), files: ["value"] }),
+		);
+		const patch = await collectPatch({ base, workspace });
+		assert.ok(patch.kind === "collected");
+
+		const binding = {
+			runId: digest(RUN),
+			baseSha: "a".repeat(40),
+			contractDigest: digestOf("contract"),
+			acceptanceDigest: digestOf("suite"),
+		};
+
+		storePatch(stateDir, binding, patch, {
+			model: "m",
+			observed: null,
+			commands: [],
+		});
+		const root = join(dir, "bundle");
+		const staging = join(root, "staging");
+		mkdirSync(staging, { recursive: true });
+		writeFileSync(join(staging, "marker"), "bundle");
+		const hash = await manifestDigest(staging);
+		assert.ok(hash);
+		fs.renameSync(staging, join(root, `assets-${hash}`));
+		symlinkSync(`assets-${hash}`, join(root, "current"));
+
+		return { stateDir, root };
+	}
+
+	function executorFor(
+		kept: { stateDir: string; root: string },
+		visibleTests: NonNullable<
+			executorModule.SandboxExecutorConfig["visibleTests"]
+		>,
+	) {
+		return executorModule.sandboxExecutor({
+			platform: EXE_DEV_PLATFORM,
+			stateDir: kept.stateDir,
+			root: kept.root,
+			arch: "x64",
+			usernsLimit: async () => "15000",
+			xdgRuntimeDir: "/run/user/1000",
+			log: () => {},
+			fetchTarball: async () => null,
+			exec: async (command) => ({
+				code: 0,
+				stdout: command === "bwrap" ? "bubblewrap 0.9.0\n" : "",
+				stderr: "",
+			}),
+			visibleTests,
+		});
+	}
+
+	const request = { runId: digest(RUN), stage: "build" as const, attempt: 1 };
+
+	it("shares one persisted build-wall deadline between candidate and base, heartbeating throughout", {
+		timeout: 30_000,
+	}, async (t) => {
+		const kept = await keptPatch(t);
+		const limits: (number | undefined)[] = [];
+
+		const visibleTests: NonNullable<
+			executorModule.SandboxExecutorConfig["visibleTests"]
+		> = async (_config, _pristine, patch, command, _replaces, options) => {
+			limits.push(options?.limitMs);
+
+			if (patch.length > 0) {
+				t.mock.timers.tick(500_000);
+
+				return { command, exitCode: 1, tail: "candidate", wallMs: 500_000 };
+			}
+
+			t.mock.timers.tick(400_000);
+
+			return {
+				command,
+				exitCode: null,
+				reason: "visible_tests_unavailable",
+				detail: "timeout",
+				tail: "base",
+				wallMs: 400_000,
+			};
+		};
+
+		const first = executorFor(kept, visibleTests);
+		const restarted = executorFor(kept, visibleTests);
+		assert.equal(await first.preflight(), true);
+		assert.equal(await restarted.preflight(), true);
+		t.mock.timers.enable({ apis: ["Date", "setInterval"], now: 1_000_000 });
+		let beats = 0;
+
+		assert.deepEqual(
+			await first.output({
+				...request,
+				wallMs: 900_000,
+				progress: () => {
+					beats++;
+				},
+			}),
+			{ kind: "build", result: { kind: "unavailable", reason: "wall" } },
+		);
+		assert.deepEqual(limits, [VISIBLE_LIMIT_MS, 400_000]);
+		assert.ok(beats >= 90, `heartbeats ${beats}`);
+		assert.equal(
+			existsSync(join(kept.stateDir, "patches", RUN, "tests.json")),
+			false,
+		);
+		assert.equal(
+			existsSync(join(kept.stateDir, "patches", RUN, "candidate-tests.json")),
+			true,
+		);
+		assert.deepEqual(
+			await restarted.output({ ...request, wallMs: 1_800_000 }),
+			{ kind: "build", result: { kind: "unavailable", reason: "wall" } },
+		);
+		assert.equal(limits.length, 2);
+	});
+
+	it("keeps a visible-limit timeout retryable when the wall has time left", {
+		timeout: 30_000,
+	}, async (t) => {
+		const kept = await keptPatch(t);
+		const limits: (number | undefined)[] = [];
+
+		const executor = executorFor(
+			kept,
+			async (_config, _pristine, _patch, command, _replaces, options) => {
+				limits.push(options?.limitMs);
+
+				return {
+					command,
+					exitCode: null,
+					reason: "visible_tests_unavailable",
+					detail: "timeout",
+					tail: "candidate",
+					wallMs: VISIBLE_LIMIT_MS,
+				};
+			},
+		);
+
+		assert.equal(await executor.preflight(), true);
+		assert.deepEqual(await executor.output({ ...request, wallMs: 1_800_000 }), {
+			kind: "build",
+			result: { kind: "unavailable", reason: "visible_tests_unavailable" },
+		});
+		assert.deepEqual(limits, [VISIBLE_LIMIT_MS]);
+	});
+
+	it("runs one background visible run per run and round and returns pending until it ends", {
+		timeout: 30_000,
+	}, async (t) => {
+		const kept = await keptPatch(t);
+		let runs = 0;
+		let release: () => void = () => undefined;
+
+		const gate = new Promise<void>((done) => {
+			release = done;
+		});
+
+		const executor = executorFor(kept, async (_c, _p, _b, command) => {
+			runs++;
+			await gate;
+
+			return { command, exitCode: 0, tail: "ok", wallMs: 1 };
+		});
+
+		assert.equal(await executor.preflight(), true);
+		const background = { ...request, background: true, wallMs: 1_800_000 };
+		const pending = { kind: "pending", testing: true };
+		assert.deepEqual(await executor.output(background), pending);
+		assert.deepEqual(await executor.output(background), pending);
+		assert.equal(runs, 1);
+		release();
+		await new Promise((done) => setImmediate(done));
+		const ended = await executor.output(background);
+		assert.ok(ended instanceof Object && ended.kind === "build");
+		assert.equal(ended.result.kind, "found");
+		assert.equal(runs, 1);
+	});
+});
+
 describe("controller-run visible tests", () => {
+	for (const end of ["abort", "deadline"] as const)
+		it(`stops the visible-test scope on ${end === "abort" ? "the run's abort signal" : "a deadline below the limit"}`, {
+			timeout: 30_000,
+		}, async (t) => {
+			const root = mkdtempSync(join(tmpdir(), "factory-visible-stop-"));
+			t.after(() => rmSync(root, { recursive: true, force: true }));
+			const base = join(root, "base");
+			mkdirSync(base);
+			writeFileSync(
+				join(base, "package.json"),
+				JSON.stringify({ scripts: { test: "node --test" } }),
+			);
+			const calls: string[][] = [];
+			const abort = new AbortController();
+			const started = Date.now();
+
+			const result = await runVisibleTests(
+				{
+					platform: EXE_DEV_PLATFORM,
+					stateDir: root,
+					bundleDir: "unused",
+					workspace: "",
+					runId: digest(RUN),
+					stage: "build",
+					attempt: 1,
+					tools: [],
+					arch: "x86_64",
+					xdgRuntimeDir: "/run/user/1000",
+					assetsDigest: "e".repeat(64),
+					versions: {
+						pi: "1.4.0",
+						piHerdrAgents: "3.3.1",
+						piHerdrPstack: "0.5.0",
+					},
+					exec: async (command, args) => {
+						calls.push([command, ...args]);
+
+						return { code: 0, stdout: "", stderr: "" };
+					},
+					launch: (config) => {
+						mkdirSync(config.agentDir);
+
+						if (end === "abort") setTimeout(() => abort.abort(), 100);
+
+						return {
+							unit: "fixture",
+							child: spawn(
+								process.execPath,
+								["-e", "setTimeout(() => {}, 60_000)"],
+								{
+									env: { PATH: "/usr/bin:/bin" },
+								},
+							),
+						};
+					},
+				},
+				base,
+				"",
+				"npm test",
+				[],
+				end === "abort" ? { signal: abort.signal } : { limitMs: 100 },
+			);
+
+			assert.equal(result.exitCode, null);
+			assert.equal(
+				result.detail,
+				end === "abort" ? "sandbox_unavailable" : "timeout",
+			);
+			assert.ok(Date.now() - started < 20_000);
+			assert.ok(
+				calls.filter((call) => call.includes("fixture.scope")).length >= 2,
+			);
+		});
+
 	it("types a sandbox process exit before the test command starts as infrastructure failure", async (t) => {
 		const root = mkdtempSync(join(tmpdir(), "factory-visible-not-started-"));
 		t.after(() => rmSync(root, { recursive: true, force: true }));

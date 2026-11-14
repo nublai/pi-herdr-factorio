@@ -23,6 +23,7 @@ import {
 	readRepairBuildResult,
 	roundKey,
 	storePatch,
+	type PatchRead,
 	type VisibleTests,
 } from "../../src/candidate/build.ts";
 import { parseReviewReceipt } from "../../src/candidate/codec.ts";
@@ -55,6 +56,7 @@ import type {
 	StageExecutor,
 	StageLaunch,
 	StageLaunchInput,
+	StageOutput,
 } from "../../src/controller/launch.ts";
 import type { Log } from "../../src/controller/orchestrator.ts";
 import type { PlatformProfile } from "../../src/trust/platform.ts";
@@ -106,7 +108,11 @@ import { stageResult } from "./result.ts";
 import { prepareCandidateReview, runReview } from "./review.ts";
 import { runStage } from "./run-stage.ts";
 import { runSpecify } from "./specify.ts";
-import { runVisibleTests, visibleBudget } from "./visible-tests.ts";
+import {
+	runVisibleTests,
+	VISIBLE_LIMIT_MS,
+	visibleBudget,
+} from "./visible-tests.ts";
 
 /** Where `host/install/provision.sh` installs content-addressed asset bundles. */
 export const SANDBOX_ROOT = "/var/lib/factory-sandbox";
@@ -290,6 +296,73 @@ function cleanupBuildAgents(
 	}
 }
 
+/** Shorter than any stage's stall limit, so a running visible test never reads as stalled. */
+export const VISIBLE_HEARTBEAT_MS = 10_000;
+
+type VisibleRequest = {
+	readonly runId: Digest;
+	readonly attempt: number;
+	readonly round: number;
+	readonly wallMs?: number;
+	readonly signal?: AbortSignal;
+	readonly progress?: () => void;
+};
+
+type VisibleJob = {
+	readonly attempt: number;
+	readonly done: Promise<StageOutput | null>;
+	settled:
+		| { readonly kind: "fulfilled"; readonly value: StageOutput | null }
+		| { readonly kind: "rejected" }
+		| null;
+};
+
+function visibleJob(
+	attempt: number,
+	done: Promise<StageOutput | null>,
+): VisibleJob {
+	const job: VisibleJob = { attempt, done, settled: null };
+
+	done.then(
+		(value) => {
+			job.settled = { kind: "fulfilled", value };
+		},
+		() => {
+			job.settled = { kind: "rejected" };
+		},
+	);
+
+	return job;
+}
+
+/**
+ * The absolute end of an attempt's build wall for its visible tests, kept on
+ * disk from the first visible run so a restart cannot reset it. Unbounded
+ * when neither the caller nor a record gives a wall; an unreadable record
+ * has no time left.
+ */
+function visibleDeadline(
+	stateDir: string,
+	runId: Digest,
+	name: string,
+	wallMs: number | undefined,
+): number {
+	const path = join(stateDir, "visible-tests", runId, `${name}.deadline`);
+
+	if (wallMs !== undefined) {
+		mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+		publishFile(path, `${Date.now() + Math.max(0, wallMs)}\n`);
+	} else if (!existsSync(path)) return Number.POSITIVE_INFINITY;
+
+	try {
+		const deadline = Number(regularText(path, 64).trim());
+
+		return Number.isSafeInteger(deadline) ? deadline : 0;
+	} catch {
+		return 0;
+	}
+}
+
 function cleanupBuildBase(stateDir: string, runId: Digest): void {
 	rmSync(join(stateDir, "build-base", "checkouts", `${runId}.json`), {
 		force: true,
@@ -391,6 +464,211 @@ export function sandboxExecutor(config: SandboxExecutorConfig): StageExecutor {
 		await rm(audit, { force: true });
 
 		return started.ok;
+	};
+
+	const visibleJobs = new Map<string, VisibleJob>();
+
+	const testKept = async (
+		request: VisibleRequest,
+		found: Extract<PatchRead, { kind: "found" }>,
+		tested: { readonly bundle: Bundle; readonly arch: SeccompArch },
+	): Promise<StageOutput | null> => {
+		const { runId, attempt, round, signal } = request;
+
+		const deadline = visibleDeadline(
+			config.stateDir,
+			runId,
+			stageName("build", attempt, round),
+			request.wallMs,
+		);
+
+		const beat =
+			request.progress === undefined
+				? null
+				: setInterval(request.progress, VISIBLE_HEARTBEAT_MS);
+
+		request.progress?.();
+
+		const stopped = (why: "wall" | "aborted"): StageOutput => {
+			config.log("visible_tests_unavailable", { runId, why });
+			cleanupBuildBase(config.stateDir, runId);
+
+			return {
+				kind: "build",
+				result: {
+					kind: "unavailable",
+					reason: why === "wall" ? "wall" : "visible_tests_unavailable",
+				},
+			};
+		};
+
+		try {
+			if (deadline <= Date.now()) return stopped("wall");
+			let kept: PatchRead = found;
+			const base = join(config.stateDir, "pristine", runId);
+
+			if (
+				!existsSync(base) ||
+				!existsSync(
+					join(config.stateDir, "build-base", "checkouts", `${runId}.json`),
+				)
+			) {
+				const bound = await fileRunFiles(config.stateDir).readContract(runId);
+
+				if (bound.kind !== "found")
+					return {
+						kind: "build",
+						result: { kind: "blocked", reason: "patch_invalid" },
+					};
+				mkdirSync(base, { recursive: true, mode: 0o700 });
+
+				const checked = await checkoutWorkspace({
+					stateDir: join(config.stateDir, "build-base"),
+					workspace: base,
+					runId,
+					repo: bound.contract.base.repo,
+					sha: bound.contract.base.sha,
+					fetch: config.fetchTarball ?? ghTarball,
+				});
+
+				if (checked.kind !== "ready") {
+					cleanupBuildBase(config.stateDir, runId);
+					const candidate = found.receipt.candidateTests;
+
+					if (candidate !== undefined)
+						return {
+							kind: "build",
+							result: finishPatch(
+								config.stateDir,
+								patchBinding(found.receipt),
+								{
+									...candidate,
+									base: {
+										command: candidate.command,
+										exitCode: null,
+										reason: "visible_tests_unavailable",
+										tail: "Visible base could not be prepared",
+										wallMs: 0,
+									},
+								},
+							),
+						};
+
+					return {
+						kind: "build",
+						result: {
+							kind: "unavailable",
+							reason: "visible_tests_unavailable",
+						},
+					};
+				}
+			}
+
+			const contract = await fileRunFiles(config.stateDir).readContract(runId);
+
+			const testConfig: SandboxHostConfig = {
+				platform: config.platform,
+				stateDir: config.stateDir,
+				bundleDir: tested.bundle.dir,
+				workspace: "",
+				runId,
+				stage: "build",
+				attempt,
+				tools: [],
+				arch: tested.arch,
+				xdgRuntimeDir: config.xdgRuntimeDir,
+				assetsDigest: tested.bundle.digest,
+				versions: PINNED_VERSIONS,
+				exec: config.exec,
+			};
+
+			const runTests = async (
+				patch: string | Uint8Array,
+				replacesTests: readonly { readonly path: string }[] = [],
+			): Promise<
+				| { readonly kind: "ran"; readonly tests: VisibleTests }
+				| { readonly kind: "wall" | "aborted" }
+			> => {
+				const limitMs = Math.min(VISIBLE_LIMIT_MS, deadline - Date.now());
+
+				if (limitMs <= 0) return { kind: "wall" };
+
+				const tests = visibleBudget(
+					await (config.visibleTests ?? runVisibleTests)(
+						testConfig,
+						base,
+						patch,
+						found.receipt.testCommand,
+						replacesTests,
+						{ limitMs, signal },
+					),
+				);
+
+				if (signal?.aborted === true) return { kind: "aborted" };
+
+				if (
+					tests.exitCode === null &&
+					tests.detail === "timeout" &&
+					limitMs < VISIBLE_LIMIT_MS
+				)
+					return { kind: "wall" };
+
+				if ("nearLimit" in tests && tests.nearLimit === true)
+					config.log("visible_tests_near_limit", {
+						runId,
+						wallMs: tests.wallMs,
+						target: patch.length > 0 ? "candidate" : "base",
+					});
+
+				return { kind: "ran", tests };
+			};
+
+			const binding = patchBinding(found.receipt);
+
+			const candidate =
+				found.receipt.candidateTests === undefined
+					? await runTests(
+							found.patch,
+							contract.kind === "found" &&
+								contract.digest === found.receipt.contractDigest
+								? (contract.contract.replacesTests ?? [])
+								: [],
+						)
+					: { kind: "ran" as const, tests: found.receipt.candidateTests };
+
+			if (candidate.kind !== "ran") return stopped(candidate.kind);
+			let tests: VisibleTests = candidate.tests;
+
+			if (tests.exitCode !== null && tests.exitCode !== 0) {
+				const checkpoint = finishPatch(
+					config.stateDir,
+					binding,
+					tests,
+					"candidate",
+				);
+
+				if (checkpoint.kind !== "found")
+					return { kind: "build", result: checkpoint };
+
+				const control = await runTests("");
+
+				if (control.kind !== "ran") return stopped(control.kind);
+				tests = { ...tests, base: control.tests };
+			}
+
+			kept = finishPatch(config.stateDir, binding, tests);
+
+			if (kept.kind === "unavailable")
+				config.log("visible_tests_unavailable", {
+					runId,
+					why: tests.detail ?? "sandbox_unavailable",
+				});
+			cleanupBuildBase(config.stateDir, runId);
+
+			return kept.kind === "absent" ? null : { kind: "build", result: kept };
+		} finally {
+			if (beat !== null) clearInterval(beat);
+		}
 	};
 
 	return {
@@ -535,152 +813,36 @@ export function sandboxExecutor(config: SandboxExecutorConfig): StageExecutor {
 					kept.receipt.visibleTests === null
 				) {
 					if (ready === null) return { kind: "pending" };
-					const base = join(config.stateDir, "pristine", runId);
+					const key = roundKey(runId, round);
+					let job = visibleJobs.get(key);
 
-					if (
-						!existsSync(base) ||
-						!existsSync(
-							join(config.stateDir, "build-base", "checkouts", `${runId}.json`),
-						)
-					) {
-						const bound = await fileRunFiles(config.stateDir).readContract(
-							runId,
-						);
-
-						if (bound.kind !== "found")
-							return {
-								kind: "build",
-								result: { kind: "blocked", reason: "patch_invalid" },
-							};
-						mkdirSync(base, { recursive: true, mode: 0o700 });
-
-						const checked = await checkoutWorkspace({
-							stateDir: join(config.stateDir, "build-base"),
-							workspace: base,
-							runId,
-							repo: bound.contract.base.repo,
-							sha: bound.contract.base.sha,
-							fetch: config.fetchTarball ?? ghTarball,
-						});
-
-						if (checked.kind !== "ready") {
-							cleanupBuildBase(config.stateDir, runId);
-							const candidate = kept.receipt.candidateTests;
-
-							if (candidate !== undefined)
-								return {
-									kind: "build",
-									result: finishPatch(
-										config.stateDir,
-										patchBinding(kept.receipt),
-										{
-											...candidate,
-											base: {
-												command: candidate.command,
-												exitCode: null,
-												reason: "visible_tests_unavailable",
-												tail: "Visible base could not be prepared",
-												wallMs: 0,
-											},
-										},
-									),
-								};
-
-							return {
-								kind: "build",
-								result: {
-									kind: "unavailable",
-									reason: "visible_tests_unavailable",
-								},
-							};
-						}
+					if (job?.settled != null && job.attempt !== attempt) {
+						visibleJobs.delete(key);
+						job = undefined;
 					}
 
-					const contract = await fileRunFiles(config.stateDir).readContract(
-						runId,
-					);
-
-					const testConfig: SandboxHostConfig = {
-						platform: config.platform,
-						stateDir: config.stateDir,
-						bundleDir: ready.bundle.dir,
-						workspace: "",
-						runId,
-						stage: "build",
-						attempt,
-						tools: [],
-						arch: ready.arch,
-						xdgRuntimeDir: config.xdgRuntimeDir,
-						assetsDigest: ready.bundle.digest,
-						versions: PINNED_VERSIONS,
-						exec: config.exec,
-					};
-
-					const runTests = async (
-						...args: Parameters<typeof runVisibleTests>
-					) => {
-						const tests = visibleBudget(
-							await (config.visibleTests ?? runVisibleTests)(...args),
+					if (job === undefined) {
+						job = visibleJob(
+							attempt,
+							testKept({ ...input, round }, kept, ready),
 						);
-
-						if ("nearLimit" in tests && tests.nearLimit === true)
-							config.log("visible_tests_near_limit", {
-								runId,
-								wallMs: tests.wallMs,
-								target: args[2].length > 0 ? "candidate" : "base",
-							});
-
-						return tests;
-					};
-
-					const binding = patchBinding(kept.receipt);
-
-					let tests: VisibleTests =
-						kept.receipt.candidateTests ??
-						(await runTests(
-							testConfig,
-							base,
-							kept.patch,
-							kept.receipt.testCommand,
-							contract.kind === "found" &&
-								contract.digest === kept.receipt.contractDigest
-								? (contract.contract.replacesTests ?? [])
-								: [],
-						));
-
-					if (tests.exitCode !== null && tests.exitCode !== 0) {
-						const checkpoint = finishPatch(
-							config.stateDir,
-							binding,
-							tests,
-							"candidate",
-						);
-
-						if (checkpoint.kind !== "found")
-							return { kind: "build", result: checkpoint };
-						tests = {
-							...tests,
-							base: await runTests(
-								testConfig,
-								base,
-								"",
-								kept.receipt.testCommand,
-							),
-						};
+						visibleJobs.set(key, job);
 					}
 
-					kept = finishPatch(
-						config.stateDir,
-						patchBinding(kept.receipt),
-						tests,
-					);
+					if (input.background === true) {
+						if (job.settled === null) return { kind: "pending", testing: true };
+						visibleJobs.delete(key);
 
-					if (kept.kind === "unavailable")
-						config.log("visible_tests_unavailable", {
-							runId,
-							why: tests.detail ?? "sandbox_unavailable",
-						});
-					cleanupBuildBase(config.stateDir, runId);
+						return job.settled.kind === "rejected"
+							? await job.done
+							: job.settled.value;
+					}
+
+					try {
+						return await job.done;
+					} finally {
+						if (visibleJobs.get(key) === job) visibleJobs.delete(key);
+					}
 				}
 
 				return kept.kind === "absent" ? null : { kind: "build", result: kept };

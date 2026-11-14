@@ -44,11 +44,14 @@ export async function recoverCandidate(
 	results: CandidateResult[],
 	recovery: Set<Digest>,
 	run: ActiveRun,
+	wallMs: number | undefined,
 ): Promise<void> {
 	const state = run.handoff;
 	const executor = input.executor;
 
 	if (state?.kind !== "selected" || !(await executor.reconciled())) return;
+
+	const recovered: CandidateResult[] = [];
 
 	for (const account of state.accounts) {
 		if (account.settlement === "settled") continue;
@@ -73,6 +76,8 @@ export async function recoverCandidate(
 				execution,
 				workflowSha: execution.workflowSha,
 				workflowDigest: execution.workflowDigest,
+				background: true,
+				wallMs,
 			});
 		} catch (error) {
 			if (
@@ -80,9 +85,12 @@ export async function recoverCandidate(
 				execution.stage !== "review"
 			)
 				throw error;
-			queueReviewRefusal(results, execution, tokens);
+			queueReviewRefusal(recovered, execution, tokens);
 			continue;
 		}
+
+		if (output instanceof Object && output.kind === "pending" && output.testing)
+			return;
 
 		const ended = await input.files.accounting?.readAttempt(
 			run.runId,
@@ -137,7 +145,7 @@ export async function recoverCandidate(
 							? { kind: "no_change" }
 							: { kind: "failed" },
 			};
-		results.push({
+		recovered.push({
 			runId: run.runId,
 			event,
 			refusal:
@@ -154,5 +162,6 @@ export async function recoverCandidate(
 		});
 	}
 
+	results.push(...recovered);
 	recovery.delete(run.runId);
 }

@@ -540,6 +540,48 @@ describe("controller-only validate", () => {
 				);
 			});
 
+	it("recovers candidate executions in the background and retries while visible tests run", {
+		timeout: 30_000,
+	}, async () => {
+		const f = await reviewingRun();
+		f.executor.spentBy.set("review-1", 10);
+		f.executor.behaviors = [{ kind: "hang" }];
+		await f.controller.tick();
+		const requests: Parameters<StageExecutor["output"]>[0][] = [];
+
+		f.executor.output = async (input) => {
+			requests.push(input);
+
+			return { kind: "pending", testing: true };
+		};
+
+		const restarted = f.start();
+		await restarted.tick();
+		await restarted.tick();
+		assert.ok(requests.length >= 2);
+		assert.ok(requests.every((input) => input.background === true));
+		assert.ok(
+			requests.some((input) => input.wallMs === 1_800_000) &&
+				requests.every(
+					(input) => input.wallMs === undefined || input.wallMs === 1_800_000,
+				),
+		);
+		const waiting = f.files.claims.get(runOf(14))?.handoff;
+		assert.ok(waiting?.kind === "selected");
+		assert.notEqual(waiting.work.kind, "held");
+
+		f.executor.output = async () => {
+			throw new ReviewEvidenceUnavailable("review capture unavailable");
+		};
+
+		await restarted.tick();
+		await restarted.tick();
+		const held = f.files.claims.get(runOf(14))?.handoff;
+		assert.ok(held?.kind === "selected");
+		assert.equal(held.work.kind, "held");
+		assert.equal(held.accounts.length, 1);
+	});
+
 	for (const restart of [false, true])
 		it(`holds unavailable review evidence on the same known-spend account (restart=${restart})`, async () => {
 			const f = await reviewingRun();

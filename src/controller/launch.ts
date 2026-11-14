@@ -176,7 +176,8 @@ export type StageOutput =
 	| { readonly kind: "review"; readonly receipt: ReviewReceipt }
 	| { readonly kind: "build"; readonly result: PatchRead }
 	| string
-	| { readonly kind: "pending" }
+	/** `testing`: a build's visible tests are running in the background. */
+	| { readonly kind: "pending"; readonly testing?: true }
 	| {
 			readonly kind: "output";
 			readonly text: string;
@@ -273,6 +274,9 @@ export interface StageExecutor {
 	 * The final text of an execution of the attempt that passed and kept it,
 	 * so a restart can finish a stage without running it again. Untrusted.
 	 * `pending` resumes a recorded session sequence in the same attempt.
+	 * A build's visible tests run here, bounded by `wallMs`, the attempt's
+	 * build wall left. `background` returns `pending` while one run per run
+	 * and round goes on outside the caller; tick-path callers must set it.
 	 */
 	output(
 		input: {
@@ -280,6 +284,11 @@ export interface StageExecutor {
 			readonly attempt: number;
 			readonly round?: number;
 			readonly execution?: CandidateExecution;
+			readonly background?: boolean;
+			readonly wallMs?: number;
+			readonly signal?: AbortSignal;
+			/** Called every few seconds while visible tests run. */
+			readonly progress?: () => void;
 		} & (
 			| { readonly stage: Exclude<ModelStage, "review"> }
 			| ({ readonly stage: "review" } & WorkflowPin)

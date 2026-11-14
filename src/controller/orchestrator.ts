@@ -704,7 +704,25 @@ export class Orchestrator {
 					(run.phase.kind === "base_check" && run.phase.checking),
 			);
 
-		if (!running() && this.#candidateResults.length === 0) return null;
+		const testing = [...this.state.runs.values()].filter(
+			(run) =>
+				this.#enabled &&
+				run.stage === "build" &&
+				run.phase.kind === "recovering",
+		);
+
+		if (
+			!running() &&
+			this.#candidateResults.length === 0 &&
+			testing.length === 0
+		)
+			return null;
+
+		for (const run of testing) {
+			if (run.phase.kind !== "recovering") continue;
+			await this.#pollRecovering(run, run.phase.output, false);
+			await this.#sync(run);
+		}
 
 		while (running()) {
 			await this.#observeCandidates(false);
@@ -1126,21 +1144,7 @@ export class Orchestrator {
 
 			if (run.stage === "build" && !this.#enabled) return { kind: "unclaimed" };
 
-			const output =
-				run.stage === "build"
-					? await this.#input.executor.output({
-							runId: run.runId,
-							stage: "build",
-							attempt: run.attempt,
-							round: run.round ?? 0,
-						})
-					: run.phase.output;
-
-			const recovered = await this.#recoverOutput(run, output);
-			const limits = this.#limits();
-
-			if (!recovered && limits !== null)
-				this.#endStage(run, "interrupted", 0, limits);
+			await this.#pollRecovering(run, run.phase.output, true);
 
 			return { kind: "unclaimed" };
 		}
@@ -1177,6 +1181,40 @@ export class Orchestrator {
 		}
 
 		return this.#confirmedBy(run);
+	}
+
+	/** Finishes a recovering stage from its kept output. A build's visible tests run in the background unless `background` is false. */
+	async #pollRecovering(
+		run: ActiveRun,
+		kept: StageOutput,
+		background: boolean,
+	): Promise<void> {
+		const wallMs = this.#buildWallMs();
+
+		if (run.stage === "build" && wallMs === undefined) return;
+
+		const output =
+			run.stage === "build"
+				? await this.#input.executor.output({
+						runId: run.runId,
+						stage: "build",
+						attempt: run.attempt,
+						round: run.round ?? 0,
+						background,
+						wallMs,
+					})
+				: kept;
+
+		const recovered = await this.#recoverOutput(run, output);
+		const limits = this.#limits();
+
+		if (!recovered && limits !== null)
+			this.#endStage(run, "interrupted", 0, limits);
+	}
+
+	/** A fresh build attempt's wall, which its visible tests share. */
+	#buildWallMs(): number | undefined {
+		return this.#config?.stages.build.budget.wallMs;
 	}
 
 	async #recheckChanged(
@@ -2629,6 +2667,8 @@ export class Orchestrator {
 							round: run.round ?? 0,
 							workflowSha: run.workflowSha,
 							workflowDigest: run.workflowDigest,
+							background: true,
+							wallMs: this.#buildWallMs(),
 						})
 					: null;
 
@@ -2653,6 +2693,8 @@ export class Orchestrator {
 							round: run.round ?? 0,
 							workflowSha: run.workflowSha,
 							workflowDigest: run.workflowDigest,
+							background: true,
+							wallMs: this.#buildWallMs(),
 						})
 						.catch(() => null)
 				: null;
@@ -3328,6 +3370,8 @@ export class Orchestrator {
 				stage,
 				attempt: run.attempt,
 				round: run.round ?? 0,
+				background: true,
+				wallMs: config.stages.build.budget.wallMs,
 			});
 
 			if (await this.#recoverOutput(run, kept)) {
@@ -3555,13 +3599,24 @@ export class Orchestrator {
 										stage,
 										attempt,
 										round: run.round ?? 0,
+										wallMs: budget.wallMs - result.receipt.wallMs,
+										signal: abort.signal,
+										progress: () => {
+											phase.lastProgressAt = clock.now();
+										},
 									})
 									.catch(() => null)
 							: null;
 
+					const walled =
+						output instanceof Object &&
+						output.kind === "build" &&
+						output.result.kind === "unavailable" &&
+						output.result.reason === "wall";
+
 					phase.result = withFamily(
 						{
-							kind: result.kind,
+							kind: walled ? "budget_exhausted" : result.kind,
 							wallMs: result.receipt.wallMs,
 							model:
 								result.receipt.fallback?.requested ??
@@ -3570,10 +3625,14 @@ export class Orchestrator {
 								result.receipt.fallback?.observed ??
 								result.receipt.models.observed,
 							usage: prior + result.usage,
-							cap: result.kind === "budget_exhausted" ? result.cap : undefined,
+							cap: walled
+								? "wall"
+								: result.kind === "budget_exhausted"
+									? result.cap
+									: undefined,
 							refusal: result.receipt.refusal,
 							build:
-								output instanceof Object && output.kind === "build"
+								output instanceof Object && output.kind === "build" && !walled
 									? output.result
 									: undefined,
 							output:
@@ -3760,6 +3819,7 @@ export class Orchestrator {
 					this.#candidateResults,
 					this.#candidateRecovery,
 					run,
+					this.#buildWallMs(),
 				);
 
 			for (let index = 0; index < this.#candidateResults.length; ) {
@@ -4382,8 +4442,18 @@ export class Orchestrator {
 								execution,
 								workflowSha: execution.workflowSha,
 								workflowDigest: execution.workflowDigest,
+								wallMs:
+									config.stages[execution.stage].budget.wallMs -
+									result.receipt.wallMs,
+								signal: abort.signal,
 							})
 						: null;
+
+				const walled =
+					output instanceof Object &&
+					output.kind === "build" &&
+					output.result.kind === "unavailable" &&
+					output.result.reason === "wall";
 
 				let event: CandidateEvent;
 
@@ -4426,8 +4496,9 @@ export class Orchestrator {
 						output instanceof Object && output.kind === "refused"
 							? output
 							: undefined,
-					disposition:
-						result.kind === "passed"
+					disposition: walled
+						? "budget_stop"
+						: result.kind === "passed"
 							? "completed"
 							: result.kind === "refused"
 								? "refused"
@@ -4881,6 +4952,23 @@ export class Orchestrator {
 			}
 
 			if (!(output instanceof Object) || output.kind !== "build") return false;
+
+			if (
+				output.result.kind === "unavailable" &&
+				output.result.reason === "wall"
+			) {
+				this.#stop(run, budgetCause(stage, SANDBOX_CAPS.wall));
+				recordAttempt(run, "budget_stop");
+				this.#input.log("stage_ended", {
+					issue: run.issue,
+					runId: run.runId,
+					cause: "budget_exhausted",
+					next: desiredStatus(run.phase),
+					attempt: run.attempt,
+				});
+
+				return true;
+			}
 
 			if (
 				output.result.kind === "unavailable" ||
