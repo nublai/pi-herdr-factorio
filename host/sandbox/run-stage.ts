@@ -538,25 +538,34 @@ async function runSession(
 				return;
 			}
 
-			const tokens =
-				Math.min(
-					input.settings.maxTokens ?? Infinity,
-					input.remainingRunTokens,
-				) - ledger.total;
+			const reserveTokens =
+				input.stage === "build"
+					? Math.max(
+							DRAFT_RESERVE_TOKENS,
+							1.5 * (last?.usage?.totalTokens ?? 0),
+						)
+					: DRAFT_RESERVE_TOKENS;
 
-			const wall = stage.deadline - host.now();
+			const hasReserve = () => {
+				const tokens =
+					Math.min(
+						input.settings.maxTokens ?? Infinity,
+						input.remainingRunTokens,
+					) - ledger.total;
 
-			if (
-				input.stage === "accept" &&
-				(tokens < DRAFT_RESERVE_TOKENS || wall < DRAFT_RESERVE_MS)
-			) {
-				ledger.draftSkips.push(
-					tokens < DRAFT_RESERVE_TOKENS ? "tokens" : "wall",
-				);
+				const wall = stage.deadline - host.now();
+
+				if (tokens >= reserveTokens && wall >= DRAFT_RESERVE_MS) return true;
+
+				ledger.draftSkips.push(tokens < reserveTokens ? "tokens" : "wall");
 				end("settled");
 
-				return;
-			}
+				return false;
+			};
+
+			if (!hasReserve()) return;
+
+			const wall = stage.deadline - host.now();
 
 			readingDraft = true;
 			let draft: string | null = input.stage === "build" ? "" : null;
@@ -624,6 +633,8 @@ async function runSession(
 				return;
 			}
 
+			if (input.stage === "build" && !hasReserve()) return;
+
 			if (ledger.revisionStart === null) ledger.revisionStart = ledger.total;
 			finalText = null;
 			const id = `factory-draft-${run}`;
@@ -633,7 +644,7 @@ async function runSession(
 				type: "prompt",
 				message:
 					feedback.verdict === "unrun_test_edits"
-						? feedback.message
+						? `${feedback.message}\nEnd with the same final report the original prompt required. For an owner-feedback round, return the same single JSON object with dispositions and findings again.`
 						: draftFeedbackPrompt(
 								{ ...feedback, run },
 								randomBytes(16).toString("hex"),
@@ -1137,7 +1148,9 @@ export async function runStage(
 								: Math.max(0, ledger.total - ledger.revisionStart),
 						draftSkips: ledger.draftSkips,
 					}
-				: record;
+				: input.stage === "build" && ledger.draftSkips.length > 0
+					? { ...record, draftSkips: ledger.draftSkips }
+					: record;
 
 		if (diagnostic !== undefined) complete.diagnostic = diagnostic;
 

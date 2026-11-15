@@ -1065,12 +1065,18 @@ export async function prepareRepairTree(
 		workspaceTestEdits(base, dest, replacesTests, true).unrunTestEdits,
 	);
 
+	const parsed = objectOf(parseJson(feedback));
+	const prior = parsed?.controller;
+
 	const content =
-		controller === null
+		controller === null || parsed === null
 			? feedback
 			: JSON.stringify({
-					...objectOf(parseJson(feedback)),
-					controller: [controller],
+					...parsed,
+					controller: [
+						...(prior === undefined ? [] : (arrayOf(prior) ?? [prior])),
+						controller,
+					],
 				});
 
 	writeFileSync(join(dest, FEEDBACK_FILE), content, {

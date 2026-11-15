@@ -2364,6 +2364,11 @@ describe("private build executor", () => {
 		"still-unrun",
 		"new-and-unrun",
 		"replaced",
+		"near-token-cap",
+		"near-wall-cap",
+		"context-reserve",
+		"repair-acceptance",
+		"owner-report",
 	] as const)
 		it(`build settlement gives one same-session revision for unrun tests: ${scenario}`, {
 			timeout: 30_000,
@@ -2391,6 +2396,11 @@ describe("private build executor", () => {
 					join(path, "package.json"),
 					'{"scripts":{"test":"node --test"}}',
 				);
+			}
+
+			if (scenario === "repair-acceptance") {
+				mkdirSync(join(base, "test/acceptance"));
+				writeFileSync(join(base, "test/acceptance/private.ts"), "private");
 			}
 
 			const repo = "owner/repo",
@@ -2443,15 +2453,65 @@ describe("private build executor", () => {
 				}),
 				true,
 			);
+			const event = feedbackId(repo, "review", 1);
+
+			const declined = {
+				event,
+				kind: "declined",
+				reason: "builder_declined",
+				detail: "Contradicts the contract's exclusions",
+			} as const;
+
+			const batch =
+				scenario === "owner-report"
+					? await storeFeedbackBatch(
+							stateDir,
+							{
+								version: 1,
+								runId: digest(RUN),
+								pr: 1,
+								head: sha,
+								records: [],
+								cards: [
+									{
+										event,
+										head: sha,
+										path: null,
+										line: null,
+										excerpt: "Out-of-scope request",
+										truncated: false,
+									},
+								],
+								full: null,
+							},
+							null,
+						)
+					: null;
+
 			let prompts = 0;
+			let reportRequired = false;
+			const turnTokens = scenario === "context-reserve" ? 30_000 : 12;
+			const noEdit = scenario === "clean" || scenario === "repair-acceptance";
+
+			const skip =
+				scenario === "near-token-cap" ||
+				scenario === "near-wall-cap" ||
+				scenario === "context-reserve";
 
 			const h = harness([
 				(command, pi) => {
 					if (command.type === "prompt") {
 						prompts++;
+						reportRequired =
+							/same final report.*original prompt/is.test(
+								String(command.message),
+							) &&
+							/single JSON object.*dispositions.*findings/is.test(
+								String(command.message),
+							);
 						writeFileSync(join(workspace, "value.ts"), "new");
 
-						if (scenario !== "clean")
+						if (!noEdit)
 							writeFileSync(join(workspace, "test/old.test.ts"), "changed");
 
 						if (
@@ -2471,13 +2531,19 @@ describe("private build executor", () => {
 							id: command.id ?? "",
 							command: "get_last_assistant_text",
 							success: true,
-							data: { text: "done" },
+							data: {
+								text:
+									scenario === "owner-report" &&
+									(prompts === 1 || reportRequired)
+										? JSON.stringify({ dispositions: [declined], findings: [] })
+										: "done",
+							},
 						});
 					replayer([
 						started("x"),
 						{ type: "agent_start" },
 						{ type: "turn_start" },
-						assistant({ tokens: 12 }),
+						assistant({ tokens: turnTokens }),
 						{ type: "agent_settled", aborted: false },
 					])(command, pi);
 				},
@@ -2496,7 +2562,30 @@ describe("private build executor", () => {
 					stdout: command === "bwrap" ? "bubblewrap 0.9.0\n" : "",
 					stderr: "",
 				}),
-				host: () => h.host,
+				host: (config) => {
+					assert.ok(config.stageDir);
+					const stageDir = config.stageDir;
+
+					return {
+						...h.host,
+						async writeOutput(text) {
+							writeFileSync(join(stageDir, "output.txt"), text, {
+								mode: 0o600,
+							});
+
+							return h.host.writeOutput(text);
+						},
+						async writeReceipt(receipt) {
+							writeFileSync(
+								join(stageDir, "receipt.json"),
+								JSON.stringify(receipt),
+								{ mode: 0o600 },
+							);
+
+							return h.host.writeReceipt(receipt);
+						},
+					};
+				},
 			});
 
 			assert.equal(await executor.preflight(), true);
@@ -2506,10 +2595,82 @@ describe("private build executor", () => {
 				baseSha: sha,
 				contractDigest,
 				acceptanceDigest: digestOf("suite"),
+				round:
+					scenario === "repair-acceptance" || scenario === "owner-report"
+						? 1
+						: 0,
 			};
 
+			if (binding.round > 0) {
+				writeFileSync(join(workspace, "value.ts"), "prior");
+				const prior = await collectPatch({ base, workspace, repairTree: true });
+
+				assert.ok(prior.kind === "collected");
+				assert.equal(
+					storePatch(stateDir, { ...binding, round: 0 }, prior, {
+						model: "openai/gpt-6.1-sol",
+						observed: null,
+						commands: [],
+					}).kind,
+					"found",
+				);
+				writeFileSync(join(workspace, ".factory-feedback.json"), "{}", {
+					mode: 0o600,
+				});
+			}
+
 			const launch = await executor.launch({
-				...input({ stage: "build" }),
+				...input(
+					{
+						stage: "build",
+						prompt: buildPrompt({
+							contract,
+							guidance: { general: "", stages: {} },
+							inlined: [],
+							feedback: scenario === "owner-report",
+						}),
+					},
+					{
+						maxTokens:
+							scenario === "near-token-cap"
+								? 20
+								: scenario === "context-reserve"
+									? 70_000
+									: null,
+						budget: {
+							maxTurns: 10,
+							wallMs: scenario === "near-wall-cap" ? 60_000 : 900_000,
+							stallMs: 300_000,
+						},
+					},
+				),
+				round: binding.round,
+				execution:
+					batch === null
+						? undefined
+						: ({
+								id: digestOf("owner-report"),
+								stage: "build",
+								runId: binding.runId,
+								round: 1,
+								attempt: 1,
+								workflowSha: sha,
+								workflowDigest: digestOf("workflow"),
+								feedbackFrom: {
+									round: 0,
+									generation: 0,
+									digest: digestOf("generation"),
+								},
+								cause: {
+									kind: "feedback",
+									batch: batch.digest,
+									assessment: {
+										bindingDigest: digestOf("assessment"),
+										recordDigest: digestOf("record"),
+									},
+									review: null,
+								},
+							} satisfies RepairExecution),
 				workspace,
 				tools: ["read", "write"],
 				skills: [],
@@ -2527,7 +2688,7 @@ describe("private build executor", () => {
 
 			assert.equal(
 				revisions.length,
-				scenario === "clean" || scenario === "replaced" ? 0 : 1,
+				noEdit || scenario === "replaced" || skip ? 0 : 1,
 			);
 
 			if (revisions.length > 0) {
@@ -2537,15 +2698,37 @@ describe("private build executor", () => {
 			}
 
 			assert.equal(h.pis.length, 1);
-			assert.equal(h.receipts[0]!.usage.total, prompts * 12);
+			assert.equal(h.receipts[0]!.usage.total, prompts * turnTokens);
+
+			if (skip) {
+				assert.deepEqual(h.receipts[0]!.draftSkips, [
+					scenario === "near-wall-cap" ? "wall" : "tokens",
+				]);
+			}
+
+			if (scenario === "owner-report") {
+				assert.equal(prompts, 2);
+				assert.match(
+					String(h.pis[0]!.received[0]!.message),
+					/Return one final JSON object with dispositions/,
+				);
+			}
+
 			const collected = readPatch(stateDir, binding);
 			assert.equal(collected.kind, "found");
 
-			if (collected.kind === "found")
+			if (collected.kind === "found") {
 				assert.equal(
 					collected.receipt.changedPaths.includes("test/old.test.ts"),
-					scenario !== "clean" && scenario !== "revised",
+					!noEdit && scenario !== "revised",
 				);
+
+				if (scenario === "owner-report") {
+					assert.deepEqual(collected.receipt.dispositions, [declined]);
+					assert.deepEqual(collected.receipt.findingDispositions, []);
+					assert.equal(reportRequired, true);
+				}
+			}
 		});
 	it("loads the bundled Herdr extension exactly when build delegation is granted", () => {
 		const ordinary = piCommand(model("openai/gpt-6.1-sol"), false);

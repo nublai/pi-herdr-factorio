@@ -87,6 +87,11 @@ test("testInputEdits identifies unrun bytes, modes and deletions without countin
 		unrunTestEdits: [],
 		addsTestFile: false,
 	});
+	assert.equal(
+		testInputEdits(base, candidate, [{ path: "test/new.test.ts" }])
+			.addsTestFile,
+		false,
+	);
 });
 
 test("repair feedback names only unrun test edits and excludes controller-removed acceptance", {
@@ -132,6 +137,56 @@ test("repair feedback names only unrun test edits and excludes controller-remove
 			assert.match(feedback.controller[0].message, /base bytes/);
 			assert.match(feedback.controller[0].message, /new test file/);
 		} else assert.equal(feedback.controller, undefined);
+	}
+});
+
+test("repair feedback preserves non-object bytes and appends existing controller entries", {
+	timeout: 30_000,
+}, async (t) => {
+	const f = fixture(t);
+
+	for (const root of [f.base, f.workspace]) {
+		mkdirSync(join(root, "test"));
+		writeFileSync(join(root, "test/old.test.ts"), "base");
+	}
+
+	writeFileSync(join(f.workspace, "test/old.test.ts"), "changed");
+	const patch = await collectPatch(f);
+
+	assert.ok(patch.kind === "collected");
+
+	for (const [index, feedback] of [
+		"not json",
+		"[]\n",
+		"null",
+		'"text"',
+		"12",
+		'{"controller":[{"message":"prior fact"}]}',
+		'{"controller":{"message":"prior fact"}}',
+		'{"controller":null}',
+	].entries()) {
+		const dest = join(f.root, `feedback-${index}`);
+
+		await prepareRepairTree(
+			f.base,
+			dest,
+			patch.patch,
+			patch.changedPaths,
+			feedback,
+		);
+		const content = readFileSync(join(dest, ".factory-feedback.json"), "utf8");
+
+		if (index < 5) assert.equal(content, feedback);
+		else {
+			const parsed = JSON.parse(content);
+
+			assert.equal(parsed.controller.length, 2);
+			assert.deepEqual(
+				parsed.controller[0],
+				index === 7 ? null : { message: "prior fact" },
+			);
+			assert.deepEqual(parsed.controller[1].files, ["test/old.test.ts"]);
+		}
 	}
 });
 

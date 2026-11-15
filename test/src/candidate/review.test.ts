@@ -157,7 +157,20 @@ async function checkReviewTree(mode: string) {
 			join(base, "dependency.ts"),
 			"export const dependency = 'original';\n",
 		);
+
+		if (mode === "repair-replacements") {
+			mkdirSync(join(base, "test"));
+			writeFileSync(join(base, "test/replaced.test.ts"), "base");
+			writeFileSync(join(base, "test/unlisted.test.ts"), "base");
+		}
+
 		cpSync(base, work, { recursive: true });
+
+		if (mode === "repair-replacements") {
+			writeFileSync(join(work, "test/replaced.test.ts"), "changed");
+			writeFileSync(join(work, "test/unlisted.test.ts"), "changed");
+		}
+
 		writeFileSync(
 			join(work, "value.ts"),
 			original.replace("value = 0", "value = 1"),
@@ -184,6 +197,10 @@ async function checkReviewTree(mode: string) {
 			limits: [],
 			files: ["value.ts"],
 			evidence: [],
+			replacesTests:
+				mode === "repair-replacements"
+					? [{ path: "test/replaced.test.ts", reason: "Behavior changes" }]
+					: [],
 		};
 
 		const bytes = contractBytes(contract),
@@ -324,6 +341,7 @@ async function checkReviewTree(mode: string) {
 					".github",
 					"value.ts",
 					"dependency.ts",
+					...(mode === "repair-replacements" ? ["test"] : []),
 				],
 				{ cwd: path },
 			);
@@ -709,6 +727,24 @@ async function checkReviewTree(mode: string) {
 			scenarios,
 		);
 
+		if (mode === "repair-replacements") {
+			const repair = join(root, "repair-candidate");
+
+			const feedback = JSON.parse(
+				readFileSync(join(repair, ".factory-feedback.json"), "utf8"),
+			);
+
+			assert.deepEqual(feedback.controller[0].files, ["test/unlisted.test.ts"]);
+			assert.equal(
+				readFileSync(join(repair, "test/replaced.test.ts"), "utf8"),
+				"changed",
+			);
+			assert.equal(
+				readFileSync(join(repair, "test/unlisted.test.ts"), "utf8"),
+				"changed",
+			);
+		}
+
 		const oracle = storedAssessment({
 			runId,
 			round: 0,
@@ -920,6 +956,12 @@ async function checkReviewTree(mode: string) {
 		rmSync(root, { recursive: true, force: true });
 	}
 }
+
+it("repair checkout passes the contract replacements into controller test feedback", {
+	timeout: 30_000,
+}, async () => {
+	await checkReviewTree("repair-replacements");
+});
 
 it("projects actual verdict values as escaped data without inferring criterion success", async () => {
 	const f = await preparedReviewFixture();
