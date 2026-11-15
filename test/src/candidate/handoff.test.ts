@@ -56,6 +56,7 @@ import { classifyFeedback } from "../../../src/candidate/feedback.ts";
 import { storeFeedbackBatch } from "../../../host/controller/candidate-port.ts";
 import { type FamilyInput, familyLabel } from "../../../src/core/models.ts";
 import {
+	findingFingerprints,
 	ownerJudgments,
 	type ReviewReceipt,
 	reviewR8,
@@ -2458,6 +2459,175 @@ test("a published run whose fresh review is only unverifiable withdraws readines
 		0,
 	);
 });
+
+test("a published unverifiable-only hold outside a feedback round refreshes when main moves (#793)", {
+	timeout: 30_000,
+}, () => {
+	const previous = waiting();
+
+	const refreshed = handoffCandidate(previous, {
+		...readyObservation(previous),
+		main: observed("b".repeat(40)).main,
+	}).state;
+
+	const active = reviewing(validated(refreshed));
+
+	const held = selected(
+		handoffCandidate(active.state, {
+			kind: "review_settled",
+			execution: active.execution,
+			tokens: 7,
+			result: {
+				kind: "passed",
+				review: judgedReceipt(active.execution, [unverifiableS3]),
+				patch: { kind: "found", receipt: patch, patch: "patch" },
+			},
+		}).state,
+	);
+
+	assert.ok(held.work.kind === "held");
+	assert.equal(held.work.reason, "review_unverifiable");
+
+	const main = "c".repeat(40);
+	assert.ok(isGitSha(main));
+
+	const head = promotedHead(held);
+	assert.ok(head);
+
+	const moved = handoffCandidate(held, {
+		...readyObservation(held),
+		main,
+		pr: { kind: "open", number: 5, head, refHead: head },
+	});
+
+	assert.equal(moved.effect?.kind, "validate");
+});
+
+for (const published of [false, true])
+	test(`a later round's unverifiable-only review sharing an earlier finding fingerprint holds for the owner; main movement ${published ? "keeps a stopped feedback round held" : "refreshes the unpublished run"} (#793)`, {
+		timeout: 30_000,
+	}, () => {
+		const queued = queuedFeedback();
+
+		const oldExecution = queued.accounts.find(
+			(a) => a.execution.stage === "review",
+		)?.execution;
+
+		assert.ok(oldExecution?.stage === "review");
+
+		const oldReview = judgedReceipt(
+			oldExecution,
+			[unverifiableS3],
+			[
+				{
+					id: "F1",
+					severity: "blocking",
+					category: "bug",
+					path: "src/example.ts",
+					startLine: 1,
+					endLine: 1,
+					claim: "bug",
+					evidence: "guard absent",
+				},
+			],
+		);
+
+		const rebuilding = rebuildingFeedback({
+			...queued,
+			current: { ...queued.current, review: oldReview },
+		});
+
+		const changed = {
+			...patch,
+			round: 1,
+			patchDigest: digestOf("blocked-repair"),
+		};
+
+		const built = handoffCandidate(rebuilding.state, {
+			kind: "repair_settled",
+			execution: rebuilding.execution,
+			tokens: 10,
+			result: { kind: "passed", patch: changed },
+		}).state;
+
+		const active = reviewing(
+			validated(handoffCandidate(built, readyObservation(built)).state),
+		);
+
+		const review = judgedReceipt(active.execution, [unverifiableS3]);
+
+		assert.ok(
+			findingFingerprints(oldReview).some((f) =>
+				findingFingerprints(review).includes(f),
+			),
+		);
+
+		const start = {
+			...active.state,
+			published: published ? active.state.published : null,
+		};
+
+		let held = selected(
+			handoffCandidate(start, {
+				kind: "review_settled",
+				execution: active.execution,
+				tokens: 30,
+				result: {
+					kind: "passed",
+					review,
+					patch: { kind: "found", receipt: changed, patch: "blocked-repair" },
+				},
+			}).state,
+		);
+
+		if (published) {
+			const notice = pending(held, "post_notice");
+			assert.ok(notice.then.kind === "held");
+			assert.equal(notice.then.reason, "review_unverifiable");
+
+			held = selected(
+				handoffCandidate(held, {
+					kind: "effect_completed",
+					completion: { kind: "post_notice", request: notice },
+				}).state,
+			);
+		}
+
+		assert.ok(held.work.kind === "held");
+		assert.equal(held.work.reason, "review_unverifiable");
+
+		const restored = parseCandidateState(JSON.parse(JSON.stringify(held)));
+		assert.ok(restored?.kind === "selected");
+
+		const observation = published
+			? {
+					...readyObservation(restored),
+					pr: {
+						kind: "open",
+						number: 5,
+						head: promotedHead(restored)!,
+						refHead: promotedHead(restored)!,
+					},
+				} as const
+			: observed(restored.current.intent.baseSha);
+
+		const stable = handoffCandidate(restored, observation);
+		assert.equal(stable.effect, null);
+		assert.ok(selected(stable.state).work.kind === "held");
+		assert.equal(selected(stable.state).current.certification, null);
+
+		const main = "c".repeat(40);
+		assert.ok(isGitSha(main));
+
+		const next = handoffCandidate(restored, { ...observation, main });
+
+		if (published) {
+			assert.equal(next.effect, null);
+			const after = selected(next.state).work;
+			assert.ok(after.kind === "held");
+			assert.equal(after.reason, "review_unverifiable");
+		} else assert.equal(next.effect?.kind, "validate");
+	});
 
 test("an owner-edited published run whose review is only unverifiable keeps review_unverifiable and its judgments through notice and reload (#793)", {
 	timeout: 30_000,
