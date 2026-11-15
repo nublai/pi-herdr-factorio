@@ -255,6 +255,48 @@ describe("Orchestrator launch after a direct issue read", () => {
 });
 
 describe("Orchestrator terminal marker trust", () => {
+	for (const status of ["released", "failed", "budget_exhausted"] as const) {
+		for (const ended of [false, true]) {
+			it(`rejects mismatching ${status} evidence with ${ended ? "an ended" : "no"} local claim`, async () => {
+				const ctx = world();
+				const issue = ctx.github.add(labeled(14));
+
+				await ctx.start().tick();
+
+				const parsed = parseMarker(ctx.github.markers(14).at(-1) ?? "");
+
+				if (parsed.kind !== "marker") throw new Error("fixture");
+
+				if (ended) {
+					issue.labels = [];
+					await ctx.start().tick();
+				} else {
+					ctx.files.claims.clear();
+				}
+
+				const claims = structuredClone(ctx.files.claims);
+
+				issue.comments = [];
+				ctx.github.comment(
+					issue,
+					formatMarker({
+						...parsed.marker,
+						seq: 4,
+						status,
+						workflowDigest: digestOf("different workflow"),
+					}),
+				);
+
+				const report = await ctx.start().tick();
+
+				assert.deepEqual(report.corrupt, [
+					{ issue: 14, defect: "record_mismatch" },
+				]);
+				assert.deepEqual(ctx.files.claims, claims);
+			});
+		}
+	}
+
 	it("rejects a terminal marker that disagrees with its admission", async () => {
 		const ctx = world();
 		const issue = ctx.github.add(labeled(14));
