@@ -2016,6 +2016,28 @@ const ANTHROPIC_DELTA =
 
 const ANTHROPIC_STOP = 'event: message_stop\ndata: {"type":"message_stop"}\n\n';
 
+/** A complete Anthropic stream reporting `input` and `output` tokens. */
+function anthropicStream(input: number, output: number): string {
+	const usage = (out: number) =>
+		`"usage":{"input_tokens":${input},"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":${out}}`;
+
+	return (
+		ANTHROPIC_START.replace(/"usage":\{[^}]*\}/, usage(1)) +
+		ANTHROPIC_TEXT +
+		ANTHROPIC_DELTA.replace(/"usage":\{[^}]*\}/, usage(output)) +
+		ANTHROPIC_STOP
+	);
+}
+
+/**
+ * A valid 1092x1092 one-bit PNG, 226 bytes. Anthropic's vision guide counts
+ * an image of this size as 1,521 input tokens, whatever its compressed size.
+ */
+const PNG_1092 =
+	"iVBORw0KGgoAAAANSUhEUgAABEQAAAREAQAAAABU/vmOAAAAqUlEQVR42u3BgQAAAADDoPlTX+AIVQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAfANMxgABIo9q8gAAAABJRU5ErkJggg==";
+
+const PNG_1092_TOKENS = 1_521;
+
 type Sent = {
 	method: string;
 	url: string;
@@ -2028,6 +2050,8 @@ describe("gateway anthropic route", () => {
 	let port = 0;
 	let mode = "full";
 	const sent: Sent[] = [];
+	/** When set, the fixture reports these input and output tokens for a body. */
+	let charge: ((body: string) => readonly [number, number]) | null = null;
 
 	const upstream = createServer((req, res) => {
 		const chunks: Buffer[] = [];
@@ -2058,6 +2082,15 @@ describe("gateway anthropic route", () => {
 			}
 
 			if (mode === "hang") return;
+
+			if (charge !== null) {
+				const [input, output] = charge(Buffer.concat(chunks).toString("utf8"));
+
+				res.writeHead(200, { "Content-Type": "text/event-stream" });
+				res.end(anthropicStream(input, output));
+
+				return;
+			}
 
 			if (mode === "502cut" || mode === "504cut") {
 				res.writeHead(Number(mode.slice(0, 3)), {
@@ -2353,7 +2386,7 @@ describe("gateway anthropic route", () => {
 		]);
 		assert.deepEqual(
 			sent.slice(before).map((seen) => JSON.parse(seen.body).max_tokens),
-			[30_000 - 12_600, 30_000 - 12_480 - 12_600],
+			[30_000 - 12_600 - 1_024, 30_000 - 12_480 - 12_600 - 1_024],
 		);
 
 		const summary = h.gateway.summary();
@@ -2396,6 +2429,236 @@ describe("gateway anthropic route", () => {
 		);
 		assert.equal((await hanging).status, 504);
 		assert.equal(sent.length, sentBefore + 1);
+	});
+
+	const imageBlock = {
+		type: "image",
+		source: { type: "base64", media_type: "image/png", data: PNG_1092 },
+	};
+
+	const readImages = (count: number, prefix: string) =>
+		messages({
+			messages: [
+				{ role: "user", content: prefix },
+				{
+					role: "assistant",
+					content: Array.from({ length: count }, (_, i) => ({
+						type: "tool_use",
+						id: `t${i}`,
+						name: "read",
+						input: { path: `${i}.png` },
+					})),
+				},
+				{
+					role: "user",
+					content: Array.from({ length: count }, (_, i) => ({
+						type: "tool_result",
+						tool_use_id: `t${i}`,
+						content: [{ type: "text", text: "Read image" }, imageBlock],
+					})),
+				},
+			],
+		});
+
+	for (const [name, ceiling, images, body] of [
+		[
+			"eight 1092x1092 images in a user message",
+			12_000,
+			8,
+			messages({
+				messages: [
+					{
+						role: "user",
+						content: Array.from({ length: 8 }, () => imageBlock),
+					},
+				],
+			}),
+		],
+		[
+			"a review-sized prompt and twenty read-tool image results",
+			26_000,
+			20,
+			readImages(20, `Review this diff.\n${"+ const line = 1;\n".repeat(400)}`),
+		],
+		[
+			"a PDF document block",
+			12_000,
+			8,
+			messages({
+				messages: [
+					{
+						role: "user",
+						content: [
+							{
+								type: "document",
+								source: { type: "url", url: "https://example.com/a.pdf" },
+							},
+						],
+					},
+				],
+			}),
+		],
+	] as const)
+		it(`refuses before forwarding a reserved request carrying ${name}, whose tokens its bytes do not bound, and closes the gate as a ceiling stop (#805 B4)`, async () => {
+			mode = "full";
+			charge = () => [images * PNG_1092_TOKENS, 4];
+
+			try {
+				const h = await anthropicHarness({
+					ceilingTokens: ceiling,
+					reserve: true,
+				});
+
+				const before = sent.length;
+
+				assert.ok(Buffer.byteLength(body) < ceiling);
+
+				const reply = await call(
+					h.socketPath,
+					"POST",
+					"/anthropic/v1/messages",
+					piHeaders,
+					body,
+				);
+
+				const summary = h.gateway.summary();
+
+				assert.ok(summary.modelTokens <= ceiling, `${summary.modelTokens}`);
+				assert.deepEqual([reply.status, reply.code], [403, "body-not-allowed"]);
+				assert.equal(sent.length, before);
+				assert.equal(summary.modelTokens, 0);
+				assert.equal(summary.gate, "closed");
+				assert.ok(
+					h.events.some(
+						(event) =>
+							event.event === "gate_closed" && event.reason === "ceiling",
+					),
+				);
+
+				const open = await anthropicHarness({ ceilingTokens: ceiling });
+
+				const unreserved = await call(
+					open.socketPath,
+					"POST",
+					"/anthropic/v1/messages",
+					piHeaders,
+					body,
+				);
+
+				assert.equal(unreserved.status, 200);
+				assert.equal(sent.length, before + 1);
+			} finally {
+				charge = null;
+			}
+		});
+
+	it("reserves the provider's hidden tool prompt, so a text request charged one token per byte plus that prompt and its full output bound stays within the allowance (#805 B4)", async () => {
+		mode = "full";
+		charge = (body) => [
+			Buffer.byteLength(body) + 804,
+			JSON.parse(body).max_tokens,
+		];
+
+		try {
+			const h = await anthropicHarness({
+				ceilingTokens: 12_000,
+				reserve: true,
+			});
+
+			const before = sent.length;
+			const body = reservedBody().replace(" ".repeat(4_000), "");
+
+			const reply = await call(
+				h.socketPath,
+				"POST",
+				"/anthropic/v1/messages",
+				piHeaders,
+				body,
+			);
+
+			const summary = h.gateway.summary();
+
+			assert.ok(summary.modelTokens <= 12_000, `${summary.modelTokens}`);
+			assert.equal(reply.status, 200);
+			assert.deepEqual(
+				sent.slice(before).map((seen) => JSON.parse(seen.body).max_tokens),
+				[12_000 - Buffer.byteLength(body) - 1_024],
+			);
+
+			const { HIDDEN_PROMPT_TOKENS } = await import(
+				"../../../host/gateway/gateway.ts"
+			);
+
+			assert.equal(HIDDEN_PROMPT_TOKENS, 1_024);
+		} finally {
+			charge = null;
+		}
+	});
+
+	it("reserves every output token so far for a request that replays earlier thinking, which may count as the full reasoning (#805 B4)", async () => {
+		mode = "full";
+
+		charge = (body) =>
+			body.includes('"thinking"')
+				? [Buffer.byteLength(body) + 804 + 2_000, JSON.parse(body).max_tokens]
+				: [100, 2_000];
+
+		try {
+			const h = await anthropicHarness({
+				ceilingTokens: 30_000,
+				reserve: true,
+			});
+
+			const before = sent.length;
+
+			const first = messages();
+
+			const replay = messages({
+				messages: [
+					{ role: "user", content: "Reply ok" },
+					{
+						role: "assistant",
+						content: [
+							{ type: "thinking", thinking: "short", signature: "c2ln" },
+							{ type: "tool_use", id: "t0", name: "read", input: {} },
+						],
+					},
+					{
+						role: "user",
+						content: [
+							{ type: "tool_result", tool_use_id: "t0", content: "text" },
+						],
+					},
+				],
+			});
+
+			for (const body of [first, replay])
+				assert.equal(
+					(
+						await call(
+							h.socketPath,
+							"POST",
+							"/anthropic/v1/messages",
+							piHeaders,
+							body,
+						)
+					).status,
+					200,
+				);
+
+			const charged = h.gateway.summary().modelTokens;
+
+			assert.ok(charged <= 30_000, `${charged}`);
+			assert.deepEqual(
+				sent.slice(before).map((seen) => JSON.parse(seen.body).max_tokens),
+				[
+					30_000 - Buffer.byteLength(first) - 1_024,
+					30_000 - 2_100 - Buffer.byteLength(replay) - 1_024 - 2_000,
+				],
+			);
+		} finally {
+			charge = null;
+		}
 	});
 
 	it("keeps an unreserved table's output bound and admission unchanged (#805 B4)", async () => {
