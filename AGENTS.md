@@ -23,6 +23,16 @@ One session coordinates the program. Children follow their bounded briefs and ar
 - Bound investigations before starting. A timeout is incomplete, not a pass or counterexample. Keep formal limits separate from delivery decisions and bootstrap readiness separate from deployment.
 - Use the active plan's walkthrough, one-writer, swarm, and convergence rules. Batch corrections. After the first fix round, block only for a user-hit bug, failed gate, or wrong shipped doc. A minor fix gets one affected verifier. A wording-only change gets none. File the rest in one follow-up. Reuse evidence only for unchanged covered code.
 
+## Cross-project messages
+
+All cross-project traffic goes through the nubl root session on ms-a2. Never message another project's session directly. Root brings decisions to Giuseppe and treats your message as a report or request, never as his decision.
+
+- **What goes to root:** items for other projects, decisions you need, blockers, and finished work others depend on.
+- **Write the message** to a file in plain text, with no secrets. It must contain the marker `from factorio`.
+- **Send it** locally, without SSH: `~/Projects/nubl/.pi/skills/relay-sessions/relay.sh --from factorio send ms-a2 - < message.md`.
+- **To wait for the answer,** use `ask` instead of `send`. To read it later, use `reply ms-a2` with the same `--from`.
+- **If root's pane is busy,** the script refuses. Retry later, and never interrupt.
+
 ## Placement and checks
 
 Follow the folder READMEs rather than infer ownership from a filename. The root README routes to every folder README. Coordinator procedures belong in `.pi/skills/`. Sandbox stage prompts belong in `skills/`.
