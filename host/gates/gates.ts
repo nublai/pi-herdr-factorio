@@ -616,7 +616,7 @@ export async function checkCandidate(
 	} catch (error) {
 		receipt.reason = error instanceof Error ? error.message : "gate_error";
 		receipt.status =
-			/^(?:npmrc_changed|runtime_patching|suppression_added|invalid_source_encoding|unauthorized_acceptance|package_swap|replacement_deleted|invalid_dependency_|dependency_integrity|install_failed|unsafe_tree|heldout_digest_mismatch)/.test(
+			/^(?:protected_path_changed|npmrc_changed|runtime_patching|suppression_added|invalid_source_encoding|unauthorized_acceptance|package_swap|replacement_deleted|invalid_dependency_|dependency_integrity|install_failed|unsafe_tree|heldout_digest_mismatch)/.test(
 				receipt.reason,
 			)
 				? "failed"

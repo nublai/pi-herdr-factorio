@@ -1595,6 +1595,7 @@ const SCANNED_ABORTS: ReadonlySet<string> = new Set([
 
 const CANDIDATE_ABORTS: ReadonlySet<string> = new Set([
 	"npmrc_changed",
+	"protected_path_changed",
 	"replacement_deleted",
 	"unauthorized_acceptance",
 	"runtime_patching",
@@ -1624,6 +1625,8 @@ const NORMAL_CHECKS = [
 	"typecheck",
 	"lint",
 	"format",
+	"layout",
+	"decisions",
 	"main_tests",
 	"candidate_tests",
 	"heldout",
@@ -2320,6 +2323,8 @@ export const VISIBLE_CHECKS = [
 	"typecheck",
 	"lint",
 	"format",
+	"layout",
+	"decisions",
 	"main_tests",
 	"candidate_tests",
 ] as const;

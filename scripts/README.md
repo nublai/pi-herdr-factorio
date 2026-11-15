@@ -1,6 +1,6 @@
 # scripts
 
-This folder holds repository tools that a person or `npm run check` runs from the repository root. The trusted gate copies this folder from the candidate, like `src/`, but runs the main-owned copies of `check-layout.mjs` and `check-decisions.mjs` from `/g/tooling/scripts/` against the merged candidate tree at `/w`.
+This folder holds repository tools that a person or `npm run check` runs from the repository root. The trusted gate copies this folder from the candidate, like `src/`, but runs the main-owned copies of `check-layout.mjs` and `check-decisions.mjs` from `/g/tooling/scripts/` against the merged candidate tree at `/w`. Layout still reads the candidate's `layout-baseline.json`, Markdown and imported modules, currently `src/candidate/review.ts` and `src/maintenance/replay.ts`. Those inputs can weaken the check just as they can under local `npm run check:layout`. The gate refuses any candidate change to `docs/decisions.tsv` or `scripts/decisions-checkpoint.json` with `protected_path_changed`, so decisions validates main's file and checkpoint.
 
 | Script | Run by | What it does |
 | --- | --- | --- |

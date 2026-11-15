@@ -3,6 +3,7 @@ import { type NonEmpty, type RejectReason } from "../core/run.ts";
 
 import {
 	CONTROL_PLANE_DIR,
+	COORDINATOR_ONLY_FILES,
 	ACCEPTANCE_SUITE_DIR,
 	FEEDBACK_FILE,
 	FEEDBACK_FULL_FILE,
@@ -89,6 +90,7 @@ function isForbidden(changed: string, acceptanceDir: string): boolean {
 		isAtOrUnder(path, FEEDBACK_FILE) ||
 		isAtOrUnder(path, FEEDBACK_FULL_FILE) ||
 		isAtOrUnder(path, CONTROL_PLANE_DIR) ||
+		COORDINATOR_ONLY_FILES.some((file) => isAtOrUnder(path, file)) ||
 		isAtOrUnder(path, posix.normalize(acceptanceDir).toLowerCase())
 	);
 }

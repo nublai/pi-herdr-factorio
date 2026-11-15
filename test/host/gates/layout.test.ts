@@ -224,6 +224,22 @@ function loose(token: string): RegExp {
 	);
 }
 
+for (const script of [guard, decisions]) {
+	for (const args of [["--root"], ["--root", ""], ["--root", "--json"]]) {
+		it(`${script.split("/").at(-1)} rejects ${JSON.stringify(args)}`, {
+			timeout: 30_000,
+		}, () => {
+			const result = spawnSync(process.execPath, [script, ...args], {
+				encoding: "utf8",
+				timeout: 25_000,
+			});
+
+			assert.equal(result.status, 2);
+			assert.match(result.stderr, /--root requires a directory/);
+		});
+	}
+}
+
 describe("layout guard", () => {
 	let pristine = "";
 	const scratches: string[] = [];

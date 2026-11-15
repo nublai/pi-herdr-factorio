@@ -7864,7 +7864,7 @@ test("stored books keep their bytes and refusals through parse, transition and f
 	const books = storedBookCases();
 	const receipts = receiptCases();
 	const local = replayBooks(books, receipts, false);
-	assert.equal(replayBooks(books, receipts, true), local);
+	assert.equal(digestOf(replayBooks(books, receipts, true)), digestOf(local));
 
 	const result: {
 		books: [
@@ -7882,8 +7882,14 @@ test("stored books keep their bytes and refusals through parse, transition and f
 		if (record === null) continue;
 		assert.ok(record.frozen, name);
 
-		for (const { step, reload } of record.steps)
-			assert.equal(reload, JSON.stringify(JSON.parse(step).state), name);
+		for (const { step, reload } of record.steps) {
+			assert.ok(reload !== null, name);
+			assert.equal(
+				digestOf(reload),
+				digestOf(JSON.stringify(JSON.parse(step).state)),
+				name,
+			);
+		}
 	}
 
 	const digests = Object.fromEntries([
@@ -7897,7 +7903,10 @@ test("stored books keep their bytes and refusals through parse, transition and f
 		]),
 	]);
 
-	assert.deepEqual(digests, STORED_BOOK_DIGESTS);
+	assert.equal(
+		digestOf(JSON.stringify(digests)),
+		digestOf(JSON.stringify(STORED_BOOK_DIGESTS)),
+	);
 });
 
 const STORED_BOOK_DIGESTS = {
@@ -7906,32 +7915,32 @@ const STORED_BOOK_DIGESTS = {
 	pending_validate:
 		"00c7f1e3bb757661669ccf1b6aff4eac7ded10e7c0991a648ba6c7161d1962e0",
 	captured_review:
-		"440c8daa15862ddd763eb317664467813448047175dff0bd8c4f231f3e42da79",
+		"7125b09121dfc21c7a3dcd8e7e9c2ec7088ae025f7e0b8e7ed0a23e93d410841",
 	unknown_usage:
-		"e0ac416e2754774e6f82bea13f670ab3d758099a4203211ae000a31698497e05",
-	certified: "b00a861a8c067c753d94bf9190f56731f4b71e5f0ef554618c58eabeb489d26b",
+		"ec4723d6973f0673675a340376517b9b0d22ab911470e91d77c9736fd8182473",
+	certified: "267f50df89e77244840b917073545ef121e516cf25d2c287c145d2510031bb30",
 	pending_open_pr:
-		"70ec8e71f544b4a2d40ec5534b9022572207a171f8591dbddbde502a57e4e5fc",
-	waiting: "61ba41426feb8a8ac740762184beeb3ef6d59abb1fd472621be69badb55cd429",
-	owner_due: "8232c7214c134847a59600edd565e02f3a499f2a252da882da3f90c7b486b9f7",
+		"a834e18b7b95eca5c9876d9abe41d8cf609a61a68c3db4efc3b895826c4336ec",
+	waiting: "dcbe5e2d5163e43d842caa49919e9545b35f19fa006e844f0f8c9e6326297663",
+	owner_due: "e51a913638d3c4acecb8c65aba152e12768757ba851734b2c9e04e9577772730",
 	owner_deriving:
-		"7c0a20b6f4dd058e54a3877bca913d53ff37248751a40a50b0ce59be04ec60ca",
+		"ba356c57398b64060acbc9650d0a8743e02ba6f611558000198842c4cbdd549b",
 	owner_recertify:
-		"a0088610b2e46eab67536505b8a7d29378396f81bcae30703706b3b9e2753393",
+		"55fc1f52ff3b7b9f37a3a4712e59f2a1eb689dcb7a1c0d3ed27db72c18292939",
 	late_unknown:
-		"f23a42e2a0cf6bc35eaf798c20a294a84df2be42a0856be3520e1911ac7c0217",
+		"1708b4ee2dc6d1b0da9b15595a9f68bbbb674c4749d96f1255e88f2b2a108d31",
 	feedback_queued:
-		"f4e9f6f86346539fd816bae2bcfa32864545b3b27491f9db30f1bb57bc51c5f3",
+		"5d2cccf17dea75d9a771f04ab43180a735063cb678e4cab63428487b97ea5ba0",
 	feedback_rebuilding:
-		"833d318ffadaa34f81ff6f93b04019a904057719779452603f3400fce4629034",
+		"bab9e6c9fd04365c57450fd63f140ef5a279d44a52d5f1e8b79c5337be2cd49c",
 	merge_pending:
-		"3bdf33999e3b3b263466f978ddf1147a0e365802b4bff42600afcb5322fe01b7",
+		"e331420d73ac1a1c91a86a6fed745bdabbce55673baf1b4af1ca2e5d5d23a205",
 	legacy_no_feedback:
-		"45e55a568edeebec82c4a5bddf32fcaed56733960bff0c59cbc8050d0bf9fd9d",
+		"1bf01ab44a9cf0c7fce50d45b50f91b42eeed7a21a22c8b130c5fa7cf8fd6879",
 	legacy_no_owner_head:
-		"efc0bd543e36706f707f132bc1e9bd2ac150c6606b588891d5221d8529ecd696",
+		"48f61512ba3e3b00b8ed7110b21e96b048a394c43e4b4ba067dc4865d33e9161",
 	legacy_v1_certification_review:
-		"61ba41426feb8a8ac740762184beeb3ef6d59abb1fd472621be69badb55cd429",
+		"dcbe5e2d5163e43d842caa49919e9545b35f19fa006e844f0f8c9e6326297663",
 	owner_patch_missing: null,
 	wrong_pin_workflow: null,
 	wrong_intent_digest: null,

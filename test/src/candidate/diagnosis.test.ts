@@ -28,6 +28,7 @@ import {
 	classifyFailure,
 	diagnosisNeeds,
 	diagnosisNotice,
+	failedVisibleChecks,
 	parseBaseReason,
 	parseFailureClass,
 	parseBaseCheckReference,
@@ -41,7 +42,7 @@ import {
 	type HeldoutReplay,
 	type TreeReplay,
 } from "../../../src/candidate/diagnosis.ts";
-import { digestOf } from "../../../src/core/run.ts";
+import { digestOf, REQUIRED_CI_CHECKS } from "../../../src/core/run.ts";
 import {
 	contractBytes,
 	contractDigestOf,
@@ -726,15 +727,7 @@ function unitInput(
 ): ClassifyInput {
 	const receipt = {
 		version: 2,
-		requiredChecks: [
-			"baseline_tests",
-			"typecheck",
-			"lint",
-			"format",
-			"main_tests",
-			"candidate_tests",
-			"heldout",
-		],
+		requiredChecks: [...REQUIRED_CI_CHECKS],
 		tamperSignals: [],
 		heldoutDigest: "d".repeat(64),
 		heldoutCounts: { [first]: 1, [second]: 1 },
@@ -745,15 +738,7 @@ function unitInput(
 		runner: "local-bwrap",
 		status: "failed",
 		reason: null,
-		checks: [
-			"baseline_tests",
-			"typecheck",
-			"lint",
-			"format",
-			"main_tests",
-			"candidate_tests",
-			"heldout",
-		].map((name) => ({
+		checks: REQUIRED_CI_CHECKS.map((name) => ({
 			name,
 			exitCode: name === "heldout" ? 1 : 0,
 			durationMs: 1,
@@ -827,15 +812,7 @@ function unitInput(
 test("check assessments preserve independent CI failures without relaxing dual-tree attribution", () => {
 	const input = unitInput({
 		receiptPatch: {
-			checks: [
-				"baseline_tests",
-				"typecheck",
-				"lint",
-				"format",
-				"main_tests",
-				"candidate_tests",
-				"heldout",
-			].map((name) => ({
+			checks: REQUIRED_CI_CHECKS.map((name) => ({
 				name,
 				exitCode: ["typecheck", "lint", "heldout"].includes(name) ? 1 : 0,
 			})),
@@ -900,15 +877,7 @@ test("a failing check that exists only in the candidate has a candidate-only pro
 		unitInput({
 			receiptPatch: {
 				heldoutFailures: [],
-				checks: [
-					"baseline_tests",
-					"typecheck",
-					"lint",
-					"format",
-					"main_tests",
-					"candidate_tests",
-					"heldout",
-				].map((name) => ({
+				checks: REQUIRED_CI_CHECKS.map((name) => ({
 					name,
 					exitCode: name === "candidate_tests" ? 1 : 0,
 				})),
@@ -959,15 +928,7 @@ for (const otherChecks of [[], ["typecheck", "lint", "candidate_tests"]])
 		const input = unitInput({
 			receiptPatch: {
 				heldoutFailures: E,
-				checks: [
-					"baseline_tests",
-					"typecheck",
-					"lint",
-					"format",
-					"main_tests",
-					"candidate_tests",
-					"heldout",
-				].map((name) => ({
+				checks: REQUIRED_CI_CHECKS.map((name) => ({
 					name,
 					exitCode: name === "heldout" || otherChecks.includes(name) ? 1 : 0,
 				})),
@@ -1762,15 +1723,7 @@ test("classifier: a wrong base result vetoes repair as oracle, even beside a can
 		scenarios: ["S1"],
 	});
 
-	const checks = [
-		"baseline_tests",
-		"typecheck",
-		"lint",
-		"format",
-		"main_tests",
-		"candidate_tests",
-		"heldout",
-	].map((name) => ({
+	const checks = REQUIRED_CI_CHECKS.map((name) => ({
 		name,
 		exitCode: name === "heldout" || name === "lint" ? 1 : 0,
 	}));
@@ -1792,15 +1745,7 @@ test("classifier: a wrong base result vetoes repair as oracle, even beside a can
 });
 
 test("classifier: a non-heldout candidate check failure alone is candidate and needs no replay", () => {
-	const checks = [
-		"baseline_tests",
-		"typecheck",
-		"lint",
-		"format",
-		"main_tests",
-		"candidate_tests",
-		"heldout",
-	].map((name) => ({
+	const checks = REQUIRED_CI_CHECKS.map((name) => ({
 		name,
 		exitCode: name === "lint" ? 1 : 0,
 	}));
@@ -1819,6 +1764,41 @@ test("classifier: a non-heldout candidate check failure alone is candidate and n
 		reason: "candidate_check",
 		scenarios: [],
 	});
+});
+
+for (const check of ["layout", "decisions"]) {
+	test(`${check} alone classifies as a candidate check failure`, {
+		timeout: 30_000,
+	}, () => {
+		const checks = REQUIRED_CI_CHECKS.map((name) => ({
+			name,
+			exitCode: name === check ? 1 : 0,
+		}));
+
+		const input = unitInput({
+			receiptPatch: { checks, heldoutFailures: [] },
+			replay: null,
+		});
+
+		assert.deepEqual(classifyFailure(input), {
+			kind: "candidate",
+			reason: "candidate_check",
+			scenarios: [],
+		});
+	});
+}
+
+test("repository guard failures remain visible to ledger and owner notices", {
+	timeout: 30_000,
+}, () => {
+	assert.deepEqual(
+		failedVisibleChecks([
+			{ name: "layout", passed: false },
+			{ name: "decisions", passed: false },
+			{ name: "heldout", passed: false },
+		]),
+		["layout", "decisions"],
+	);
 });
 
 test("legacy materializer fixture stays out of production imports", () => {

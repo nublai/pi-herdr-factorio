@@ -1639,6 +1639,8 @@ const PINS = {
 			"typecheck",
 			"lint",
 			"format",
+			"layout",
+			"decisions",
 			"main_tests",
 			"candidate_tests",
 			"heldout",
