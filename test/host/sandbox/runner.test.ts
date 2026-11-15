@@ -2358,6 +2358,378 @@ describe("runStage settlement on a queue update", () => {
 });
 
 describe("private build executor", () => {
+	for (const scenario of [
+		"clean",
+		"revised",
+		"still-unrun",
+		"new-and-unrun",
+		"replaced",
+		"near-token-cap",
+		"near-wall-cap",
+		"context-reserve",
+		"repair-acceptance",
+		"owner-report",
+	] as const)
+		it(`build settlement gives one same-session revision for unrun tests: ${scenario}`, {
+			timeout: 30_000,
+		}, async (t) => {
+			const dir = mkdtempSync(join(tmpdir(), "factory-build-draft-"));
+			t.after(() => rmSync(dir, { recursive: true, force: true }));
+			const stateDir = join(dir, "state");
+			const root = join(dir, "bundle");
+			const staging = join(root, "staging");
+			mkdirSync(staging, { recursive: true });
+			writeFileSync(join(staging, "marker"), "bundle");
+			const hash = await manifestDigest(staging);
+			assert.ok(hash);
+			fs.renameSync(staging, join(root, `assets-${hash}`));
+			symlinkSync(`assets-${hash}`, join(root, "current"));
+			const base = join(stateDir, "pristine", RUN);
+			const workspace = join(dir, "workspace");
+
+			mkdirSync(join(stateDir, "stages", RUN), { recursive: true });
+
+			for (const path of [base, workspace]) {
+				mkdirSync(join(path, "test"), { recursive: true });
+				writeFileSync(join(path, "test/old.test.ts"), "base");
+				writeFileSync(
+					join(path, "package.json"),
+					'{"scripts":{"test":"node --test"}}',
+				);
+			}
+
+			if (scenario === "repair-acceptance") {
+				mkdirSync(join(base, "test/acceptance"));
+				writeFileSync(join(base, "test/acceptance/private.ts"), "private");
+			}
+
+			const repo = "owner/repo",
+				sha = "a".repeat(40);
+
+			assert.ok(isRepoSlug(repo) && isGitSha(sha));
+
+			const contract: Contract = {
+				version: 2,
+				runId: digest(RUN),
+				issue: 1,
+				base: { repo, sha },
+				snapshot: {
+					digest: digestOf("snapshot"),
+					source: "unedited",
+					eventId: "1",
+					eventAt: "2026-11-15T00:00:00Z",
+				},
+				link: null,
+				summary: "Add a regression",
+				behavior: ["Add a regression"],
+				exclusions: [],
+				acceptance: [
+					{ id: "A1", kind: "new_behavior", text: "Regression is covered" },
+				],
+				compatibility: [],
+				limits: [],
+				files: [],
+				evidence: [],
+				replacesTests:
+					scenario === "replaced"
+						? [
+								{
+									path: "test/old.test.ts",
+									test: "old",
+									reason: "New behavior",
+								},
+							]
+						: [],
+			};
+
+			const bytes = contractBytes(contract),
+				contractDigest = contractDigestOf(bytes);
+
+			assert.equal(
+				await fileRunFiles(stateDir).writeContract({
+					contract,
+					bytes,
+					digest: contractDigest,
+				}),
+				true,
+			);
+			const event = feedbackId(repo, "review", 1);
+
+			const declined = {
+				event,
+				kind: "declined",
+				reason: "builder_declined",
+				detail: "Contradicts the contract's exclusions",
+			} as const;
+
+			const batch =
+				scenario === "owner-report"
+					? await storeFeedbackBatch(
+							stateDir,
+							{
+								version: 1,
+								runId: digest(RUN),
+								pr: 1,
+								head: sha,
+								records: [],
+								cards: [
+									{
+										event,
+										head: sha,
+										path: null,
+										line: null,
+										excerpt: "Out-of-scope request",
+										truncated: false,
+									},
+								],
+								full: null,
+							},
+							null,
+						)
+					: null;
+
+			let prompts = 0;
+			let reportRequired = false;
+			const turnTokens = scenario === "context-reserve" ? 30_000 : 12;
+			const noEdit = scenario === "clean" || scenario === "repair-acceptance";
+
+			const skip =
+				scenario === "near-token-cap" ||
+				scenario === "near-wall-cap" ||
+				scenario === "context-reserve";
+
+			const h = harness([
+				(command, pi) => {
+					if (command.type === "prompt") {
+						prompts++;
+						reportRequired =
+							/same final report.*original prompt/is.test(
+								String(command.message),
+							) &&
+							/single JSON object.*dispositions.*findings/is.test(
+								String(command.message),
+							);
+						writeFileSync(join(workspace, "value.ts"), "new");
+
+						if (!noEdit)
+							writeFileSync(join(workspace, "test/old.test.ts"), "changed");
+
+						if (
+							scenario === "new-and-unrun" ||
+							(scenario === "revised" && prompts === 2)
+						) {
+							writeFileSync(join(workspace, "test/new.test.ts"), "new test");
+
+							if (scenario === "revised")
+								writeFileSync(join(workspace, "test/old.test.ts"), "base");
+						}
+					}
+
+					if (command.type === "get_last_assistant_text")
+						pi.emit({
+							type: "response",
+							id: command.id ?? "",
+							command: "get_last_assistant_text",
+							success: true,
+							data: {
+								text:
+									scenario === "owner-report" &&
+									(prompts === 1 || reportRequired)
+										? JSON.stringify({ dispositions: [declined], findings: [] })
+										: "done",
+							},
+						});
+					replayer([
+						started("x"),
+						{ type: "agent_start" },
+						{ type: "turn_start" },
+						assistant({ tokens: turnTokens }),
+						{ type: "agent_settled", aborted: false },
+					])(command, pi);
+				},
+			]);
+
+			const executor = executorModule.sandboxExecutor({
+				platform: EXE_DEV_PLATFORM,
+				stateDir,
+				root,
+				arch: "x64",
+				usernsLimit: async () => "15000",
+				xdgRuntimeDir: "/run/user/1000",
+				log: () => {},
+				exec: async (command) => ({
+					code: 0,
+					stdout: command === "bwrap" ? "bubblewrap 0.9.0\n" : "",
+					stderr: "",
+				}),
+				host: (config) => {
+					assert.ok(config.stageDir);
+					const stageDir = config.stageDir;
+
+					return {
+						...h.host,
+						async writeOutput(text) {
+							writeFileSync(join(stageDir, "output.txt"), text, {
+								mode: 0o600,
+							});
+
+							return h.host.writeOutput(text);
+						},
+						async writeReceipt(receipt) {
+							writeFileSync(
+								join(stageDir, "receipt.json"),
+								JSON.stringify(receipt),
+								{ mode: 0o600 },
+							);
+
+							return h.host.writeReceipt(receipt);
+						},
+					};
+				},
+			});
+
+			assert.equal(await executor.preflight(), true);
+
+			const binding = {
+				runId: digest(RUN),
+				baseSha: sha,
+				contractDigest,
+				acceptanceDigest: digestOf("suite"),
+				round:
+					scenario === "repair-acceptance" || scenario === "owner-report"
+						? 1
+						: 0,
+			};
+
+			if (binding.round > 0) {
+				writeFileSync(join(workspace, "value.ts"), "prior");
+				const prior = await collectPatch({ base, workspace, repairTree: true });
+
+				assert.ok(prior.kind === "collected");
+				assert.equal(
+					storePatch(stateDir, { ...binding, round: 0 }, prior, {
+						model: "openai/gpt-6.1-sol",
+						observed: null,
+						commands: [],
+					}).kind,
+					"found",
+				);
+				writeFileSync(join(workspace, ".factory-feedback.json"), "{}", {
+					mode: 0o600,
+				});
+			}
+
+			const launch = await executor.launch({
+				...input(
+					{
+						stage: "build",
+						prompt: buildPrompt({
+							contract,
+							guidance: { general: "", stages: {} },
+							inlined: [],
+							feedback: scenario === "owner-report",
+						}),
+					},
+					{
+						maxTokens:
+							scenario === "near-token-cap"
+								? 20
+								: scenario === "context-reserve"
+									? 70_000
+									: null,
+						budget: {
+							maxTurns: 10,
+							wallMs: scenario === "near-wall-cap" ? 60_000 : 900_000,
+							stallMs: 300_000,
+						},
+					},
+				),
+				round: binding.round,
+				execution:
+					batch === null
+						? undefined
+						: ({
+								id: digestOf("owner-report"),
+								stage: "build",
+								runId: binding.runId,
+								round: 1,
+								attempt: 1,
+								workflowSha: sha,
+								workflowDigest: digestOf("workflow"),
+								feedbackFrom: {
+									round: 0,
+									generation: 0,
+									digest: digestOf("generation"),
+								},
+								cause: {
+									kind: "feedback",
+									batch: batch.digest,
+									assessment: {
+										bindingDigest: digestOf("assessment"),
+										recordDigest: digestOf("record"),
+									},
+									review: null,
+								},
+							} satisfies RepairExecution),
+				workspace,
+				tools: ["read", "write"],
+				skills: [],
+				build: { binding, command: "npm test", allowNoChange: false },
+			});
+
+			assert.equal(launch.kind, "started");
+
+			if (launch.kind !== "started") return;
+			assert.equal((await launch.done).kind, "passed");
+
+			const revisions = h.pis[0]!.received.filter(
+				(c) => c.type === "prompt",
+			).slice(1);
+
+			assert.equal(
+				revisions.length,
+				noEdit || scenario === "replaced" || skip ? 0 : 1,
+			);
+
+			if (revisions.length > 0) {
+				assert.match(String(revisions[0]!.message), /test\/old\.test\.ts/);
+				assert.match(String(revisions[0]!.message), /base bytes/);
+				assert.match(String(revisions[0]!.message), /new test file/);
+			}
+
+			assert.equal(h.pis.length, 1);
+			assert.equal(h.receipts[0]!.usage.total, prompts * turnTokens);
+
+			if (skip) {
+				assert.deepEqual(h.receipts[0]!.draftSkips, [
+					scenario === "near-wall-cap" ? "wall" : "tokens",
+				]);
+			}
+
+			if (scenario === "owner-report") {
+				assert.equal(prompts, 2);
+				assert.match(
+					String(h.pis[0]!.received[0]!.message),
+					/Return one final JSON object with dispositions/,
+				);
+			}
+
+			const collected = readPatch(stateDir, binding);
+			assert.equal(collected.kind, "found");
+
+			if (collected.kind === "found") {
+				assert.equal(
+					collected.receipt.changedPaths.includes("test/old.test.ts"),
+					!noEdit && scenario !== "revised",
+				);
+
+				if (scenario === "owner-report") {
+					assert.deepEqual(collected.receipt.dispositions, [declined]);
+					assert.deepEqual(collected.receipt.findingDispositions, []);
+					assert.equal(reportRequired, true);
+				}
+			}
+		});
 	it("loads the bundled Herdr extension exactly when build delegation is granted", () => {
 		const ordinary = piCommand(model("openai/gpt-6.1-sol"), false);
 		const delegated = piCommand(model("openai/gpt-6.1-sol"), true);

@@ -15,6 +15,7 @@ import {
 	type BaseReason,
 	type BaseReceipt,
 	type DiagnosisNeeds,
+	type DraftFeedback,
 	type HeldoutReplay,
 	type JudgeDraftFeedback,
 } from "../../src/candidate/diagnosis.ts";
@@ -55,7 +56,7 @@ import {
 } from "../gates/materialize.ts";
 import { type GateRunner } from "../gates/runner.ts";
 import { scopeOwner, scopeUnit, stopScopeArgv } from "../isolation/scope.ts";
-import type { DraftCheckContext, StageRunInput } from "../sandbox/run-stage.ts";
+import type { DraftCheckContext } from "../sandbox/run-stage.ts";
 import {
 	checkoutTree,
 	checkoutWorkspace,
@@ -74,7 +75,10 @@ export function controllerDraftChecker(config: {
 	>;
 	readonly fetch?: TarballFetch;
 	readonly runner?: GateRunner;
-}): NonNullable<StageRunInput["draftCheck"]> {
+}): (
+	text: string,
+	context: DraftCheckContext,
+) => Promise<DraftFeedback | null> {
 	let cached: ReturnType<TarballFetch> | null = null;
 
 	const fetch: TarballFetch = (repo, sha, bound) => {

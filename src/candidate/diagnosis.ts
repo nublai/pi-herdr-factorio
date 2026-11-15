@@ -1083,6 +1083,24 @@ export type JudgeDraftFeedback = Readonly<{
 
 export type DraftFeedback = BaseDraftFeedback | JudgeDraftFeedback;
 
+export type UnrunTestFeedback = Readonly<{
+	verdict: "unrun_test_edits";
+	files: readonly string[];
+	message: string;
+}>;
+
+export function unrunTestFeedback(
+	files: readonly string[],
+): UnrunTestFeedback | null {
+	return files.length === 0
+		? null
+		: {
+				verdict: "unrun_test_edits",
+				files,
+				message: `Existing test files not named in the contract's replacesTests run from their base bytes, so edits to them are not run. Put new or changed tests in a new test file, including new helpers and fixtures. Do not change, skip or delete existing tests the contract does not name. Revise the patch in this workspace, then settle again. Unrun test edits: ${JSON.stringify(files)}.`,
+			};
+}
+
 export function runtimeCause(cause: string): boolean {
 	return (
 		/^(?:[A-Z][A-Za-z]*Error\b|Error:)/.test(cause.trim()) &&

@@ -36,6 +36,7 @@ import {
 } from "../trust/protected-paths.ts";
 import {
 	assessVisibleChecks,
+	unrunTestFeedback,
 	type CheckAssessment,
 	type CheckEnvironment,
 } from "./diagnosis.ts";
@@ -554,6 +555,54 @@ function isTestInput(path: string): boolean {
 	);
 }
 
+export function testInputEdits(
+	base: ReadonlyMap<string, Pick<Entry, "data" | "mode">>,
+	candidate: ReadonlyMap<string, Pick<Entry, "data" | "mode">>,
+	replacesTests: readonly { readonly path: string }[],
+) {
+	const unrunTestEdits = [...base]
+		.flatMap(([path, entry]) => {
+			if (
+				!isTestInput(path) ||
+				replacesTests.some((test) => test.path === path)
+			)
+				return [];
+			const changed = candidate.get(path);
+
+			return changed === undefined ||
+				changed.mode !== entry.mode ||
+				!changed.data.equals(entry.data)
+				? [path]
+				: [];
+		})
+		.sort();
+
+	return {
+		unrunTestEdits,
+		addsTestFile: [...candidate.keys()].some(
+			(path) =>
+				isTestInput(path) &&
+				!base.has(path) &&
+				!replacesTests.some((test) => test.path === path),
+		),
+	};
+}
+
+export function workspaceTestEdits(
+	base: string,
+	workspace: string,
+	replacesTests: readonly { readonly path: string }[],
+	repairTree = false,
+) {
+	const entries = tree(base);
+
+	if (repairTree)
+		for (const path of entries.keys())
+			if (strippedFromRepair(path)) entries.delete(path);
+
+	return testInputEdits(entries, tree(workspace), replacesTests);
+}
+
 function scriptsOf(entries: ReadonlyMap<string, Entry>) {
 	return objectOf(
 		fieldOf(
@@ -586,11 +635,10 @@ export function trustedVisiblePlan(
 	const entries = tree(base),
 		candidate = tree(workspace);
 
-	let testInputsChanged = [...candidate.keys()].some(
-		(path) =>
-			isTestInput(path) &&
-			!entries.has(path) &&
-			!replacesTests.some((entry) => entry.path === path),
+	const { unrunTestEdits, addsTestFile } = testInputEdits(
+		entries,
+		candidate,
+		replacesTests,
 	);
 
 	const baseManifest = objectOf(
@@ -614,22 +662,10 @@ export function trustedVisiblePlan(
 		);
 	}
 
-	for (const [path, entry] of entries) {
-		if (
-			!isTestInput(path) ||
-			replacesTests.some((entry) => entry.path === path)
-		)
-			continue;
-		const changed = candidate.get(path);
+	for (const path of unrunTestEdits) {
+		const entry = entries.get(path);
 
-		if (
-			changed !== undefined &&
-			changed.mode === entry.mode &&
-			changed.data.equals(entry.data)
-		)
-			continue;
-
-		testInputsChanged = true;
+		if (entry === undefined) continue;
 		const dest = join(workspace, path);
 		rmSync(dest, { force: true });
 		materialize(workspace, new Map([[path, entry]]));
@@ -640,7 +676,7 @@ export function trustedVisiblePlan(
 		scriptsChanged:
 			JSON.stringify(scriptsOf(entries)) !==
 			JSON.stringify(scriptsOf(candidate)),
-		testInputsChanged,
+		testInputsChanged: unrunTestEdits.length > 0 || addsTestFile,
 	};
 }
 
@@ -1007,6 +1043,7 @@ export async function prepareRepairTree(
 	patch: string | Uint8Array,
 	changedPaths: readonly string[],
 	feedback: string,
+	replacesTests: readonly { readonly path: string }[] = [],
 ): Promise<void> {
 	await publicationTree(base, dest, patch, changedPaths);
 
@@ -1024,7 +1061,25 @@ export async function prepareRepairTree(
 		}
 	}
 
-	writeFileSync(join(dest, FEEDBACK_FILE), feedback, {
+	const controller = unrunTestFeedback(
+		workspaceTestEdits(base, dest, replacesTests, true).unrunTestEdits,
+	);
+
+	const parsed = objectOf(parseJson(feedback));
+	const prior = parsed?.controller;
+
+	const content =
+		controller === null || parsed === null
+			? feedback
+			: JSON.stringify({
+					...parsed,
+					controller: [
+						...(prior === undefined ? [] : (arrayOf(prior) ?? [prior])),
+						controller,
+					],
+				});
+
+	writeFileSync(join(dest, FEEDBACK_FILE), content, {
 		flag: "wx",
 		mode: 0o600,
 	});
