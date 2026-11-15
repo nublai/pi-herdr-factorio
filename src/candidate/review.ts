@@ -617,6 +617,18 @@ function bounded(value: JsonValue | undefined, max: number): string | null {
 	return text !== null && text.length > 0 && text.length <= max ? text : null;
 }
 
+function freeText(value: JsonValue | undefined, max: number): string | null {
+	const text = textOf(value);
+
+	if (text === null || text.length === 0) return null;
+	const chars = [...text];
+
+	if (chars.length <= max) return text;
+	const marker = `… [cut by controller at ${max} characters]`;
+
+	return chars.slice(0, max - [...marker].length).join("") + marker;
+}
+
 export function parseSeat(
 	text: string,
 	seat: string,
@@ -645,8 +657,8 @@ export function parseSeat(
 		const path = textOf(fieldOf(f, "path"));
 		const start = countOf(fieldOf(f, "startLine"));
 		const end = countOf(fieldOf(f, "endLine"));
-		const claim = bounded(fieldOf(f, "claim"), 600);
-		const evidence = bounded(fieldOf(f, "evidence"), 1200);
+		const claim = freeText(fieldOf(f, "claim"), 600);
+		const evidence = freeText(fieldOf(f, "evidence"), 1200);
 
 		if (
 			!keys(f, [
@@ -711,7 +723,7 @@ export function parseSeat(
 		const j = objectOf(item);
 		const scenario = textOf(fieldOf(j, "scenario"));
 		const outcome = fieldOf(j, "outcome");
-		const reason = bounded(fieldOf(j, "reason"), 600);
+		const reason = freeText(fieldOf(j, "reason"), 600);
 
 		if (
 			!keys(j, ["scenario", "outcome", "reason"]) ||
@@ -1278,7 +1290,7 @@ function rankedFindings(receipt: {
 				path: f.path,
 				startLine: f.startLine,
 				endLine: f.endLine,
-				claim: f.claim.slice(0, 600),
+				claim: [...f.claim].slice(0, 600).join(""),
 				rank: rank[f.category],
 			})),
 	);
@@ -1299,7 +1311,9 @@ export function priorFindings(receipt: {
 		.map(({ rank: _rank, ...item }) => item);
 }
 
-export function reviewFeedback(receipt: ReviewReceipt) {
+export function reviewFeedback(receipt: {
+	readonly seats: readonly SeatResult[];
+}) {
 	const findings = rankedFindings(receipt);
 
 	const judgments = receipt.seats.flatMap((seat) =>
@@ -1309,7 +1323,7 @@ export function reviewFeedback(receipt: ReviewReceipt) {
 				seat: seat.seat,
 				category: "criterion",
 				scenario: j.scenario,
-				claim: j.reason.slice(0, 600),
+				claim: [...j.reason].slice(0, 600).join(""),
 				rank: 1,
 			})),
 	);
