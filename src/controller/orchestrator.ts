@@ -2334,6 +2334,15 @@ export class Orchestrator {
 		let settled: "held" | "resolved" | "refused" = "resolved";
 		let timeline: Read<TimelineEntry[]> | null = null;
 
+		for (const { marker } of ledger.markers) {
+			if (
+				isTerminal(marker.status) &&
+				!(await this.#matchesAdmission(marker, record.updatedAt, true))
+			) {
+				return this.state.corrupt.has(record.number) ? "corrupt" : "undecided";
+			}
+		}
+
 		for (const claim of await this.#input.files.listClaims()) {
 			if (claim.issue !== record.number || this.#ended.has(claim.runId)) {
 				continue;
@@ -2342,12 +2351,6 @@ export class Orchestrator {
 			const latest = latestFor(ledger, claim.runId)?.marker ?? null;
 
 			if (latest !== null && isTerminal(latest.status)) {
-				if (!(await this.#matchesAdmission(latest, record.updatedAt, true))) {
-					return this.state.corrupt.has(record.number)
-						? "corrupt"
-						: "undecided";
-				}
-
 				await this.#keepEnded(
 					{ ...claim, ...recordOf(latest) },
 					await this.#freezeRow(latest),
