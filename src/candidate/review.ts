@@ -297,6 +297,67 @@ export const SECOND_JUDGE_UNCONFIGURED =
 export const SECOND_JUDGE_BOUND =
 	"The second judge reached its token, turn or time bound before it answered.";
 
+/** The two seats that judge judge-only scenarios. */
+export type JudgeSeat = "code-review" | typeof SECOND_JUDGE;
+
+/**
+ * Why a judge gave no answer: it ran out of its token, turn or time bound,
+ * it refused, or it answered with nothing the controller could read.
+ */
+export type NoAnswer = "bound" | "refused" | "unanswered";
+
+const JUDGE_NAMES: Readonly<Record<JudgeSeat, string>> = {
+	"code-review": "The first judge (code-review)",
+	[SECOND_JUDGE]: "The second judge",
+};
+
+const NO_ANSWERS: Readonly<
+	Record<
+		NoAnswer,
+		{ readonly outcome: "timeout" | "inconclusive"; readonly text: string }
+	>
+> = {
+	bound: {
+		outcome: "timeout",
+		text: "reached its token, turn or time bound before it answered.",
+	},
+	refused: { outcome: "inconclusive", text: "refused to answer." },
+	unanswered: {
+		outcome: "inconclusive",
+		text: "gave no answer the controller could read.",
+	},
+};
+
+function placeholderSeat(input: {
+	readonly seat: JudgeSeat;
+	readonly scenarios: readonly string[];
+	readonly outcome: "unverifiable" | "timeout" | "inconclusive";
+	readonly reason: string;
+	readonly family: FamilyInput;
+	readonly builder: FamilyInput;
+	readonly requested: string;
+	readonly refusal: string | null;
+	readonly tokens: number;
+}): SeatReceipt {
+	return {
+		seat: input.seat,
+		findings: [],
+		judgments: input.scenarios.map((scenario) => ({
+			scenario,
+			outcome: input.outcome,
+			reason: input.reason,
+		})),
+		family: input.family,
+		requested: input.requested,
+		observed: null,
+		label: familyLabel(input.family, input.builder),
+		primary: input.requested,
+		refusal: input.refusal,
+		fallback: false,
+		tokens: input.tokens,
+	};
+}
+
 /**
  * The controller-written `second-judge` seat for a judge that gave no
  * answer: `unverifiable` and marked `unconfigured` when no second judge is
@@ -313,27 +374,41 @@ export function judgePlaceholder(input: {
 	readonly requested: string;
 	readonly tokens: number;
 }): SeatReceipt {
-	const receipt: SeatReceipt = {
+	const receipt = placeholderSeat({
+		...input,
 		seat: SECOND_JUDGE,
-		findings: [],
-		judgments: input.scenarios.map((scenario) => ({
-			scenario,
-			outcome: input.outcome,
-			reason: input.reason,
-		})),
-		family: input.family,
-		requested: input.requested,
-		observed: null,
-		label: familyLabel(input.family, input.builder),
-		primary: input.requested,
 		refusal: null,
-		fallback: false,
-		tokens: input.tokens,
-	};
+	});
 
 	if (input.outcome === "timeout") return receipt;
 
 	return { ...receipt, unconfigured: true };
+}
+
+/**
+ * The controller-written seat for a judge that ran but gave no answer, so
+ * its scenarios enter the judge table instead of failing the review: each
+ * judgment is `timeout` for a judge that ran out of its bound and
+ * `inconclusive` for one that refused or answered unreadably, with a fixed
+ * controller reason and no findings. `tokens` is what the judge spent.
+ */
+export function noAnswerSeat(input: {
+	readonly seat: JudgeSeat;
+	readonly why: NoAnswer;
+	readonly scenarios: readonly string[];
+	readonly family: FamilyInput;
+	readonly builder: FamilyInput;
+	readonly requested: string;
+	readonly refusal: string | null;
+	readonly tokens: number;
+}): SeatReceipt {
+	const { outcome, text } = NO_ANSWERS[input.why];
+
+	return placeholderSeat({
+		...input,
+		outcome,
+		reason: `${JUDGE_NAMES[input.seat]} ${text}`,
+	});
 }
 
 export type Finding = {
@@ -623,14 +698,17 @@ export function parseSeat(
 /**
  * What one judge-only scenario comes to once its judges are combined.
  * `pass` certifies, `fail` takes the repair path, and `disagree`,
- * `unverified` and `missing` hold the run for the owner.
+ * `unverified` and `missing` hold the run for the owner. `split` is never
+ * a table cell: it is a one-fail, one-pass pair that an earlier round's
+ * review also split on, so it holds instead of repairing again.
  */
 export type JudgeRoute =
 	| "pass"
 	| "fail"
 	| "disagree"
 	| "unverified"
-	| "missing";
+	| "missing"
+	| "split";
 
 /** The second judge's column: an outcome, or `missing` when none is configured. */
 export type SecondJudgeOutcome = JudgmentOutcome | "missing";
@@ -759,15 +837,53 @@ export function scenarioJudgments(
 	});
 }
 
+/** True for a scenario its two judges split on: one `fail`, one `pass`. */
+function isSplit(j: ScenarioJudgment): boolean {
+	const outcomes = j.votes.map((v) => v.outcome);
+
+	return (
+		j.paired &&
+		outcomes.length === 2 &&
+		outcomes.includes("fail") &&
+		outcomes.includes("pass")
+	);
+}
+
+const HELD_ROUTES: readonly JudgeRoute[] = [
+	"disagree",
+	"unverified",
+	"missing",
+];
+
 /**
- * The judge-only scenarios a review holds for the owner: every scenario
- * that did not pass, when no blocking finding exists and no scenario
- * fails. Empty for any other review, which certifies or repairs.
+ * The judge-only scenarios a review holds for the owner. When a scenario
+ * splits one `fail`, one `pass` and an `earlier` round's review split on
+ * it too, the repair that split drove did not settle it: the review holds
+ * that scenario as `split`, with every other held scenario, and never
+ * repairs again, whatever else blocks. Otherwise every scenario that did
+ * not pass holds when no blocking finding exists and no scenario fails.
+ * Empty for any other review, which certifies or repairs.
  */
 export function unverifiableOnly(
 	review: JudgedReview,
+	earlier: readonly JudgedReview[] = [],
 ): readonly ScenarioJudgment[] {
 	const routes = scenarioJudgments(review);
+
+	const before = new Set(
+		earlier.flatMap((r) =>
+			scenarioJudgments(r).flatMap((j) => (isSplit(j) ? [j.scenario] : [])),
+		),
+	);
+
+	if (routes.some((j) => isSplit(j) && before.has(j.scenario)))
+		return routes.flatMap((j) =>
+			isSplit(j) && before.has(j.scenario)
+				? [{ ...j, route: "split" as const }]
+				: HELD_ROUTES.includes(j.route)
+					? [j]
+					: [],
+		);
 
 	return routes.some((j) => j.route === "fail") ||
 		review.seats.some((seat) =>
@@ -812,6 +928,7 @@ export const ROUTE_TEXT: Readonly<
 	disagree: "The judges disagree",
 	unverified: "Neither judge could verify it",
 	missing: "No second judge is configured",
+	split: "The judges still disagree after one repair round",
 };
 
 function ownerJudgment(j: ScenarioJudgment, max: number): OwnerJudgment {
@@ -840,8 +957,11 @@ function ownerJudgment(j: ScenarioJudgment, max: number): OwnerJudgment {
  * characters replaced, cut to `OWNER_REASON_MAX` code points. With a
  * second judge the reason names the route and each judge's vote.
  */
-export function ownerJudgments(review: JudgedReview): readonly OwnerJudgment[] {
-	return unverifiableOnly(review)
+export function ownerJudgments(
+	review: JudgedReview,
+	earlier: readonly JudgedReview[] = [],
+): readonly OwnerJudgment[] {
+	return unverifiableOnly(review, earlier)
 		.slice(0, OWNER_JUDGMENTS_MAX)
 		.map((j) => {
 			const { scenario, reason } = ownerJudgment(j, OWNER_REASON_MAX);
@@ -857,8 +977,11 @@ export function ownerJudgments(review: JudgedReview): readonly OwnerJudgment[] {
  */
 export function unverifiableJudgments(
 	review: JudgedReview,
+	earlier: readonly JudgedReview[] = [],
 ): readonly OwnerJudgment[] {
-	return unverifiableOnly(review).map((j) => ownerJudgment(j, Infinity));
+	return unverifiableOnly(review, earlier).map((j) =>
+		ownerJudgment(j, Infinity),
+	);
 }
 
 export const UNVERIFIABLE_CODES = [
@@ -873,6 +996,7 @@ export type UnverifiableCode = (typeof UNVERIFIABLE_CODES)[number];
 
 /**
  * Why review held the run, from controller facts only, by precedence:
+ * `judges_disagree` when a judge split persisted after one repair round,
  * `second_judge_missing` when any held scenario had no second judge
  * configured, `evidence_missing` when the review had no trusted-pipeline
  * evidence, `judges_disagree` when one judge passed a held scenario,
@@ -886,6 +1010,8 @@ export function unverifiableCode(input: {
 	readonly routes?: readonly JudgeRoute[];
 }): UnverifiableCode {
 	const routes = input.routes ?? [];
+
+	if (routes.includes("split")) return "judges_disagree";
 
 	if (routes.includes("missing")) return "second_judge_missing";
 
@@ -1073,10 +1199,22 @@ export function findingFingerprints(receipt: {
 	].sort();
 }
 
-export function reviewFeedback(receipt: ReviewReceipt) {
+/** One earlier blocking code finding, as a later round's review sees it. */
+export type PriorFinding = {
+	readonly seat: string;
+	readonly category: Finding["category"];
+	readonly path: string;
+	readonly startLine: number;
+	readonly endLine: number;
+	readonly claim: string;
+};
+
+function rankedFindings(receipt: {
+	readonly seats: readonly SeatResult[];
+}): readonly (PriorFinding & { readonly rank: number })[] {
 	const rank = { security: 0, contract: 2, bug: 3, simplify: 4 };
 
-	const findings = receipt.seats.flatMap((seat) =>
+	return receipt.seats.flatMap((seat) =>
 		seat.findings
 			.filter((f) => f.severity === "blocking" && f.category !== "simplify")
 			.map((f) => ({
@@ -1089,6 +1227,25 @@ export function reviewFeedback(receipt: ReviewReceipt) {
 				rank: rank[f.category],
 			})),
 	);
+}
+
+/**
+ * The earlier review's blocking code findings for a later round's review,
+ * at most 10. Unlike `reviewFeedback`, which tells the builder what to
+ * repair, it carries no judgment: neither judge sees an earlier vote or
+ * reason on a scenario it must judge again.
+ */
+export function priorFindings(receipt: {
+	readonly seats: readonly SeatResult[];
+}): readonly PriorFinding[] {
+	return [...rankedFindings(receipt)]
+		.sort((a, b) => a.rank - b.rank)
+		.slice(0, 10)
+		.map(({ rank: _rank, ...item }) => item);
+}
+
+export function reviewFeedback(receipt: ReviewReceipt) {
+	const findings = rankedFindings(receipt);
 
 	const judgments = receipt.seats.flatMap((seat) =>
 		seat.judgments
@@ -1133,7 +1290,7 @@ export function candidateReviewPrompt({
 	readonly evidence?: TrustedEvidence | null;
 	readonly owner?: string;
 	readonly repairDiff?: string | null;
-	readonly previousFindings?: readonly unknown[];
+	readonly previousFindings?: readonly PriorFinding[];
 }): { readonly kind: "ready"; readonly prompt: string } | ReviewInputRefusal {
 	const bytes = Buffer.byteLength(diff);
 

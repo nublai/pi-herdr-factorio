@@ -14,13 +14,16 @@ import {
 import {
 	candidateReviewPrompt,
 	judgePlaceholder,
+	type JudgeSeat,
+	type NoAnswer,
+	noAnswerSeat,
 	parseSeat,
+	type PriorFinding,
+	priorFindings,
 	SECOND_JUDGE,
-	SECOND_JUDGE_BOUND,
 	SECOND_JUDGE_MAX_TOKENS,
 	SECOND_JUDGE_UNCONFIGURED,
 	ReviewEvidenceUnavailable,
-	reviewFeedback,
 	type ReviewInput,
 	type ReviewInputRefusal,
 	reviewSeats,
@@ -520,7 +523,7 @@ async function candidateReviewInputs(
 
 		let owner = "";
 		let repairDiff: string | null = null;
-		let previousFindings: ReturnType<typeof reviewFeedback> = [];
+		let previousFindings: readonly PriorFinding[] = [];
 
 		if (round > 0 && !isOwner) {
 			const book = (await files.listClaims()).find(
@@ -557,7 +560,7 @@ async function candidateReviewInputs(
 				prior?.review !== undefined ||
 				(prior?.certification !== null && prior?.certification !== undefined)
 			)
-				previousFindings = reviewFeedback(
+				previousFindings = priorFindings(
 					prior.review ?? prior.certification!.review,
 				);
 
@@ -773,6 +776,11 @@ export async function runReview(
 	const builder = prepared.families?.builder ?? FAMILY_MISSING;
 	const judgeModel = input.settings.secondJudgeModel ?? null;
 
+	const judging = prepared.input.seats.includes(SECOND_JUDGE);
+
+	const judgeOf = (seat: string): JudgeSeat | null =>
+		judging && (seat === "code-review" || seat === SECOND_JUDGE) ? seat : null;
+
 	for (const seat of prepared.input.seats) {
 		const sessionDir = join(dir, seat);
 
@@ -809,7 +817,10 @@ export async function runReview(
 			const host = createHost(sessionDir, input.tools);
 			lastHost = host;
 
-			const prompt = await decorate(seatPrompt(prepared.input, seat), seat);
+			const prompt =
+				seat === SECOND_JUDGE
+					? seatPrompt(prepared.input, seat)
+					: await decorate(seatPrompt(prepared.input, seat), seat);
 
 			if (prompt === null) return finish(CRASHED);
 
@@ -842,6 +853,7 @@ export async function runReview(
 						fallback:
 							seat === "security-review" ? input.settings.fallback : null,
 						maxTokens,
+						reserveTokens: seat === SECOND_JUDGE,
 						budget: {
 							...input.settings.budget,
 							maxTurns: Math.max(0, input.settings.budget.maxTurns - turns),
@@ -883,21 +895,48 @@ export async function runReview(
 		for (const [model, tokens] of Object.entries(record.usage.byModel))
 			byModel[model] = (byModel[model] ?? 0) + tokens;
 
-		if (seat === SECOND_JUDGE && record.outcome.kind === "budget_exhausted") {
-			const models = objectOf(fieldOf(record.record, "models"));
+		const judge = judgeOf(seat);
+		const models = objectOf(fieldOf(record.record, "models"));
 
+		const parsed =
+			record.outcome.kind === "passed"
+				? parseSeat(
+						(await boundedText(
+							join(sessionDir, "output.txt"),
+							OUTPUT_MAX_BYTES,
+						)) ?? "",
+						seat,
+						prepared.input.files,
+						prepared.input.scenarios,
+					)
+				: null;
+
+		const why: NoAnswer | null =
+			judge === null || parsed !== null
+				? null
+				: record.outcome.kind === "budget_exhausted"
+					? "bound"
+					: record.outcome.kind === "refused"
+						? "refused"
+						: record.outcome.kind === "passed" ||
+								record.outcome.exit === "malformed"
+							? "unanswered"
+							: null;
+
+		if (judge !== null && why !== null) {
 			receipts.push(
-				judgePlaceholder({
+				noAnswerSeat({
+					seat: judge,
+					why,
 					scenarios: prepared.input.scenarios,
-					outcome: "timeout",
-					reason: SECOND_JUDGE_BOUND,
 					family:
 						parseFamily(fieldOf(record.record, "family")) ?? FAMILY_MISSING,
 					builder,
 					requested:
 						textOf(fieldOf(models, "requested")) ??
-						judgeModel ??
+						(judge === SECOND_JUDGE ? judgeModel : null) ??
 						input.settings.model,
+					refusal: textOf(fieldOf(record.record, "refusal")),
 					tokens: record.usage.total,
 				}),
 			);
@@ -907,16 +946,7 @@ export async function runReview(
 
 		if (record.outcome.kind !== "passed") return finish(record.outcome);
 
-		const parsed = parseSeat(
-			(await boundedText(join(sessionDir, "output.txt"), OUTPUT_MAX_BYTES)) ??
-				"",
-			seat,
-			prepared.input.files,
-			prepared.input.scenarios,
-		);
-
 		if (parsed === null) return finish({ kind: "failed", exit: "malformed" });
-		const models = objectOf(fieldOf(record.record, "models"));
 		const fallback = objectOf(fieldOf(record.record, "fallback"));
 
 		const requested =

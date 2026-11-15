@@ -63,6 +63,7 @@ import {
 	SECOND_JUDGE_BOUND,
 	SECOND_JUDGE_MAX_TOKENS,
 	SECOND_JUDGE_UNCONFIGURED,
+	scenarioJudgments,
 	seatPrompt,
 	type SeatReceipt,
 	unverifiableOnly,
@@ -111,7 +112,7 @@ import {
 	VISIBLE_WARN_MS,
 	type VisibleRunOptions,
 } from "../../../host/sandbox/visible-tests.ts";
-import { withSkills } from "../../../host/sandbox/executor.ts";
+import { reviewSkills, withSkills } from "../../../host/sandbox/executor.ts";
 import { AuditLog, type JournalRecord } from "../../../host/gateway/audit.ts";
 import {
 	assertReaderParity,
@@ -8319,6 +8320,10 @@ describe("multi-seat candidate review", () => {
 			readonly codeReviewModel?: ModelId;
 			readonly secondJudgeModel?: ModelId;
 			readonly judgeTokens?: number;
+			readonly refusedSeat?: string;
+			readonly unansweredSeat?: string;
+			readonly seatTokens?: Readonly<Record<string, number>>;
+			readonly outcomes?: Readonly<Record<string, string>>;
 		} = {},
 	) {
 		const fixture = await preparedReviewFixture(attempt, false, controller);
@@ -8355,9 +8360,21 @@ describe("multi-seat candidate review", () => {
 				findings: [],
 				judgments:
 					seat === "code-review"
-						? [{ scenario: "S1", outcome: "pass", reason: "implemented" }]
+						? [
+								{
+									scenario: "S1",
+									outcome: seats.outcomes?.[seat] ?? "pass",
+									reason: "implemented",
+								},
+							]
 						: seat === "second-judge"
-							? [{ scenario: "S1", outcome: "pass", reason: "judged alone" }]
+							? [
+									{
+										scenario: "S1",
+										outcome: seats.outcomes?.[seat] ?? "pass",
+										reason: "judged alone",
+									},
+								]
 							: [],
 			});
 
@@ -8377,9 +8394,10 @@ describe("multi-seat candidate review", () => {
 										}
 									: {
 											tokens:
-												seat === "second-judge"
+												seats.seatTokens?.[seat] ??
+												(seat === "second-judge"
 													? (seats.judgeTokens ?? 10)
-													: 10,
+													: 10),
 											model:
 												seat === "security-review" && security === "fallback"
 													? "gpt-6.1-terra"
@@ -8398,7 +8416,8 @@ describe("multi-seat candidate review", () => {
 							success: true,
 							data: {
 								text:
-									seat === "security-review" && security === "malformed"
+									(seat === "security-review" && security === "malformed") ||
+									seat === seats.unansweredSeat
 										? "bad"
 										: answer,
 							},
@@ -8412,7 +8431,7 @@ describe("multi-seat candidate review", () => {
 			const h = harness(
 				fallback
 					? [script(true), script(security === "refused")]
-					: [script(false)],
+					: [script(seat === seats.refusedSeat)],
 				{ cleanupReserveMs: 1 },
 			);
 
@@ -9605,6 +9624,182 @@ describe("multi-seat candidate review", () => {
 				h.close();
 			}
 		});
+
+	it("launches the second judge through the executor's real skill decoration, leaving its complete prompt undecorated (#805 B1)", async () => {
+		const h = await setup("clean", 1, false, {
+			secondJudgeModel: model(CLAUDE),
+			journals: judgeJournals(1),
+		});
+
+		try {
+			const result = await reviewModule.runReview(
+				h.run,
+				h.dir,
+				h.create,
+				reviewSkills(process.cwd()),
+			);
+
+			assert.equal(result.kind, "passed");
+			assert.deepEqual(
+				h.hosts.map((host) => host.launches),
+				[
+					["openai/gpt-6.1-sol"],
+					["openai/gpt-6.1-sol"],
+					["openai/gpt-6.1-sol"],
+					[CLAUDE],
+				],
+			);
+
+			const input = h.fixture.prepared.input;
+			const judge = h.calls.find((call) => call.startsWith("second-judge:"));
+			const code = h.calls.find((call) => call.startsWith("code-review:"));
+
+			assert.ok(judge === `second-judge:${seatPrompt(input, "second-judge")}`);
+			assert.ok(code?.includes("### Skill: code-review"));
+		} finally {
+			h.close();
+		}
+	});
+
+	const noAnswers = [
+		["refused", "inconclusive", /refused to answer/],
+		["unanswered", "inconclusive", /gave no answer the controller could read/],
+		["budget", "timeout", /token, turn or time bound/],
+	] as const;
+
+	for (const side of ["code-review", "second-judge"] as const)
+		for (const [kind, outcome, reason] of noAnswers)
+			for (const other of ["pass", "fail"] as const) {
+				const cascades = side === "code-review" && kind === "budget";
+
+				it(`normalizes a ${kind} ${side} beside a ${other} into the judge table with recorded tokens${cascades ? "; the spent allowance then stops the findings seats as before" : ""} (#805 B3)`, async () => {
+					const h = await setup("clean", 1, false, {
+						secondJudgeModel: model(CLAUDE),
+						journals: judgeJournals(1),
+						refusedSeat: kind === "refused" ? side : undefined,
+						unansweredSeat: kind === "unanswered" ? side : undefined,
+						seatTokens: kind === "budget" ? { [side]: 61 } : {},
+						outcomes: {
+							[side === "code-review" ? "second-judge" : "code-review"]: other,
+						},
+					});
+
+					try {
+						const result = await reviewModule.runReview(
+							{ ...h.run, settings: { ...h.run.settings, maxTokens: 60 } },
+							h.dir,
+							h.create,
+						);
+
+						if (cascades) {
+							assert.equal(result.kind, "budget_exhausted");
+							assert.equal(h.hosts.length, 2);
+
+							return;
+						}
+
+						assert.equal(result.kind, "passed");
+
+						const seats: SeatReceipt[] = JSON.parse(
+							readFileSync(join(h.dir, "output.txt"), "utf8"),
+						);
+
+						const normalized = seats.find((seat) => seat.seat === side);
+						const judged = normalized?.judgments ?? [];
+
+						assert.equal(judged.length, 1);
+						assert.equal(judged[0]?.outcome, outcome);
+						assert.match(judged[0]?.reason ?? "", reason);
+						assert.deepEqual(normalized?.findings, []);
+						assert.equal(normalized?.unconfigured, undefined);
+						assert.equal(normalized?.tokens, kind === "budget" ? 61 : 10);
+						assert.equal(
+							result.receipt.usage.total,
+							seats.reduce((sum, seat) => sum + (seat.tokens ?? 0), 0),
+						);
+						assert.deepEqual(
+							scenarioJudgments({ seats }).map((j) => j.route),
+							[other === "pass" ? "disagree" : "fail"],
+						);
+					} finally {
+						h.close();
+					}
+				});
+			}
+
+	it("normalizes a refused code-review beside an unconfigured second judge into the missing column (#805 B3)", async () => {
+		const h = await setup("clean", 1, false, { refusedSeat: "code-review" });
+
+		try {
+			const result = await reviewModule.runReview(h.run, h.dir, h.create);
+
+			assert.equal(result.kind, "passed");
+
+			const seats: SeatReceipt[] = JSON.parse(
+				readFileSync(join(h.dir, "output.txt"), "utf8"),
+			);
+
+			assert.deepEqual(
+				unverifiableOnly({ seats }).map((j) => j.route),
+				["missing"],
+			);
+		} finally {
+			h.close();
+		}
+	});
+
+	it("keeps a findings seat's refusal or unreadable answer a failed review attempt (#805 B3)", async () => {
+		for (const seats of [
+			{ refusedSeat: "simplify" },
+			{ unansweredSeat: "simplify" },
+		]) {
+			const h = await setup("clean", 1, false, {
+				secondJudgeModel: model(CLAUDE),
+				journals: judgeJournals(1),
+				...seats,
+			});
+
+			try {
+				const result = await reviewModule.runReview(h.run, h.dir, h.create);
+
+				assert.equal(
+					result.kind,
+					"refusedSeat" in seats ? "refused" : "failed",
+				);
+				assert.equal(h.hosts.length, 3);
+			} finally {
+				h.close();
+			}
+		}
+	});
+
+	it("asks the gateway to reserve the second judge's requests against its remaining allowance, and only the second judge's (#805 B4)", async () => {
+		const h = await setup("clean", 1, false, {
+			secondJudgeModel: model(CLAUDE),
+			journals: judgeJournals(1),
+		});
+
+		try {
+			const result = await reviewModule.runReview(
+				{ ...h.run, settings: { ...h.run.settings, maxTokens: 1_000 } },
+				h.dir,
+				h.create,
+			);
+
+			assert.equal(result.kind, "passed");
+			assert.deepEqual(
+				h.hosts.map((host) =>
+					host.tables.map((table) => [
+						table.ceiling.modelTokens,
+						table.ceiling.reserve ?? false,
+					]),
+				),
+				[[[1_000, false]], [[990, false]], [[980, false]], [[970, true]]],
+			);
+		} finally {
+			h.close();
+		}
+	});
 
 	it("proves terra fallback by injected refusal only, without switching OpenAI routes", async () => {
 		const h = await setup("fallback");

@@ -14,6 +14,7 @@ import {
 	reviewCandidate,
 	reviewDir,
 	reviewFeedback,
+	priorFindings,
 	seatPrompt,
 	JUDGMENT_OUTCOMES,
 	type ReviewInput,
@@ -1893,7 +1894,16 @@ describe("F10-2 feedback review", () => {
 				guidance: "",
 				verdict: f.prepared.verdict,
 				repairDiff: "repair delta",
-				previousFindings: [{ claim: "earlier finding" }],
+				previousFindings: [
+					{
+						seat: "code-review",
+						category: "bug",
+						path: "src/a.ts",
+						startLine: 1,
+						endLine: 1,
+						claim: "earlier finding",
+					},
+				],
 			});
 
 			assert.ok(prompt.kind === "ready");
@@ -1903,6 +1913,77 @@ describe("F10-2 feedback review", () => {
 			);
 			assert.match(prompt.prompt, /repair delta/);
 			assert.match(prompt.prompt, /earlier finding/);
+		} finally {
+			f.close();
+		}
+	});
+
+	it("a later-round prompt shows neither judge an earlier judgment, only earlier code findings and the repair diff (#805 B5)", async () => {
+		const f = await preparedReviewFixture();
+
+		try {
+			const prior = {
+				seats: [
+					{
+						seat: "code-review",
+						findings: [
+							{
+								id: "F1",
+								severity: "blocking",
+								category: "bug",
+								path: "src/a.ts",
+								startLine: 1,
+								endLine: 1,
+								claim: "PRIOR_CODE_FINDING_805",
+								evidence: "seen",
+							},
+						],
+						judgments: [
+							{
+								scenario: "S1",
+								outcome: "fail",
+								reason: "PRIOR_FIRST_JUDGE_REASON_805",
+							},
+						],
+					},
+					{
+						seat: SECOND_JUDGE,
+						findings: [],
+						judgments: [
+							{
+								scenario: "S1",
+								outcome: "pass",
+								reason: "PRIOR_SECOND_JUDGE_REASON_805",
+							},
+						],
+					},
+				],
+			} satisfies { readonly seats: readonly SeatResult[] };
+
+			const built = candidateReviewPrompt({
+				contract: f.contract,
+				diff: f.kept.patch,
+				paths: f.kept.receipt.changedPaths,
+				judges: [],
+				guidance: "",
+				verdict: f.prepared.verdict,
+				repairDiff: "REPAIR_DELTA_805",
+				previousFindings: priorFindings(prior),
+			});
+
+			assert.ok(built.kind === "ready");
+
+			for (const seat of ["code-review", SECOND_JUDGE] as const) {
+				const prompt = seatPrompt(
+					{ ...f.prepared.input, prompt: built.prompt },
+					seat,
+				);
+
+				assert.ok(prompt.includes("PRIOR_CODE_FINDING_805"), seat);
+				assert.ok(prompt.includes("REPAIR_DELTA_805"), seat);
+				assert.ok(!prompt.includes("PRIOR_FIRST_JUDGE_REASON_805"), seat);
+				assert.ok(!prompt.includes("PRIOR_SECOND_JUDGE_REASON_805"), seat);
+			}
 		} finally {
 			f.close();
 		}
