@@ -622,11 +622,12 @@ export function trustedVisiblePlan(
 			continue;
 		const changed = candidate.get(path);
 
-		if (changed !== undefined) {
-			testInputsChanged ||=
-				changed.mode !== entry.mode || !changed.data.equals(entry.data);
+		if (
+			changed !== undefined &&
+			changed.mode === entry.mode &&
+			changed.data.equals(entry.data)
+		)
 			continue;
-		}
 
 		testInputsChanged = true;
 		const dest = join(workspace, path);

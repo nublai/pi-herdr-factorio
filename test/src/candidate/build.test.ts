@@ -613,7 +613,7 @@ test("does not restore an authorized replacement, but restores every other delet
 	);
 });
 
-test("retains candidate regressions added to existing visible test files", (t) => {
+test("restores an unlisted changed test file to its base bytes, as the trusted gates do (#807 review)", (t) => {
 	const f = fixture(t);
 	mkdirSync(join(f.base, "test"));
 	mkdirSync(join(f.workspace, "test"));
@@ -630,8 +630,24 @@ test("retains candidate regressions added to existing visible test files", (t) =
 		join(f.workspace, "test/existing.test.js"),
 		"base test\nnew regression\n",
 	);
+	writeFileSync(join(f.workspace, "test/added.test.js"), "added regression\n");
 	const plan = trustedVisiblePlan(f.base, f.workspace, "npm test");
 	assert.equal(plan.testInputsChanged, true);
+	assert.equal(
+		readFileSync(join(f.workspace, "test/existing.test.js"), "utf8"),
+		"base test\n",
+	);
+	assert.equal(
+		readFileSync(join(f.workspace, "test/added.test.js"), "utf8"),
+		"added regression\n",
+	);
+	writeFileSync(
+		join(f.workspace, "test/existing.test.js"),
+		"base test\nnew regression\n",
+	);
+	trustedVisiblePlan(f.base, f.workspace, "npm test", [
+		{ path: "test/existing.test.js" },
+	]);
 	assert.equal(
 		readFileSync(join(f.workspace, "test/existing.test.js"), "utf8"),
 		"base test\nnew regression\n",

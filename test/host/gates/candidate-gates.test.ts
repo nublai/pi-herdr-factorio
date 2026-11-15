@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
 	chmodSync,
+	cpSync,
 	existsSync,
 	globSync,
 	mkdirSync,
@@ -19,6 +20,7 @@ import {
 	exportTree,
 	heldoutDigest,
 	materializeCandidate,
+	materializeFromDirectories,
 	replacementDigest,
 	replacementsOf,
 } from "../../../host/gates/materialize.ts";
@@ -38,6 +40,7 @@ import {
 	scenarioJudgments,
 	SECOND_JUDGE,
 } from "../../../src/candidate/review.ts";
+import { trustedVisiblePlan } from "../../../src/candidate/build.ts";
 import { writeAcceptance } from "../../../src/contract/acceptance.ts";
 import {
 	declaresTest,
@@ -47,6 +50,7 @@ import {
 	contractBytes,
 	contractDigestOf,
 	type Contract,
+	type ReplacedTest,
 } from "../../../src/contract/contract.ts";
 import { objectOf, parseJson } from "../../../src/core/json.ts";
 import { digestOf } from "../../../src/core/run.ts";
@@ -2338,4 +2342,88 @@ test("bad manifests, stale bases, missing checks and tampered replacement digest
 			.reason,
 		"missing_checks",
 	);
+});
+
+test("visible tests run an unlisted changed test from its base bytes as the gate does, and a listed or added test from the candidate (#807 review)", (t) => {
+	const root = mkdtempSync(join(tmpdir(), "visible-gate-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+
+	const put = (dir: string, path: string, text: string) => {
+		mkdirSync(dirname(join(dir, path)), { recursive: true });
+		writeFileSync(join(dir, path), text);
+	};
+
+	const pinned = (expected: string) =>
+		`import assert from "node:assert/strict";\nimport { test } from "node:test";\nimport { value } from "../src/value.js";\ntest("pinned value", () => assert.equal(value, "${expected}"));\n`;
+
+	const run = (cwd: string) =>
+		spawnSync(
+			process.execPath,
+			["--test", "--test-timeout=30000", "test/*.test.js"],
+			{
+				cwd,
+				encoding: "utf8",
+				timeout: 30_000,
+				env: { PATH: process.env.PATH ?? "" },
+			},
+		).status;
+
+	const base = join(root, "base");
+	put(
+		base,
+		"package.json",
+		JSON.stringify({
+			type: "module",
+			scripts: { test: "node --test test/*.test.js" },
+		}),
+	);
+	put(base, "src/value.js", 'export const value = "old";\n');
+	put(base, "test/value.test.js", pinned("old"));
+
+	const listed: readonly ReplacedTest[] = [
+		{
+			path: "test/value.test.js",
+			test: "pinned value",
+			reason: "The ticket changes the value",
+		},
+	];
+
+	for (const [label, replacements, exit] of [
+		["unlisted", [], 1],
+		["listed", listed, 0],
+	] as const) {
+		const candidate = join(root, label, "candidate");
+		const gate = join(root, label, "gate");
+		const visible = join(root, label, "visible");
+		cpSync(base, candidate, { recursive: true });
+		put(candidate, "src/value.js", 'export const value = "new";\n');
+		put(candidate, "test/value.test.js", pinned("new"));
+		put(candidate, "test/added.test.js", pinned("new"));
+
+		const overlay = materializeFromDirectories({
+			gateTree: base,
+			candidateTree: candidate,
+			dest: gate,
+			replacements,
+		});
+
+		cpSync(candidate, visible, { recursive: true });
+		trustedVisiblePlan(base, visible, "npm test", replacements);
+
+		assert.deepEqual(
+			overlay.ignoredChanges,
+			exit === 1 ? ["test/value.test.js"] : [],
+			label,
+		);
+
+		for (const path of ["test/value.test.js", "test/added.test.js"])
+			assert.equal(
+				readFileSync(join(visible, path), "utf8"),
+				readFileSync(join(gate, path), "utf8"),
+				`${label} ${path}`,
+			);
+
+		assert.equal(run(gate), exit, `${label} gate`);
+		assert.equal(run(visible), exit, `${label} visible`);
+	}
 });
