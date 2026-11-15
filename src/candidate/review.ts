@@ -978,7 +978,7 @@ function plainChars(text: string): string[] {
 }
 
 function ownerScenario(scenario: string): string {
-	return /^S[1-9][0-9]{0,2}$/.test(scenario) ? scenario : "S?";
+	return /^(?:S[1-9][0-9]{0,2}|T[1-9])$/.test(scenario) ? scenario : "S?";
 }
 
 export const ROUTE_TEXT: Readonly<
@@ -1332,6 +1332,31 @@ export function reviewFeedback(receipt: {
 		.sort((a, b) => a.rank - b.rank)
 		.slice(0, 10)
 		.map(({ rank: _rank, ...item }) => item);
+}
+
+/**
+ * One judge-only scenario per test the contract lets the build replace,
+ * `T1`, `T2` and so on in contract order, beside the suite's `S<n>`. Both
+ * judges decide whether the replacement matches the ticket and keeps every
+ * unrelated assertion; the gates only check that the file still runs. A
+ * path-only replacement from an older stored contract adds none.
+ */
+export function replacementScenarios(
+	contract: Pick<Contract, "replacesTests">,
+): readonly {
+	readonly id: string;
+	readonly criteria: readonly string[];
+	readonly judge: string;
+}[] {
+	const named = (contract.replacesTests ?? []).flatMap((replaced) =>
+		"test" in replaced ? [replaced] : [],
+	);
+
+	return named.map((replaced, index) => ({
+		id: `T${index + 1}`,
+		criteria: [],
+		judge: `Replaced test ${JSON.stringify(replaced.test)} in ${replaced.path} pinned behavior the ticket changes: ${replaced.reason}. Pass if the diff leaves that test as it was, or changes it only to assert the new behavior the contract states, keeping every assertion unrelated to that change in it and in the rest of its file. Fail if the change drops or weakens an unrelated assertion, asserts behavior the contract does not ask for, or changes another existing test in that file beyond what the ticket requires.`,
+	}));
 }
 
 export function candidateReviewPrompt({

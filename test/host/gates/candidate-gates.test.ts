@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
 	chmodSync,
+	cpSync,
 	existsSync,
 	globSync,
 	mkdirSync,
@@ -19,7 +20,9 @@ import {
 	exportTree,
 	heldoutDigest,
 	materializeCandidate,
+	materializeFromDirectories,
 	replacementDigest,
+	replacementsOf,
 } from "../../../host/gates/materialize.ts";
 import { runDraftBase, runHeldoutBase } from "../../../host/gates/base.ts";
 import { validateDependencies } from "../../../host/gates/manifest.ts";
@@ -29,15 +32,30 @@ import {
 	classifyFailure,
 } from "../../../src/candidate/diagnosis.ts";
 import { isGitSha } from "../../../src/config/schema.ts";
+import {
+	blocksReview,
+	candidateReviewPrompt,
+	type JudgmentOutcome,
+	replacementScenarios,
+	scenarioJudgments,
+	SECOND_JUDGE,
+} from "../../../src/candidate/review.ts";
+import { trustedVisiblePlan } from "../../../src/candidate/build.ts";
 import { writeAcceptance } from "../../../src/contract/acceptance.ts";
+import {
+	declaresTest,
+	parseSpecifyOutput,
+} from "../../../src/contract/parse.ts";
 import {
 	contractBytes,
 	contractDigestOf,
 	type Contract,
+	type ReplacedTest,
 } from "../../../src/contract/contract.ts";
 import { objectOf, parseJson } from "../../../src/core/json.ts";
 import { digestOf } from "../../../src/core/run.ts";
 import { isRepoSlug } from "../../../src/trust/platform.ts";
+import { passingVerdict } from "../../helpers.ts";
 
 function gitSha(text: string) {
 	assert.ok(isGitSha(text));
@@ -876,6 +894,252 @@ test("per-file counts reject extra registrations, except named replacements", as
 	assert.equal(replaced.status, "passed");
 	assert.match(JSON.stringify(replaced.replacedTests), /beforeDigest/);
 	assert.match(JSON.stringify(replaced.replacedTests), /afterDigest/);
+});
+
+const PINNED =
+	"waits through transient recovery reads after ready was removed, then finishes needs_info";
+
+const RECOVERY_TESTS = "test/src/controller/orchestrator-specify.test.ts";
+
+function recoveryTests(pinned: string, expected: string) {
+	return `import assert from "node:assert/strict"; import {test} from "node:test"; import {onReadyRemoved} from "../../../src/recovery.ts";\ntest(${JSON.stringify(pinned)},()=>assert.equal(onReadyRemoved(true),${JSON.stringify(expected)}));\ntest("releases an idle run when ready is removed",()=>assert.equal(onReadyRemoved(false),"released"));\n`;
+}
+
+/** A base modelled on #789: a recovering run waits after ready is removed. */
+function recoveryRepo(t: { after(fn: () => void): void }) {
+	const f = repo(t);
+	f.put(
+		"src/recovery.ts",
+		'export function onReadyRemoved(recovering: boolean) { return recovering ? "needs_info" : "released"; }\n',
+	);
+	f.put(RECOVERY_TESTS, recoveryTests(PINNED, "needs_info"));
+	const gateSha = f.commit();
+
+	return { ...f, gateSha };
+}
+
+/** The #789 change: a recovering run is released too, and the pinned test says so. */
+function releaseOnLabelRemoval(f: ReturnType<typeof recoveryRepo>) {
+	f.put(
+		"src/recovery.ts",
+		'export function onReadyRemoved(_recovering: boolean) { return "released"; }\n',
+	);
+	f.put(
+		RECOVERY_TESTS,
+		recoveryTests(
+			"releases a recovering run after ready was removed, aborting its job",
+			"released",
+		),
+	);
+
+	return f.commit();
+}
+
+const RECOVERY_REPLACEMENT = {
+	path: RECOVERY_TESTS,
+	test: PINNED,
+	reason: "#789 releases a recovering build when factory:ready is removed",
+};
+
+test("a contract naming a pinned test lets the build replace it and the gates accept it, binding the test name", async (t) => {
+	const f = recoveryRepo(t);
+	const replacements = [RECOVERY_REPLACEMENT];
+
+	const r = await checkCandidate({
+		...gateInput(f, releaseOnLabelRemoval(f)),
+		replacements,
+		replacementsDigest: replacementDigest(replacements),
+	});
+
+	assert.equal(r.status, "passed");
+	assert.equal(r.replacementsDigest, replacementDigest(replacements));
+	assert.deepEqual(
+		r.replacedTests.map(({ path, test, reason }) => ({ path, test, reason })),
+		replacements,
+	);
+	assert.equal(r.candidateCounts[RECOVERY_TESTS], 2);
+	assert.deepEqual(r.ignoredChanges, []);
+});
+
+test("an unlisted change to a pinned test still fails: the gates run the base test", async (t) => {
+	const f = recoveryRepo(t);
+	const candidateSha = releaseOnLabelRemoval(f);
+
+	for (const replacements of [
+		[],
+		[
+			{
+				path: "test/src/example/value.test.ts",
+				test: "value",
+				reason: "Another file",
+			},
+		],
+	]) {
+		const r = await checkCandidate({
+			...gateInput(f, candidateSha),
+			replacements,
+			replacementsDigest: replacementDigest(replacements),
+		});
+
+		assert.equal(r.status, "failed");
+		assert.equal(r.checks.find((c) => c.name === "main_tests")?.exitCode, 1);
+		assert.deepEqual(r.ignoredChanges, [RECOVERY_TESTS]);
+	}
+
+	const renamed = [{ ...RECOVERY_REPLACEMENT, test: "another name" }];
+
+	const tampered = await checkCandidate({
+		...gateInput(f, candidateSha),
+		replacements: [RECOVERY_REPLACEMENT],
+		replacementsDigest: replacementDigest(renamed),
+	});
+
+	assert.equal(tampered.status, "incomplete");
+});
+
+test("the gate's replacement list carries an optional exact test name, one entry per test", () => {
+	const item = { path: RECOVERY_TESTS, test: PINNED, reason: "Change" };
+
+	const sibling = {
+		...item,
+		test: "releases an idle run when ready is removed",
+	};
+
+	assert.equal(
+		JSON.stringify(replacementsOf(JSON.stringify([sibling, item]))),
+		JSON.stringify([sibling, item]),
+	);
+	assert.equal(
+		JSON.stringify(
+			replacementsOf(
+				'[{"reason":"Change","test":"t","path":"test/a.test.ts"}]',
+			),
+		),
+		'[{"path":"test/a.test.ts","test":"t","reason":"Change"}]',
+	);
+	assert.equal(
+		JSON.stringify(
+			replacementsOf('[{"path":"test/a.test.ts","reason":"Legacy"}]'),
+		),
+		'[{"path":"test/a.test.ts","reason":"Legacy"}]',
+	);
+
+	for (const bad of [
+		[item, item],
+		[{ ...item, test: "" }],
+		[{ ...item, test: "two\nlines" }],
+		[{ ...item, test: "x".repeat(501) }],
+		[{ ...item, test: 3 }],
+		[{ ...item, line: 3 }],
+	])
+		assert.throws(
+			() => replacementsOf(JSON.stringify(bad)),
+			/invalid_replacements/,
+			JSON.stringify(bad),
+		);
+});
+
+test("#789 end to end: specify names the pinned needs_info test, the build replaces it, the gates pass it and both judges review it", async (t) => {
+	const specified = parseSpecifyOutput(
+		JSON.stringify({
+			kind: "contract",
+			summary:
+				"Release a recovering round-0 build when factory:ready is removed",
+			behavior: ["Removing factory:ready releases a recovering build"],
+			exclusions: ["Closing the issue still releases as before"],
+			acceptance: [
+				{ kind: "new_behavior", text: "A recovering build is released" },
+			],
+			compatibility: [],
+			limits: [],
+			files: ["src/recovery.ts"],
+			evidence: [],
+			replacesTests: [RECOVERY_REPLACEMENT],
+		}),
+		new Set(["src/recovery.ts", RECOVERY_TESTS]),
+	);
+
+	assert.ok(specified.kind === "contract");
+	assert.ok(declaresTest(readFileSync(RECOVERY_TESTS, "utf8"), PINNED));
+
+	const repoSlug = "nublai/nubl-factory-fixture";
+	assert.ok(isRepoSlug(repoSlug));
+
+	const contract: Contract = {
+		version: 2,
+		runId: digestOf("789"),
+		issue: 789,
+		base: { repo: repoSlug, sha: gitSha("a".repeat(40)) },
+		snapshot: {
+			digest: digestOf("snapshot"),
+			source: "unedited",
+			eventId: "1",
+			eventAt: "2026-11-15T00:00:00Z",
+		},
+		link: null,
+		...specified.draft,
+	};
+
+	const dispatched = JSON.stringify(contract.replacesTests);
+	const f = recoveryRepo(t);
+	const candidateSha = releaseOnLabelRemoval(f);
+
+	const gate = await checkCandidate({
+		...gateInput(f, candidateSha),
+		replacements: replacementsOf(dispatched),
+		replacementsDigest: digestOf(dispatched),
+	});
+
+	assert.equal(gate.status, "passed");
+	assert.equal(gate.replacedTests[0]?.test, PINNED);
+
+	const scenarios = replacementScenarios(contract);
+	assert.deepEqual(
+		scenarios.map((s) => s.id),
+		["T1"],
+	);
+
+	const diff = f.git("diff", f.gateSha, candidateSha);
+	assert.ok(diff.includes(JSON.stringify(PINNED)));
+
+	const prompt = candidateReviewPrompt({
+		contract,
+		diff,
+		paths: ["src/recovery.ts", RECOVERY_TESTS],
+		judges: scenarios,
+		guidance: "",
+		verdict: { ...passingVerdict(digestOf(diff)), unjudged: ["T1"] },
+	});
+
+	assert.ok(prompt.kind === "ready");
+	assert.ok(prompt.prompt.includes('"scenario":"T1","criteria":[],"judge":'));
+	assert.ok(
+		prompt.prompt.includes(JSON.stringify(JSON.stringify(PINNED)).slice(1, -1)),
+	);
+
+	const review = (first: JudgmentOutcome, second: JudgmentOutcome) => ({
+		seats: (
+			["code-review", "security-review", "simplify", SECOND_JUDGE] as const
+		).map((seat) => ({
+			seat,
+			findings: [],
+			judgments:
+				seat === "code-review" || seat === SECOND_JUDGE
+					? [
+							{
+								scenario: "T1",
+								outcome: seat === SECOND_JUDGE ? second : first,
+								reason: "Replacement judged against #789",
+							},
+						]
+					: [],
+		})),
+	});
+
+	assert.equal(scenarioJudgments(review("pass", "pass"))[0]?.route, "pass");
+	assert.equal(blocksReview(review("pass", "pass").seats), false);
+	assert.equal(scenarioJudgments(review("pass", "fail"))[0]?.route, "fail");
+	assert.equal(blocksReview(review("pass", "fail").seats), true);
 });
 
 test("a named replacement cannot silently delete a test", async (t) => {
@@ -2078,4 +2342,88 @@ test("bad manifests, stale bases, missing checks and tampered replacement digest
 			.reason,
 		"missing_checks",
 	);
+});
+
+test("visible tests run an unlisted changed test from its base bytes as the gate does, and a listed or added test from the candidate (#807 review)", (t) => {
+	const root = mkdtempSync(join(tmpdir(), "visible-gate-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+
+	const put = (dir: string, path: string, text: string) => {
+		mkdirSync(dirname(join(dir, path)), { recursive: true });
+		writeFileSync(join(dir, path), text);
+	};
+
+	const pinned = (expected: string) =>
+		`import assert from "node:assert/strict";\nimport { test } from "node:test";\nimport { value } from "../src/value.js";\ntest("pinned value", () => assert.equal(value, "${expected}"));\n`;
+
+	const run = (cwd: string) =>
+		spawnSync(
+			process.execPath,
+			["--test", "--test-timeout=30000", "test/*.test.js"],
+			{
+				cwd,
+				encoding: "utf8",
+				timeout: 30_000,
+				env: { PATH: process.env.PATH ?? "" },
+			},
+		).status;
+
+	const base = join(root, "base");
+	put(
+		base,
+		"package.json",
+		JSON.stringify({
+			type: "module",
+			scripts: { test: "node --test test/*.test.js" },
+		}),
+	);
+	put(base, "src/value.js", 'export const value = "old";\n');
+	put(base, "test/value.test.js", pinned("old"));
+
+	const listed: readonly ReplacedTest[] = [
+		{
+			path: "test/value.test.js",
+			test: "pinned value",
+			reason: "The ticket changes the value",
+		},
+	];
+
+	for (const [label, replacements, exit] of [
+		["unlisted", [], 1],
+		["listed", listed, 0],
+	] as const) {
+		const candidate = join(root, label, "candidate");
+		const gate = join(root, label, "gate");
+		const visible = join(root, label, "visible");
+		cpSync(base, candidate, { recursive: true });
+		put(candidate, "src/value.js", 'export const value = "new";\n');
+		put(candidate, "test/value.test.js", pinned("new"));
+		put(candidate, "test/added.test.js", pinned("new"));
+
+		const overlay = materializeFromDirectories({
+			gateTree: base,
+			candidateTree: candidate,
+			dest: gate,
+			replacements,
+		});
+
+		cpSync(candidate, visible, { recursive: true });
+		trustedVisiblePlan(base, visible, "npm test", replacements);
+
+		assert.deepEqual(
+			overlay.ignoredChanges,
+			exit === 1 ? ["test/value.test.js"] : [],
+			label,
+		);
+
+		for (const path of ["test/value.test.js", "test/added.test.js"])
+			assert.equal(
+				readFileSync(join(visible, path), "utf8"),
+				readFileSync(join(gate, path), "utf8"),
+				`${label} ${path}`,
+			);
+
+		assert.equal(run(gate), exit, `${label} gate`);
+		assert.equal(run(visible), exit, `${label} visible`);
+	}
 });

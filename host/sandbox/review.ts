@@ -21,6 +21,7 @@ import {
 	parseSeat,
 	type PriorFinding,
 	priorFindings,
+	replacementScenarios,
 	SECOND_JUDGE,
 	SECOND_JUDGE_MAX_TOKENS,
 	SECOND_JUDGE_UNCONFIGURED,
@@ -610,9 +611,10 @@ async function candidateReviewInputs(
 			contract: bound.contract,
 			diff: patch.patch,
 			paths: patch.receipt.changedPaths,
-			judges: suite.suite.scenarios.filter((s) =>
-				verdict.unjudged.includes(s.id),
-			),
+			judges: [
+				...suite.suite.scenarios,
+				...replacementScenarios(bound.contract),
+			].filter((s) => verdict.unjudged.includes(s.id)),
 			guidance: workflow.guidance.stages.review ?? "",
 			verdict,
 			evidence: trustedEvidence({

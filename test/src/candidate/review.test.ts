@@ -24,6 +24,7 @@ import {
 	type SeatResult,
 	familyClaimsHold,
 	reviewR8,
+	replacementScenarios,
 	TRUSTED_TEST_GLOBS,
 	trustedEvidence,
 	unverifiableCode,
@@ -99,7 +100,10 @@ import {
 	contractDigestOf,
 	type Contract,
 } from "../../../src/contract/contract.ts";
-import { writeAcceptance } from "../../../src/contract/acceptance.ts";
+import {
+	judgeOnlyRefusal,
+	writeAcceptance,
+} from "../../../src/contract/acceptance.ts";
 import { isGitSha } from "../../../src/config/schema.ts";
 import { isRepoSlug } from "../../../src/trust/platform.ts";
 import {
@@ -3709,5 +3713,131 @@ describe("two judges for judge-only judgments (#735 round 2)", () => {
 		assert.deepEqual(unverifiableJudgments(legacy), [
 			{ scenario: "S1", reason: "why" },
 		]);
+	});
+});
+
+describe("replaced tests are judged in review (#735 round 3)", () => {
+	const pinned =
+		"waits through transient recovery reads after ready was removed, then finishes needs_info";
+
+	const replaced = {
+		path: "test/src/controller/orchestrator-specify.test.ts",
+		test: pinned,
+		reason: "#789 releases a recovering build when factory:ready is removed",
+	};
+
+	const judge = (
+		name: string,
+		outcome: JudgmentOutcome,
+		reason: string,
+	): SeatReceipt => ({
+		seat: name,
+		findings: [],
+		judgments: [
+			{ scenario: "S1", outcome: "pass", reason: "Value is one" },
+			{ scenario: "T1", outcome, reason },
+		],
+		requested: "openai/gpt-6.1-sol",
+		observed: null,
+		label: "context-isolated, unknown family, not cross-family",
+		fallback: false,
+		tokens: 1,
+	});
+
+	const quiet = (name: string): SeatReceipt => ({
+		...judge(name, "pass", ""),
+		judgments: [],
+	});
+
+	const pair = (first: JudgmentOutcome, second: JudgmentOutcome) => ({
+		seats: [
+			judge("code-review", first, "first judge"),
+			quiet("security-review"),
+			quiet("simplify"),
+			judge(SECOND_JUDGE, second, "second judge"),
+		],
+	});
+
+	it("names one judge-only scenario per replaced test, T1 onward in contract order, and none for an additive change", () => {
+		const second = { ...replaced, test: "another pinned test" };
+
+		const scenarios = replacementScenarios({
+			replacesTests: [replaced, second],
+		});
+
+		assert.deepEqual(
+			scenarios.map(({ id, criteria }) => ({ id, criteria })),
+			[
+				{ id: "T1", criteria: [] },
+				{ id: "T2", criteria: [] },
+			],
+		);
+		assert.ok(scenarios[0]?.judge.includes(JSON.stringify(pinned)));
+		assert.ok(scenarios[0]?.judge.includes(replaced.path));
+		assert.ok(scenarios[0]?.judge.includes(replaced.reason));
+		assert.match(
+			scenarios[0]?.judge ?? "",
+			/keeping every assertion unrelated/,
+		);
+		assert.equal(judgeOnlyRefusal(scenarios[0]?.judge ?? ""), null);
+		assert.deepEqual(replacementScenarios({}), []);
+		assert.deepEqual(replacementScenarios({ replacesTests: [] }), []);
+	});
+
+	it("adds no judge scenario for a path-only replacement stored before tests were named (#807 review)", () => {
+		assert.deepEqual(
+			replacementScenarios({
+				replacesTests: [{ path: replaced.path, reason: replaced.reason }],
+			}),
+			[],
+		);
+	});
+
+	it("gives both judges each replacement scenario from the captured review input", async () => {
+		const f = await preparedReviewFixture(1, false, false, () => ({}), [
+			replaced,
+		]);
+
+		try {
+			const input = f.prepared.input;
+			assert.deepEqual(input.scenarios, ["S1", "T1"]);
+			assert.equal(input.seats.at(-1), SECOND_JUDGE);
+			assert.ok(
+				input.prompt.includes(
+					`"scenario":"T1","criteria":[],"judge":${JSON.stringify(replacementScenarios({ replacesTests: [replaced] })[0]?.judge).replaceAll("<", "\\u003c")}`,
+				),
+			);
+
+			for (const seat of ["code-review", SECOND_JUDGE] as const)
+				assert.match(seatPrompt(input, seat), /\["S1","T1"\]/);
+		} finally {
+			f.close();
+		}
+	});
+
+	it("fails review on a mismatching replacement so it repairs, certifies a matching one and holds a split", () => {
+		const mismatch = pair("fail", "pass");
+		const [, failed] = scenarioJudgments(mismatch);
+		assert.equal(failed?.scenario, "T1");
+		assert.equal(failed?.route, "fail");
+		assert.equal(blocksReview(mismatch.seats), true);
+		assert.deepEqual(unverifiableOnly(mismatch), []);
+
+		const matching = pair("pass", "pass");
+		assert.deepEqual(
+			scenarioJudgments(matching).map((j) => j.route),
+			["pass", "pass"],
+		);
+		assert.equal(blocksReview(matching.seats), false);
+
+		const split = pair("pass", "unverifiable");
+		assert.deepEqual(
+			unverifiableOnly(split).map((j) => [j.scenario, j.route]),
+			[["T1", "disagree"]],
+		);
+		assert.deepEqual(
+			ownerJudgments(split).map((j) => j.scenario),
+			["T1"],
+		);
 	});
 });

@@ -531,6 +531,7 @@ async function reportDeadlineFixture(
 	root: string,
 	owner = false,
 	dispatch = false,
+	replacesTests: Contract["replacesTests"] = undefined,
 ) {
 	assert.ok(isGitSha(gateSha) && isGitSha(candidateSha));
 	const repo = "giuseppecrj/pi-herdr-factorio";
@@ -538,7 +539,7 @@ async function reportDeadlineFixture(
 	const runId = digestOf("report-deadline");
 	const start = Date.parse(run.createdAt);
 
-	const contract: Contract = {
+	const unreplaced: Contract = {
 		version: 2,
 		runId,
 		issue: 42,
@@ -559,6 +560,9 @@ async function reportDeadlineFixture(
 		files: ["src/a.ts"],
 		evidence: [],
 	};
+
+	const contract: Contract =
+		replacesTests === undefined ? unreplaced : { ...unreplaced, replacesTests };
 
 	const bytes = contractBytes(contract);
 	const contractDigest = contractDigestOf(bytes);
@@ -956,6 +960,40 @@ describe("F10-3 owner validator integrated harness", () => {
 			assert.ok(result.kind === "failed" && result.reason === "branch_moved");
 			assert.deepEqual(f.writes, ["PIN", "DELETE"]);
 		});
+	});
+});
+
+describe("replaced tests become judge-only verdict scenarios (#735 round 3)", () => {
+	it("lists one T<n> per replaced test after the suite's judge-only scenarios, and none without", async () => {
+		for (const replacesTests of [
+			undefined,
+			[
+				{
+					path: "test/src/controller/orchestrator-specify.test.ts",
+					test: "waits through transient recovery reads after ready was removed, then finishes needs_info",
+					reason:
+						"#789 releases a recovering build when factory:ready is removed",
+				},
+			],
+		])
+			await withLocalArtifactDownload(async (root) => {
+				const f = await reportDeadlineFixture(
+					root,
+					false,
+					false,
+					replacesTests,
+				);
+
+				await f.step(f.start + 60_000);
+				f.setReport("valid");
+				const result = await f.step(f.start + 70_000);
+				assert.ok(result.kind === "finished");
+				assert.deepEqual(
+					result.verdict.unjudged,
+					replacesTests === undefined ? [] : ["T1"],
+				);
+				assert.equal(result.verdict.pass, true);
+			});
 	});
 });
 

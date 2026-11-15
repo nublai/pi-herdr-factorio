@@ -1,7 +1,7 @@
 import { cpSync, existsSync, globSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { materializeFromDirectories } from "../../../../host/gates/materialize.ts";
-import type { ReplacedTest } from "../../../../src/contract/contract.ts";
+import type { Replacements } from "../../../../src/contract/contract.ts";
 
 const SOURCE = ["src/", "extension/", "server/", "skills/"];
 
@@ -18,7 +18,7 @@ export function legacyMaterialize(input: {
 	readonly gateTree: string;
 	readonly candidateTree: string;
 	readonly dest: string;
-	readonly replacements: readonly ReplacedTest[];
+	readonly replacements: Replacements;
 	readonly heldoutDir: string;
 	readonly heldoutDigest: string;
 }) {

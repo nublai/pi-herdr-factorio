@@ -62,7 +62,23 @@ export type Criterion = {
 	readonly text: string;
 };
 
-export type ReplacedTest = { readonly path: string; readonly reason: string };
+export type ReplacedTest = {
+	readonly path: string;
+	readonly test: string;
+	readonly reason: string;
+};
+
+/**
+ * A replacement in a contract stored before entries named their test: the
+ * whole file, with no judged test. Only stored contracts carry it; new
+ * specify output always names the test.
+ */
+export type LegacyReplacedTest = Omit<ReplacedTest, "test">;
+
+/** Every entry names its test, or, in an older stored contract, none does. */
+export type Replacements =
+	| readonly ReplacedTest[]
+	| readonly LegacyReplacedTest[];
 
 export type ContractDraft = {
 	readonly summary: string;
@@ -73,7 +89,7 @@ export type ContractDraft = {
 	readonly limits: readonly string[];
 	readonly files: readonly string[];
 	readonly evidence: readonly Evidence[];
-	readonly replacesTests?: readonly ReplacedTest[];
+	readonly replacesTests?: Replacements;
 };
 
 export type Link = {
@@ -105,6 +121,8 @@ export type MalformedReason =
 	| "unknown_key"
 	| "bad_field"
 	| "unknown_path"
+	| "unknown_test"
+	| "ambiguous_test"
 	| "too_large_to_post";
 
 export type SpecifyOutput =
@@ -144,6 +162,9 @@ export const MAX_LIST = 8;
 export const MAX_CRITERIA = 10;
 
 export const MAX_FILES = 20;
+
+/** Each replaced test is one more judge-only scenario for both review judges. */
+export const MAX_REPLACED_TESTS = 5;
 
 export const MAX_EVIDENCE = 12;
 

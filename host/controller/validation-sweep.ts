@@ -10,6 +10,7 @@ import {
 	type FailureClass,
 } from "../../src/candidate/diagnosis.ts";
 import { candidateGenerations } from "../../src/candidate/handoff.ts";
+import { replacementScenarios } from "../../src/candidate/review.ts";
 import { ownerPatchValid } from "../../src/candidate/state.ts";
 import {
 	assessmentBinding,
@@ -953,9 +954,12 @@ function candidateValidator(
 				candidateSha: publication.candidateSha,
 				originalBase: state.originalBase,
 				baseSha: state.baseSha,
-				unjudged: suite.suite.scenarios.flatMap((s) =>
-					s.judge === null ? [] : [s.id],
-				),
+				unjudged: [
+					...suite.suite.scenarios.flatMap((s) =>
+						s.judge === null ? [] : [s.id],
+					),
+					...replacementScenarios(contract.contract).map((s) => s.id),
+				],
 				controllerLogin: config.platform.controllerLogin,
 			});
 

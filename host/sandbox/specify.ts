@@ -1,10 +1,17 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import type { SpecifyOutput } from "../../src/contract/contract.ts";
 import {
 	parseReviewOutput,
 	parseSpecifyOutput,
+	testDeclarations,
 } from "../../src/contract/parse.ts";
-import { reviewPrompt, revisionPrompt } from "../../src/contract/prompt.ts";
+import {
+	NAMED_FILE_READ_BYTES,
+	reviewPrompt,
+	revisionPrompt,
+} from "../../src/contract/prompt.ts";
+import { checkoutOf } from "../controller/checkout.ts";
 import {
 	type BudgetCap,
 	type EfficiencyFacts,
@@ -61,6 +68,40 @@ async function keptSession(dir: string): Promise<KeptSession | null> {
 				? await boundedText(join(dir, file), OUTPUT_MAX_BYTES)
 				: null,
 	};
+}
+
+/**
+ * A parse of specify's text in which every replaced test is one the base
+ * checkout declares exactly once, by literal name in its listed file;
+ * otherwise malformed, `unknown_test` or `ambiguous_test`.
+ */
+async function parseDeclared(
+	text: string,
+	workspace: string,
+	files: readonly string[],
+): Promise<SpecifyOutput> {
+	const parsed = parseSpecifyOutput(text, new Set(files));
+
+	if (parsed.kind !== "contract") return parsed;
+
+	const checkout = checkoutOf(workspace, files);
+
+	for (const replaced of parsed.draft.replacesTests ?? []) {
+		const source = await checkout.read(replaced.path, NAMED_FILE_READ_BYTES);
+
+		const count =
+			source === null || !("test" in replaced)
+				? 0
+				: testDeclarations(source, replaced.test);
+
+		if (count !== 1)
+			return {
+				kind: "malformed",
+				reason: count === 0 ? "unknown_test" : "ambiguous_test",
+			};
+	}
+
+	return parsed;
 }
 
 export async function runSpecify(
@@ -310,7 +351,11 @@ export async function runSpecify(
 
 	if (draft.outcome.kind !== "passed") return finish(draft.outcome, null);
 
-	const parsed = parseSpecifyOutput(draft.text ?? "", new Set(review.files));
+	const parsed = await parseDeclared(
+		draft.text ?? "",
+		input.workspace,
+		review.files,
+	);
 
 	if (parsed.kind === "malformed")
 		return finish({ kind: "failed", exit: "malformed" }, null);
@@ -342,8 +387,8 @@ export async function runSpecify(
 	if (revision.outcome.kind !== "passed") return finish(revision.outcome, null);
 
 	if (
-		parseSpecifyOutput(revision.text ?? "", new Set(review.files)).kind ===
-		"malformed"
+		(await parseDeclared(revision.text ?? "", input.workspace, review.files))
+			.kind === "malformed"
 	)
 		return finish({ kind: "failed", exit: "malformed" }, null);
 

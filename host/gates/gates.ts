@@ -15,7 +15,7 @@ import { parseArgs } from "node:util";
 import { scanSource, type Signal } from "../../.github/factory/gates/scan.ts";
 import { isGitSha } from "../../src/config/schema.ts";
 import { readStoredContract } from "../../src/contract/artifacts.ts";
-import type { ReplacedTest } from "../../src/contract/contract.ts";
+import type { GateReplacement } from "./materialize.ts";
 import {
 	arrayOf,
 	fieldOf,
@@ -83,7 +83,7 @@ export type GateReceipt = {
 	readonly checks: GateCheck[];
 	testGlobs?: readonly string[];
 	ignoredChanges: readonly string[];
-	replacedTests: readonly (ReplacedTest & {
+	replacedTests: readonly (GateReplacement & {
 		beforeDigest: string;
 		afterDigest: string;
 	})[];
@@ -105,7 +105,7 @@ export type CandidateInput = {
 	readonly output: string;
 	readonly runner: GateRunner;
 	readonly install?: boolean;
-	readonly replacements?: readonly ReplacedTest[];
+	readonly replacements?: readonly GateReplacement[];
 	readonly replacementsDigest?: string;
 	readonly heldoutDir?: string;
 	readonly heldoutDigest?: string;
@@ -114,7 +114,7 @@ export type CandidateInput = {
 function sameCounts(
 	base: Readonly<Record<string, number>>,
 	candidate: Readonly<Record<string, number>>,
-	replacements: readonly ReplacedTest[],
+	replacements: readonly GateReplacement[],
 ): boolean {
 	const except = new Set(replacements.map((r) => r.path));
 
@@ -149,7 +149,7 @@ async function scanCandidate(
 	input: CandidateInput,
 	baseline: string,
 	tree: string,
-	replacements: readonly ReplacedTest[],
+	replacements: readonly GateReplacement[],
 	heldout: readonly string[],
 ): Promise<Signal[]> {
 	const base = await entries(input.repository, input.gateSha);

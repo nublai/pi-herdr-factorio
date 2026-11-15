@@ -28,10 +28,15 @@ import {
 	type Contract,
 	contractBytes,
 	contractDigestOf,
+	MAX_REPLACED_TESTS,
 	type Question,
 	questionsDigestOf,
 } from "../../../src/contract/contract.ts";
-import { parseSpecifyOutput } from "../../../src/contract/parse.ts";
+import {
+	declaresTest,
+	testDeclarations,
+	parseSpecifyOutput,
+} from "../../../src/contract/parse.ts";
 import {
 	inlined,
 	namedFiles,
@@ -141,7 +146,13 @@ describe("specify output: contract schema", () => {
 	it("permits only exact existing tests as intentional replacements", () => {
 		const path = "test/old.test.ts";
 
-		const replacements = [{ path, reason: "Ticket changes the old behavior" }];
+		const replacements = [
+			{
+				path,
+				test: "keeps the old behavior",
+				reason: "Ticket changes the old behavior",
+			},
+		];
 
 		const parsed = parseSpecifyOutput(
 			output({ ...CONTRACT, replacesTests: replacements }),
@@ -160,7 +171,10 @@ describe("specify output: contract schema", () => {
 		]) {
 			assert.equal(
 				parseSpecifyOutput(
-					output({ ...CONTRACT, replacesTests: [{ path, reason: "Change" }] }),
+					output({
+						...CONTRACT,
+						replacesTests: [{ path, test: "old", reason: "Change" }],
+					}),
 					new Set([...files, "test/old.test.ts"]),
 				).kind,
 				"malformed",
@@ -177,6 +191,143 @@ describe("specify output: contract schema", () => {
 			).kind,
 			"malformed",
 		);
+	});
+
+	it("names each replaced test by path and exact test name, bounded, one entry per test", () => {
+		const known = new Set([...files, "test/old.test.ts", "test/b.test.ts"]);
+
+		const entry = (path: string, test: JsonValue, reason: JsonValue) => ({
+			path,
+			test,
+			reason,
+		});
+
+		const parse = (replacesTests: JsonValue) =>
+			parseSpecifyOutput(output({ ...CONTRACT, replacesTests }), known);
+
+		const first = entry(
+			"test/old.test.ts",
+			"first pinned",
+			"Ticket changes it",
+		);
+
+		const two = [
+			first,
+			entry("test/old.test.ts", "second pinned", "Ticket changes it"),
+		];
+
+		const parsed = parse(two);
+		assert.ok(parsed.kind === "contract");
+		assert.deepEqual(parsed.draft.replacesTests, two);
+
+		const five = [1, 2, 3, 4, 5].map((n) =>
+			entry("test/b.test.ts", `pinned ${n}`, "Ticket changes it"),
+		);
+
+		assert.equal(MAX_REPLACED_TESTS, 5);
+		assert.equal(parse(five).kind, "contract");
+
+		for (const bad of [
+			[{ path: "test/old.test.ts", reason: "No test name" }],
+			[entry("test/old.test.ts", "", "Empty name")],
+			[entry("test/old.test.ts", "line\nbreak", "Two lines")],
+			[entry("test/old.test.ts", 7, "Not a string")],
+			[entry("test/old.test.ts", "old", "")],
+			[{ ...entry("test/old.test.ts", "old", "Why"), line: 4 }],
+			[first, first],
+			[...five, entry("test/b.test.ts", "pinned 6", "One too many")],
+			[entry(".github/workflows/ci.test.ts", "old", "Workflow")],
+			[entry("test/acceptance/7/checks/a.test.ts", "old", "Held out")],
+			[entry("test/helpers.ts", "old", "Helper")],
+			[entry("test/missing.test.ts", "old", "Missing file")],
+		])
+			assert.equal(parse(bad).kind, "malformed", JSON.stringify(bad));
+	});
+
+	it("finds a replaced test only where a test or it call declares that exact name", () => {
+		const source = [
+			'describe("group", () => {',
+			'\tit("waits through transient recovery reads, then finishes needs_info", async () => {});',
+			"\ttest('single (quoted) name', () => {});",
+			"\tit.skip(`template name`, () => {});",
+			'\tconst label = "not a test";',
+			"});",
+		].join("\n");
+
+		for (const name of [
+			"waits through transient recovery reads, then finishes needs_info",
+			"single (quoted) name",
+			"template name",
+		])
+			assert.equal(declaresTest(source, name), true, name);
+
+		for (const name of [
+			"group",
+			"not a test",
+			"waits through transient recovery reads",
+			"single (quoted",
+			"single .quoted. name",
+		])
+			assert.equal(declaresTest(source, name), false, name);
+	});
+
+	it("counts only test or it calls whose whole literal first argument is the name, never comments, strings or computed names (#807 review)", () => {
+		const source = [
+			'// it("in a comment", () => {});',
+			'/* test("in a block comment", () => {}); */',
+			`const example = 'it("in a string", () => {});';`,
+			'it("prefix" + " suffix", () => {});',
+			"const label = `computed`;",
+			"it(label, () => {});",
+			"test(`sub ${label}`, () => {});",
+			'describe("a", () => { describe("b", () => { it.only("nested", () => {}); }); });',
+			'it("\\u0041 escaped", () => {});',
+			'describe("c", () => it("twice", () => {}));',
+			'describe("d", () => test("twice", () => {}));',
+			'expect("not a test call");',
+		].join("\n");
+
+		for (const [name, count] of [
+			["in a comment", 0],
+			["in a block comment", 0],
+			["in a string", 0],
+			["prefix", 0],
+			["prefix suffix", 0],
+			["computed", 0],
+			["label", 0],
+			["sub computed", 0],
+			["not a test call", 0],
+			["a", 0],
+			["nested", 1],
+			["A escaped", 1],
+			["twice", 2],
+		] as const)
+			assert.equal(testDeclarations(source, name), count, name);
+
+		assert.equal(declaresTest(source, "nested"), true);
+		assert.equal(declaresTest(source, "twice"), false);
+	});
+
+	it("tells specify how to find pinned tests and to leave additive changes without any", () => {
+		const prompt = specifyPrompt({
+			repo,
+			baseSha: base,
+			guidance: { general: "", stages: {} },
+			files: [...files],
+			inlined: [],
+			title: "Release on label removal",
+			body: "Change it.",
+			answers: null,
+		});
+
+		assert.ok(
+			prompt.includes(
+				'"replacesTests":[{"path":"test/existing.test.ts","test":"exact test name","reason":',
+			),
+		);
+		assert.match(prompt, /Read the existing tests that exercise/);
+		assert.match(prompt, /purely additive change/);
+		assert.match(prompt, new RegExp(`at most ${MAX_REPLACED_TESTS}`));
 	});
 
 	it("accepts one fenced JSON block", () => {
@@ -343,7 +494,11 @@ describe("contract bytes and digest", () => {
 
 	it("build prompt carries exact contract replacement authorization", () => {
 		const replacesTests = [
-			{ path: "test/old.test.ts", reason: "intentional behavior change" },
+			{
+				path: "test/old.test.ts",
+				test: "old behavior",
+				reason: "intentional behavior change",
+			},
 		];
 
 		const prompt = buildPrompt({

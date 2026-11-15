@@ -29,6 +29,7 @@ import {
 import {
 	ARTIFACT_ACCESS,
 	fileArtifacts,
+	parseStoredContract,
 } from "../../../src/contract/artifacts.ts";
 import {
 	type Contract,
@@ -516,7 +517,11 @@ describe("private acceptance artifacts", () => {
 		const changed: Contract = {
 			...contract,
 			replacesTests: [
-				{ path: "test/old.test.ts", reason: "Ticket changes this behavior" },
+				{
+					path: "test/old.test.ts",
+					test: "old behavior",
+					reason: "Ticket changes this behavior",
+				},
 			],
 		};
 
@@ -536,6 +541,81 @@ describe("private acceptance artifacts", () => {
 			contract: changed,
 			digest,
 		});
+	});
+	it("reads a contract stored before replaced tests were named as path-only, with its bytes and digest unchanged (#807 review)", () => {
+		const slug = "nublai/pi-herdr-factorio";
+
+		if (!isRepoSlug(slug)) throw new Error("fixture");
+
+		const legacy: Contract = {
+			version: 2,
+			runId: digestOf("legacy-review"),
+			issue: 1,
+			base: { repo: slug, sha },
+			snapshot: {
+				digest: digestOf("snapshot"),
+				source: "unedited",
+				eventId: "1",
+				eventAt: "2026-11-15T00:00:00Z",
+			},
+			link: null,
+			summary: "Change value",
+			behavior: ["Change value"],
+			acceptance: [{ id: "A1", kind: "new_behavior", text: "New value" }],
+			exclusions: [],
+			compatibility: [],
+			limits: [],
+			files: [],
+			evidence: [],
+			replacesTests: [{ path: "test/old.test.ts", reason: "Behavior changes" }],
+		};
+
+		const read = (replacesTests: readonly object[]) => {
+			const bytes = `${JSON.stringify({ ...JSON.parse(contractBytes(legacy)), replacesTests }, null, "\t")}\n`;
+
+			const receipt = JSON.stringify({
+				contractDigest: contractDigestOf(bytes),
+				runId: legacy.runId,
+				baseSha: sha,
+				bytes: Buffer.byteLength(bytes),
+				snapshotDigest: legacy.snapshot.digest,
+			});
+
+			return parseStoredContract(bytes, receipt, legacy.runId);
+		};
+
+		const bytes = contractBytes(legacy);
+		assert.ok(!bytes.includes('"test":'));
+		assert.deepEqual(read(legacy.replacesTests ?? []), {
+			kind: "found",
+			contract: legacy,
+			digest: contractDigestOf(bytes),
+		});
+
+		assert.equal(
+			read(
+				[1, 2, 3, 4, 5, 6].map((n) => ({
+					path: `test/old-${n}.test.ts`,
+					reason: "Behavior changes",
+				})),
+			).kind,
+			"found",
+		);
+
+		for (const bad of [
+			[
+				{ path: "test/old.test.ts", reason: "Behavior changes" },
+				{ path: "test/new.test.ts", test: "old", reason: "Behavior changes" },
+			],
+			[
+				{ path: "test/old.test.ts", reason: "Behavior changes" },
+				{ path: "test/old.test.ts", reason: "Behavior changes" },
+			],
+		])
+			assert.deepEqual(read(bad), {
+				kind: "blocked",
+				reason: "contract_invalid",
+			});
 	});
 	it("retires the first suite once behind an exclusive marker, so the retry stores once", async () => {
 		const root = fresh();

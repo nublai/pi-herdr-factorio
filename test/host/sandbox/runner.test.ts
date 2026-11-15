@@ -3112,7 +3112,11 @@ describe("private build executor", () => {
 						replacements,
 					) => {
 						assert.deepEqual(replacements, [
-							{ path: "test/old.test.ts", reason: "Changed behavior" },
+							{
+								path: "test/old.test.ts",
+								test: "old behavior",
+								reason: "Changed behavior",
+							},
 						]);
 						tests++;
 
@@ -3150,7 +3154,11 @@ describe("private build executor", () => {
 					files: [],
 					evidence: [],
 					replacesTests: [
-						{ path: "test/old.test.ts", reason: "Changed behavior" },
+						{
+							path: "test/old.test.ts",
+							test: "old behavior",
+							reason: "Changed behavior",
+						},
 					],
 				};
 
@@ -10406,6 +10414,145 @@ describe("controller-run specify review", () => {
 			assert.equal(readFileSync(join(h.dir, "output.txt"), "utf8"), QUESTIONS);
 		} finally {
 			h.close();
+		}
+	});
+
+	it("accepts a replaced test only when the base checkout declares that exact test (#735 round 3)", async () => {
+		const path = "test/src/controller/recovery.test.ts";
+
+		const pinned =
+			"waits through transient recovery reads after ready was removed, then finishes needs_info";
+
+		const draft = (test: string) =>
+			JSON.stringify({
+				kind: "contract",
+				summary: "Release a recovering build when factory:ready is removed",
+				behavior: ["Removing factory:ready releases a recovering build"],
+				exclusions: [],
+				acceptance: [
+					{ kind: "new_behavior", text: "The recovering build is released" },
+				],
+				compatibility: [],
+				limits: [],
+				files: ["server/cli.ts"],
+				evidence: [],
+				replacesTests: [
+					{ path, test, reason: "#789 releases instead of waiting" },
+				],
+			});
+
+		for (const [texts, kind] of [
+			[[draft(pinned), CLEAN_REVIEW], "passed"],
+			[[draft("waits through transient recovery reads")], "failed"],
+			[[draft(pinned), CRITIQUE, draft("an undeclared test")], "failed"],
+		] as const) {
+			const h = setup(texts);
+
+			try {
+				mkdirSync(join(h.dir, "test/src/controller"), { recursive: true });
+				writeFileSync(
+					join(h.dir, path),
+					`import { it } from "node:test";\nit(${JSON.stringify(pinned)}, async () => {});\n`,
+				);
+
+				const specify = h.run.specify;
+				assert.ok(specify);
+
+				const result = await specifyModule.runSpecify(
+					{
+						...h.run,
+						specify: { ...specify, files: [...specify.files, path] },
+					},
+					h.dir,
+					h.create,
+				);
+
+				assert.equal(result.kind, kind);
+				assert.equal(h.calls.length, texts.length);
+				assert.equal(existsSync(join(h.dir, "output.txt")), kind === "passed");
+			} finally {
+				h.close();
+			}
+		}
+	});
+
+	it("counts only a test or it call whose literal first argument is the name, once, in the base file (#807 review)", async () => {
+		const path = "test/src/controller/recovery.test.ts";
+		const pinned = "finishes needs_info";
+		const name = JSON.stringify(pinned);
+
+		const draft = JSON.stringify({
+			kind: "contract",
+			summary: "Release a recovering build when factory:ready is removed",
+			behavior: ["Removing factory:ready releases a recovering build"],
+			exclusions: [],
+			acceptance: [
+				{ kind: "new_behavior", text: "The recovering build is released" },
+			],
+			compatibility: [],
+			limits: [],
+			files: ["server/cli.ts"],
+			evidence: [],
+			replacesTests: [
+				{ path, test: pinned, reason: "#789 releases instead of waiting" },
+			],
+		});
+
+		for (const [variant, source, kind] of [
+			[
+				"comment",
+				`// it(${name}, () => {});\nit("other", () => {});`,
+				"failed",
+			],
+			[
+				"string",
+				`const example = 'it("${pinned}", () => {});';\nit("other", () => {});`,
+				"failed",
+			],
+			["concatenation", `it(${name} + " suffix", () => {});`, "failed"],
+			[
+				"duplicate",
+				`describe("a", () => it(${name}, () => {}));\ndescribe("b", () => it(${name}, () => {}));`,
+				"failed",
+			],
+			[
+				"nested",
+				`describe("a", () => { describe("b", () => { test.skip(\`${pinned}\`, () => {}); }); });`,
+				"passed",
+			],
+		] as const) {
+			const texts = kind === "passed" ? [draft, CLEAN_REVIEW] : [draft];
+			const h = setup(texts);
+
+			try {
+				mkdirSync(join(h.dir, "test/src/controller"), { recursive: true });
+				writeFileSync(
+					join(h.dir, path),
+					`import { describe, it, test } from "node:test";\n${source}\n`,
+				);
+
+				const specify = h.run.specify;
+				assert.ok(specify);
+
+				const result = await specifyModule.runSpecify(
+					{
+						...h.run,
+						specify: { ...specify, files: [...specify.files, path] },
+					},
+					h.dir,
+					h.create,
+				);
+
+				assert.equal(result.kind, kind, variant);
+				assert.equal(h.calls.length, texts.length, variant);
+				assert.equal(
+					existsSync(join(h.dir, "output.txt")),
+					kind === "passed",
+					variant,
+				);
+			} finally {
+				h.close();
+			}
 		}
 	});
 

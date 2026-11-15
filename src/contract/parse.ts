@@ -1,3 +1,5 @@
+import { createRequire } from "node:module";
+import type * as TS from "typescript";
 import type { JsonValue } from "../core/json.ts";
 import type { NonEmpty } from "../core/run.ts";
 import { ACCEPTANCE_SUITE_PREFIX } from "../trust/protected-paths.ts";
@@ -16,8 +18,10 @@ import {
 	MAX_FILES,
 	MAX_LIST,
 	MAX_QUESTIONS,
+	MAX_REPLACED_TESTS,
 	OUTPUT_MAX_BYTES,
 	type Question,
+	type Replacements,
 	type SpecifyOutput,
 } from "./contract.ts";
 
@@ -188,9 +192,46 @@ function evidenceOf(value: JsonValue, files: ReadonlySet<string>): Evidence {
 	return { ...citeOf(value, files), fact: fact ?? reject("bad_field") };
 }
 
+/**
+ * Every entry names its test, at most `MAX_REPLACED_TESTS`, one entry per
+ * test. A stored contract from before test names may instead name none,
+ * up to `MAX_FILES` distinct files, read as path-only as it was written.
+ */
+function replacementsOf(
+	listed: readonly {
+		readonly path: string;
+		readonly test: string | null;
+		readonly reason: string;
+	}[],
+): Replacements {
+	const named = listed.flatMap(({ path, test, reason }) =>
+		test === null ? [] : [{ path, test, reason }],
+	);
+
+	if (named.length === listed.length) {
+		if (
+			named.length > MAX_REPLACED_TESTS ||
+			new Set(named.map((entry) => JSON.stringify([entry.path, entry.test])))
+				.size !== named.length
+		)
+			reject("bad_field");
+
+		return named;
+	}
+
+	if (
+		named.length > 0 ||
+		new Set(listed.map((entry) => entry.path)).size !== listed.length
+	)
+		reject("bad_field");
+
+	return listed.map(({ path, reason }) => ({ path, reason }));
+}
+
 function contractOf(
 	value: JsonObject,
 	files: ReadonlySet<string>,
+	stored: boolean,
 ): ContractDraft {
 	only(value, [
 		"kind",
@@ -207,13 +248,19 @@ function contractOf(
 
 	const replacements = fieldOf(value, "replacesTests");
 
-	const replacesTests = listOf(replacements, 0, MAX_FILES).map((item) => {
+	const listed = listOf(
+		replacements,
+		0,
+		stored ? MAX_FILES : MAX_REPLACED_TESTS,
+	).map((item) => {
 		const entry = only(objectOf(item) ?? reject("bad_field"), [
 			"path",
+			"test",
 			"reason",
 		]);
 
 		const path = lineOf(fieldOf(entry, "path")) ?? reject("bad_field");
+		const named = fieldOf(entry, "test");
 		const reason = lineOf(fieldOf(entry, "reason")) ?? reject("bad_field");
 
 		if (
@@ -226,14 +273,17 @@ function contractOf(
 
 		if (!files.has(path)) reject("unknown_path");
 
-		return { path, reason };
+		return {
+			path,
+			test:
+				named === undefined && stored
+					? null
+					: (lineOf(named) ?? reject("bad_field")),
+			reason,
+		};
 	});
 
-	if (
-		new Set(replacesTests.map((entry) => entry.path)).size !==
-		replacesTests.length
-	)
-		reject("bad_field");
+	const replacesTests = replacementsOf(listed);
 
 	const paths = linesOf(fieldOf(value, "files"), 0, MAX_FILES);
 
@@ -375,6 +425,69 @@ function hasDuplicateKey(text: string): boolean {
 	return false;
 }
 
+// Loaded on first use, so importing this module does not load the compiler.
+const loadTypescript = (): typeof TS =>
+	createRequire(import.meta.url)("typescript");
+
+let typescript: typeof TS | null = null;
+
+function isTestCallee(ts: typeof TS, callee: TS.Expression): boolean {
+	const target = ts.isPropertyAccessExpression(callee)
+		? callee.expression
+		: callee;
+
+	return (
+		ts.isIdentifier(target) && (target.text === "test" || target.text === "it")
+	);
+}
+
+/**
+ * How many `test` or `it` calls in `source`, with at most one modifier such
+ * as `.skip`, take `name` as their whole first argument: a string or a
+ * template with no substitution, compared by decoded value. Nested
+ * `describe` blocks count. Comments, string contents, concatenated and
+ * computed names never do. Specify names a replaced test this way; one
+ * declaration names it and more are ambiguous.
+ */
+export function testDeclarations(source: string, name: string): number {
+	const ts = (typescript ??= loadTypescript());
+
+	const file = ts.createSourceFile(
+		"replaced.test.ts",
+		source,
+		ts.ScriptTarget.Latest,
+		false,
+		ts.ScriptKind.TS,
+	);
+
+	let count = 0;
+
+	const visit = (node: TS.Node): void => {
+		if (ts.isCallExpression(node) && isTestCallee(ts, node.expression)) {
+			const first = node.arguments[0];
+
+			if (
+				first !== undefined &&
+				(ts.isStringLiteral(first) ||
+					ts.isNoSubstitutionTemplateLiteral(first)) &&
+				first.text === name
+			)
+				count += 1;
+		}
+
+		ts.forEachChild(node, visit);
+	};
+
+	visit(file);
+
+	return count;
+}
+
+/** True when exactly one `test` or `it` call declares `name`; see `testDeclarations`. */
+export function declaresTest(source: string, name: string): boolean {
+	return testDeclarations(source, name) === 1;
+}
+
 /**
  * Validates specify's final text against the output schema. The text is
  * one JSON object, optionally in a single fenced block. `files` is the
@@ -383,6 +496,7 @@ function hasDuplicateKey(text: string): boolean {
 export function parseSpecifyOutput(
 	text: string,
 	files: ReadonlySet<string>,
+	{ stored = false }: { readonly stored?: boolean } = {},
 ): SpecifyOutput {
 	if (Buffer.byteLength(text, "utf8") > OUTPUT_MAX_BYTES) {
 		return { kind: "malformed", reason: "too_large" };
@@ -404,7 +518,7 @@ export function parseSpecifyOutput(
 		const kind = textOf(fieldOf(value, "kind"));
 
 		if (kind === "contract") {
-			return { kind, draft: contractOf(value, files) };
+			return { kind, draft: contractOf(value, files, stored) };
 		}
 
 		if (kind === "questions") {

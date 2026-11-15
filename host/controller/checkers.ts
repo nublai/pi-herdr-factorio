@@ -32,7 +32,7 @@ import {
 	privateDir,
 	regularText,
 } from "../../src/contract/artifacts.ts";
-import type { Contract, ReplacedTest } from "../../src/contract/contract.ts";
+import type { Contract, Replacements } from "../../src/contract/contract.ts";
 import {
 	countOf,
 	fieldOf as jsonField,
@@ -513,7 +513,7 @@ export type DiagnosisRequest = Readonly<{
 	needs: DiagnosisNeeds;
 	heldoutDir: string;
 	heldoutDigest: string;
-	replacements: readonly ReplacedTest[];
+	replacements: Replacements;
 	base:
 		| Readonly<{ kind: "stored"; receipt: BaseReceipt | null }>
 		| Readonly<{
@@ -683,7 +683,7 @@ export function controllerDiagnosis(config: {
 		readonly gateTree: string;
 		readonly candidateTree: string;
 		readonly dest: string;
-		readonly replacements: readonly ReplacedTest[];
+		readonly replacements: Replacements;
 		readonly heldoutDir: string;
 		readonly heldoutDigest: string;
 	}) => { readonly ignoredChanges: readonly string[] };

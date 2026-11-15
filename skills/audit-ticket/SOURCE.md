@@ -6,3 +6,4 @@ This is a clean-room rewrite. No upstream text was used.
 - The author did not open `research/upstream/audit-ticket/**`. The upstream candidate there carries no license and is not redistributable.
 - It replaces the upstream "ticket fate" prompt with the structured contract-or-questions output.
 - License: this repository's MIT license.
+- Amended on 2026-11-15 for #735 round 3 with the paragraph on finding the tests a behavior change replaces. It was written in this repository from the owner's decision and the `replacesTests` contract in `docs/operations/factory-cli.md`, with no upstream text.
