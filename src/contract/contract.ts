@@ -68,6 +68,18 @@ export type ReplacedTest = {
 	readonly reason: string;
 };
 
+/**
+ * A replacement in a contract stored before entries named their test: the
+ * whole file, with no judged test. Only stored contracts carry it; new
+ * specify output always names the test.
+ */
+export type LegacyReplacedTest = Omit<ReplacedTest, "test">;
+
+/** Every entry names its test, or, in an older stored contract, none does. */
+export type Replacements =
+	| readonly ReplacedTest[]
+	| readonly LegacyReplacedTest[];
+
 export type ContractDraft = {
 	readonly summary: string;
 	readonly behavior: NonEmpty<string>;
@@ -77,7 +89,7 @@ export type ContractDraft = {
 	readonly limits: readonly string[];
 	readonly files: readonly string[];
 	readonly evidence: readonly Evidence[];
-	readonly replacesTests?: readonly ReplacedTest[];
+	readonly replacesTests?: Replacements;
 };
 
 export type Link = {

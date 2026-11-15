@@ -3784,6 +3784,15 @@ describe("replaced tests are judged in review (#735 round 3)", () => {
 		assert.deepEqual(replacementScenarios({ replacesTests: [] }), []);
 	});
 
+	it("adds no judge scenario for a path-only replacement stored before tests were named (#807 review)", () => {
+		assert.deepEqual(
+			replacementScenarios({
+				replacesTests: [{ path: replaced.path, reason: replaced.reason }],
+			}),
+			[],
+		);
+	});
+
 	it("gives both judges each replacement scenario from the captured review input", async () => {
 		const f = await preparedReviewFixture(1, false, false, () => ({}), [
 			replaced,

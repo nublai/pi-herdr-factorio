@@ -21,6 +21,7 @@ import {
 	MAX_REPLACED_TESTS,
 	OUTPUT_MAX_BYTES,
 	type Question,
+	type Replacements,
 	type SpecifyOutput,
 } from "./contract.ts";
 
@@ -191,9 +192,46 @@ function evidenceOf(value: JsonValue, files: ReadonlySet<string>): Evidence {
 	return { ...citeOf(value, files), fact: fact ?? reject("bad_field") };
 }
 
+/**
+ * Every entry names its test, at most `MAX_REPLACED_TESTS`, one entry per
+ * test. A stored contract from before test names may instead name none,
+ * up to `MAX_FILES` distinct files, read as path-only as it was written.
+ */
+function replacementsOf(
+	listed: readonly {
+		readonly path: string;
+		readonly test: string | null;
+		readonly reason: string;
+	}[],
+): Replacements {
+	const named = listed.flatMap(({ path, test, reason }) =>
+		test === null ? [] : [{ path, test, reason }],
+	);
+
+	if (named.length === listed.length) {
+		if (
+			named.length > MAX_REPLACED_TESTS ||
+			new Set(named.map((entry) => JSON.stringify([entry.path, entry.test])))
+				.size !== named.length
+		)
+			reject("bad_field");
+
+		return named;
+	}
+
+	if (
+		named.length > 0 ||
+		new Set(listed.map((entry) => entry.path)).size !== listed.length
+	)
+		reject("bad_field");
+
+	return listed.map(({ path, reason }) => ({ path, reason }));
+}
+
 function contractOf(
 	value: JsonObject,
 	files: ReadonlySet<string>,
+	stored: boolean,
 ): ContractDraft {
 	only(value, [
 		"kind",
@@ -210,38 +248,42 @@ function contractOf(
 
 	const replacements = fieldOf(value, "replacesTests");
 
-	const replacesTests = listOf(replacements, 0, MAX_REPLACED_TESTS).map(
-		(item) => {
-			const entry = only(objectOf(item) ?? reject("bad_field"), [
-				"path",
-				"test",
-				"reason",
-			]);
+	const listed = listOf(
+		replacements,
+		0,
+		stored ? MAX_FILES : MAX_REPLACED_TESTS,
+	).map((item) => {
+		const entry = only(objectOf(item) ?? reject("bad_field"), [
+			"path",
+			"test",
+			"reason",
+		]);
 
-			const path = lineOf(fieldOf(entry, "path")) ?? reject("bad_field");
-			const test = lineOf(fieldOf(entry, "test")) ?? reject("bad_field");
-			const reason = lineOf(fieldOf(entry, "reason")) ?? reject("bad_field");
+		const path = lineOf(fieldOf(entry, "path")) ?? reject("bad_field");
+		const named = fieldOf(entry, "test");
+		const reason = lineOf(fieldOf(entry, "reason")) ?? reject("bad_field");
 
-			if (
-				!isRepoPath(path) ||
-				!path.startsWith("test/") ||
-				path.startsWith(ACCEPTANCE_SUITE_PREFIX) ||
-				!/\.(?:test|cases)\.[cm]?[jt]s$/.test(path)
-			)
-				reject("bad_field");
+		if (
+			!isRepoPath(path) ||
+			!path.startsWith("test/") ||
+			path.startsWith(ACCEPTANCE_SUITE_PREFIX) ||
+			!/\.(?:test|cases)\.[cm]?[jt]s$/.test(path)
+		)
+			reject("bad_field");
 
-			if (!files.has(path)) reject("unknown_path");
+		if (!files.has(path)) reject("unknown_path");
 
-			return { path, test, reason };
-		},
-	);
+		return {
+			path,
+			test:
+				named === undefined && stored
+					? null
+					: (lineOf(named) ?? reject("bad_field")),
+			reason,
+		};
+	});
 
-	if (
-		new Set(
-			replacesTests.map((entry) => JSON.stringify([entry.path, entry.test])),
-		).size !== replacesTests.length
-	)
-		reject("bad_field");
+	const replacesTests = replacementsOf(listed);
 
 	const paths = linesOf(fieldOf(value, "files"), 0, MAX_FILES);
 
@@ -454,6 +496,7 @@ export function declaresTest(source: string, name: string): boolean {
 export function parseSpecifyOutput(
 	text: string,
 	files: ReadonlySet<string>,
+	{ stored = false }: { readonly stored?: boolean } = {},
 ): SpecifyOutput {
 	if (Buffer.byteLength(text, "utf8") > OUTPUT_MAX_BYTES) {
 		return { kind: "malformed", reason: "too_large" };
@@ -475,7 +518,7 @@ export function parseSpecifyOutput(
 		const kind = textOf(fieldOf(value, "kind"));
 
 		if (kind === "contract") {
-			return { kind, draft: contractOf(value, files) };
+			return { kind, draft: contractOf(value, files, stored) };
 		}
 
 		if (kind === "questions") {

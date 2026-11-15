@@ -353,6 +353,7 @@ export function parseStoredContract(
 			})),
 		}),
 		new Set([...paths, ...evidencePaths, ...replacementPaths]),
+		{ stored: true },
 	);
 
 	if (
