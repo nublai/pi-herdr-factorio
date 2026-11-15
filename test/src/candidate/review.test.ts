@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { formatUnverifiableDetail } from "../../../src/trust/markers.ts";
 import {
 	findingFingerprints,
 	feedbackPrompt,
@@ -2049,6 +2050,186 @@ describe("candidate review", () => {
 				null,
 				JSON.stringify(judgment),
 			);
+	});
+
+	it("cuts a 900-character judge reason without losing the pass or scenario", () => {
+		const text = JSON.stringify({
+			seat: SECOND_JUDGE,
+			findings: [],
+			judgments: [{ scenario: "S4", outcome: "pass", reason: "x".repeat(900) }],
+		});
+
+		const parsed = parseSeat(text, SECOND_JUDGE, files, ["S4"]);
+		assert.ok(parsed);
+		assert.equal(parsed.seat, SECOND_JUDGE);
+		assert.equal(parsed.findings.length, 0);
+		assert.equal(parsed.judgments[0]?.scenario, "S4");
+		assert.equal(parsed.judgments[0]?.outcome, "pass");
+		const reason = parsed.judgments[0]?.reason ?? "";
+		assert.equal([...reason].length, 600);
+		assert.match(reason, /… \[cut by controller at 600 characters\]$/);
+		assert.equal(
+			digestOf(JSON.stringify(parsed)),
+			digestOf(JSON.stringify(parseSeat(text, SECOND_JUDGE, files, ["S4"]))),
+		);
+		assert.equal(
+			digestOf(JSON.stringify(parsed)),
+			digestOf(
+				JSON.stringify(
+					parseSeat(JSON.stringify(parsed), SECOND_JUDGE, files, ["S4"]),
+				),
+			),
+		);
+	});
+
+	it("bounds free text by code points and includes the cut marker within each limit", () => {
+		for (const size of [599, 600, 601, 900]) {
+			const text = "😀".repeat(size);
+
+			const parsed = parseSeat(
+				JSON.stringify({
+					...seat,
+					findings: [
+						{
+							id: "F1",
+							severity: "blocking",
+							category: "bug",
+							path: "src/a.ts",
+							startLine: 1,
+							endLine: 2,
+							claim: text,
+							evidence: text + text,
+						},
+					],
+					judgments: [{ scenario: "J1", outcome: "fail", reason: text }],
+				}),
+				"code-review",
+				files,
+				["J1"],
+			);
+
+			assert.ok(parsed);
+			assert.equal(parsed.judgments[0]?.outcome, "fail");
+			const finding = parsed.findings[0];
+			assert.ok(finding);
+			assert.equal(finding.id, "F1");
+			assert.equal(finding.severity, "blocking");
+			assert.equal(finding.category, "bug");
+			assert.equal(finding.path, "src/a.ts");
+			assert.equal(finding.startLine, 1);
+			assert.equal(finding.endLine, 2);
+
+			for (const [value, limit, original] of [
+				[finding.claim, 600, text],
+				[finding.evidence, 1200, text + text],
+				[parsed.judgments[0]?.reason ?? "", 600, text],
+			] as const) {
+				assert.equal([...value].length, Math.min([...original].length, limit));
+				assert.ok(!value.includes("\ufffd"));
+
+				if ([...original].length > limit) {
+					const marker = `… [cut by controller at ${limit} characters]`;
+					assert.ok(value.endsWith(marker));
+					assert.ok(value.startsWith("😀".repeat(limit - [...marker].length)));
+				} else assert.ok(value === original);
+			}
+		}
+	});
+
+	it("still refuses invalid structure alongside over-long free text", () => {
+		const finding = {
+			id: "F1",
+			severity: "blocking",
+			category: "bug",
+			path: "src/a.ts",
+			startLine: 1,
+			endLine: 2,
+			claim: "x".repeat(900),
+			evidence: "x".repeat(1500),
+		};
+
+		const judgment = {
+			scenario: "J1",
+			outcome: "pass",
+			reason: "x".repeat(900),
+		};
+
+		const valid = { ...seat, findings: [finding], judgments: [judgment] };
+
+		for (const invalid of [
+			{ ...valid, seat: "other" },
+			{ ...valid, extra: true },
+			{ ...valid, judgments: [judgment, judgment] },
+			{ ...valid, judgments: [{ ...judgment, scenario: "unknown" }] },
+			{ ...valid, judgments: [{ ...judgment, outcome: "unknown" }] },
+			{ ...valid, judgments: [{ ...judgment, extra: true }] },
+			...["", 1, null, true, {}, []].map((reason) => ({
+				...valid,
+				judgments: [{ ...judgment, reason }],
+			})),
+			...[
+				{ id: "x".repeat(81) },
+				{ severity: "unknown" },
+				{ category: "unknown" },
+				{ path: "missing.ts" },
+				{ path: "../src/a.ts" },
+				{ startLine: 0 },
+				{ startLine: 1.5 },
+				{ endLine: 11 },
+				{ endLine: 0 },
+				{ extra: true },
+				{ claim: "" },
+				{ claim: 1 },
+				{ evidence: "" },
+				{ evidence: false },
+			].map((change) => ({ ...valid, findings: [{ ...finding, ...change }] })),
+			{ ...valid, findings: [finding, finding] },
+		])
+			assert.ok(
+				parseSeat(JSON.stringify(invalid), "code-review", files, ["J1"]) ===
+					null,
+			);
+	});
+
+	it("keeps cut reasons inert and detail comments deterministic", () => {
+		const text = JSON.stringify({
+			seat: "code-review",
+			findings: [],
+			judgments: [
+				{
+					scenario: "S4",
+					outcome: "unverifiable",
+					reason: "@owner #12 <b>\u202e" + "x".repeat(900),
+				},
+			],
+		});
+
+		const parsed = parseSeat(text, "code-review", files, ["S4"]);
+		assert.ok(parsed);
+
+		const review = { seats: [parsed] };
+
+		const input = {
+			runId: digestOf("reason-cut"),
+			generation: {
+				round: 0,
+				generation: 0,
+				digest: digestOf("generation"),
+			} as const,
+			judgments: unverifiableJudgments(review),
+		};
+
+		const detail = formatUnverifiableDetail(input);
+		assert.ok(detail);
+		assert.ok(
+			detail.body.includes("… \\[cut by controller at 600 characters\\]"),
+		);
+		assert.doesNotMatch(detail.body, /@owner|#12|<b>|\u202e/);
+		assert.equal(ownerJudgments(review)[0]?.reason.length, 160);
+
+		const again = formatUnverifiableDetail(input);
+		assert.equal(again?.key, detail.key);
+		assert.ok(again?.body === detail.body);
 	});
 
 	it("asks the review seat for the outcome enum, not a pass boolean", () => {
