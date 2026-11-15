@@ -1002,6 +1002,50 @@ describe("Orchestrator claims recorded before their first marker", () => {
 		});
 	}
 
+	it("keeps a verified recovery's unfinished release and retries its post, without releasing again", async () => {
+		for (const failure of ["lost", "rejected"] as const) {
+			const { github, clock, files, wire, start } = world();
+			const issue = github.add(labeled(14));
+
+			github.posts = ["lost"];
+			await start().tick();
+			assert.equal(files.claims.get(runOf(14))?.seq, null);
+
+			const stale = { ...issue };
+
+			issue.state = "closed";
+			wire.intercept = async (command, args) => {
+				const path = args.find((arg) => arg.startsWith("repos/")) ?? "";
+
+				if (!path.includes("/issues?")) return github.exec(command, args);
+
+				github.issues.set(14, stale);
+
+				try {
+					return await github.exec(command, args);
+				} finally {
+					github.issues.set(14, issue);
+				}
+			};
+
+			github.posts = [failure];
+
+			const controller = start();
+
+			clock.t += 30_000;
+			const first = await controller.tick();
+
+			assert.deepEqual(statuses(github, 14), [], failure);
+			assert.equal(first.totals.releases, 1, failure);
+
+			clock.t += 30_000;
+			const second = await controller.tick();
+
+			assert.deepEqual(statuses(github, 14), ["1:released"], failure);
+			assert.equal(second.totals.releases, 1, failure);
+		}
+	});
+
 	it("recovers one the candidate list omits from the issue read, with its own slot, before fresh admissions", async () => {
 		const { github, clock, files, wire, start } = world();
 
