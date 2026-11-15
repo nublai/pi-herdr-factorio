@@ -591,6 +591,64 @@ describe("held-out acceptance stage", () => {
 		});
 	}
 
+	for (const [judge, reason] of [
+		[
+			"Require the trusted npm run check gate to pass...",
+			"judge_restates_gate",
+		],
+		[
+			"Independently introduce each regression and verify the dedicated test fails",
+			"judge_requires_execution",
+		],
+	])
+		it(`retries ${reason} within the accept attempt cap without storing or building`, {
+			timeout: 5000,
+		}, async () => {
+			const { github, executor, files, logs, start, clock } = world();
+			github.add(labeled(14));
+			executor.behaviors = [{ kind: "pass", usage: 10 }];
+			executor.acceptBehavior = { kind: "pass", usage: 7 };
+			executor.acceptText = ACCEPTANCE_TEXT.replace(
+				'"scenarios":[',
+				`"scenarios":[${JSON.stringify({ id: "S2", criteria: ["A1"], checks: [], judge })},`,
+			);
+			const controller = start();
+			await once(controller);
+			assert.equal(controller.state.runs.get(14)?.stage, "accept");
+			assert.equal(controller.state.runs.get(14)?.attempt, 2);
+			clock.t += 10_000;
+			await once(controller);
+			clock.t += 20_000;
+			const report = await once(controller);
+			assert.equal(statuses(github, 14).at(-1), "9:failed");
+			assert.equal(report.totals.usage, 31);
+			assert.equal(executor.baseChecks.length, 0);
+			assert.deepEqual(
+				executor.launches.map((launch) => [launch.stage, launch.attempt]),
+				[
+					["specify", 1],
+					["accept", 1],
+					["accept", 2],
+					["accept", 3],
+				],
+			);
+			assert.deepEqual(
+				logs
+					.filter((log) => log.event === "acceptance_malformed")
+					.map((log) => log.fields.reason),
+				[reason, reason, reason],
+			);
+			assert.equal(keyed(github, 14, "acceptance").length, 0);
+			const bound = await files.readContract(runOf(14));
+
+			if (bound.kind !== "found") throw new Error("contract missing");
+			assert.equal(
+				(await files.artifacts.read(runOf(14), bound.contract, bound.digest))
+					.kind,
+				"absent",
+			);
+		});
+
 	it("drops exhausted accept output while retaining its usage", async () => {
 		const { github, executor, files, start } = world();
 		github.add(labeled(14));

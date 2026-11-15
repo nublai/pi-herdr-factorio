@@ -67,6 +67,8 @@ const contract: Contract = {
 	evidence: [],
 };
 
+const acceptanceSkill = readFileSync("skills/acceptance/SKILL.md", "utf8");
+
 const suite = {
 	version: 2,
 	scenarios: [
@@ -211,6 +213,127 @@ describe("held-out acceptance output", () => {
 			"suite",
 		);
 	});
+
+	for (const judge of [
+		"Require the trusted npm run check gate to pass...",
+		"Verify the trusted npm run check gate passes, including existing tests and the new controller regression tests; do not invoke the aggregate gate from held-out tests.",
+		"Require CI to pass.",
+		"The trusted gates must pass.",
+		"Ensure typecheck passes.",
+		"Confirm lint and format pass.",
+		"Verify the test suite passes.",
+		"Verify `npm run check` passes.",
+	])
+		it(`rejects a judge-only gate requirement: ${judge}`, {
+			timeout: 1000,
+		}, () => {
+			assert.deepEqual(
+				writeAcceptance(
+					JSON.stringify({
+						...suite,
+						scenarios: [
+							...suite.scenarios,
+							{ id: "S3", criteria: ["A2"], checks: [], judge },
+						],
+					}),
+					contract,
+				),
+				{ kind: "malformed", reason: "judge_restates_gate" },
+			);
+		});
+
+	for (const judge of [
+		"Independently introduce each regression and verify the dedicated test fails",
+		"Run the controller regression test.",
+		"Execute the CLI and inspect its output.",
+		"Mutate the retry condition and verify the dedicated test fails.",
+		"Reproduce the original failure.",
+		"Verify by running the tests.",
+		"Read the diff; then independently execute the CLI.",
+	])
+		it(`rejects a judge-only execution request: ${judge}`, {
+			timeout: 1000,
+		}, () => {
+			assert.deepEqual(
+				writeAcceptance(
+					JSON.stringify({
+						...suite,
+						scenarios: [
+							...suite.scenarios,
+							{ id: "S3", criteria: ["A2"], checks: [], judge },
+						],
+					}),
+					contract,
+				),
+				{ kind: "malformed", reason: "judge_requires_execution" },
+			);
+		});
+
+	for (const judge of [
+		"Review the added due-retry test: establish a due retry, fail its direct issue GET while retaining the stale list entry, assert the GET occurred, assert deferral, and assert no additional launch.",
+		"Verify the test asserts X and Y.",
+		"Review the test that runs the CLI and asserts the exit code.",
+		"Verify the test asserts that CI failures do not pass certification.",
+		"Review the supplied evidence for the run and its execution identity.",
+		"Review the error wording.",
+		"Review the regression test's assertions without executing code.",
+	])
+		it(`allows a code-reading judgment: ${judge}`, { timeout: 1000 }, () => {
+			assert.equal(
+				writeAcceptance(
+					JSON.stringify({
+						...suite,
+						scenarios: [
+							...suite.scenarios,
+							{ id: "S3", criteria: ["A2"], checks: [], judge },
+						],
+					}),
+					contract,
+				).kind,
+				"suite",
+			);
+		});
+
+	it("keeps execution instructions on checked scenarios outside the judge-only rule", {
+		timeout: 1000,
+	}, () => {
+		assert.equal(
+			writeAcceptance(
+				JSON.stringify({
+					...suite,
+					scenarios: suite.scenarios.map((scenario) => ({
+						...scenario,
+						judge: "Run the regression test.",
+					})),
+				}),
+				contract,
+			).kind,
+			"suite",
+		);
+	});
+
+	it("prompt and skill limit judgments to read-only evidence", {
+		timeout: 1000,
+	}, () => {
+		const prompt = acceptancePrompt({
+			contract,
+			files: [],
+			inlined: [],
+			guidance: { general: "", stages: {} },
+		});
+
+		for (const text of [prompt, acceptanceSkill]) {
+			assert.match(text, /trusted gates already enforce/i);
+			assert.match(text, /review is read-only and cannot run code/i);
+			assert.match(
+				text,
+				/reading the diff, the contract and supplied evidence/,
+			);
+			assert.match(text, /judge_restates_gate/);
+			assert.match(text, /judge_requires_execution/);
+		}
+	});
+
 	it("gets only contract, trusted base map and named files, without issue or earlier sessions", () => {
 		const prompt = acceptancePrompt({
 			contract,
@@ -294,7 +417,7 @@ describe("held-out acceptance output", () => {
 			guidance: { general: "", stages: {} },
 		});
 
-		const skill = readFileSync("skills/acceptance/SKILL.md", "utf8");
+		const skill = acceptanceSkill;
 
 		for (const text of [prompt, skill]) {
 			assert.match(text, /controller may run/i);
