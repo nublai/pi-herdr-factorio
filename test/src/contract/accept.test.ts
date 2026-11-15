@@ -130,6 +130,9 @@ const MUST_ACCEPT_JUDGES = [
 	"Check that the docs explain how to configure the token and run the CLI against a fixture issue.",
 	"Run commands listed in the docs match the package.json scripts.",
 	"Confirm the guide says contributors should rebase and then run the tests.",
+	"Confirm the README contains the example `npm ci; run the smoke test suite` in the setup section.",
+	"Confirm the troubleshooting guide says `Stop the worker. Run the diagnostic command with --json.` before the recovery table.",
+	'Confirm the CHANGELOG says "The old cache is ignored; execute the migration script once." in the upgrade note.',
 ];
 
 const ACCEPTED_BY_DESIGN_PRECISION = [

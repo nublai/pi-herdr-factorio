@@ -295,8 +295,15 @@ const EXECUTION_PATTERNS = EXECUTION_REQUESTS.flatMap(
 	],
 );
 
+/** Blanks clause punctuation inside quoted text, so a quoted instruction stays part of the sentence that reports it. */
+function maskQuoted(judge: string): string {
+	return judge.replace(/`[^`]*`|"[^"]*"|“[^”]*”/g, (quoted) =>
+		quoted.replace(/[;.!?]/g, " "),
+	);
+}
+
 function judgeOnlyRefusal(judge: string): JudgeOnlyRefusal | null {
-	const clauses = judge
+	const clauses = maskQuoted(judge)
 		.replaceAll("`", "")
 		.split(/;|[.!?]+(?:\s+|$)/)
 		.map((clause) => clause.trim())
