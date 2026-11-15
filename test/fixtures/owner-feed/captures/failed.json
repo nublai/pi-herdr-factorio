@@ -41,6 +41,7 @@
 				"reason": "review_input_too_large"
 			},
 			"notProven": [],
+			"unverifiable": [],
 			"steps": []
 		}
 	],

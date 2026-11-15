@@ -977,6 +977,83 @@ test("published token-cap holds stay blocked and orange; off-feed budget stops r
 	});
 });
 
+test("a review_unverifiable hold needs the owner and lists the unverifiable judgments as plain text (#735)", async () => {
+	await state(async (root) => {
+		const feed = await readOwnerFeed({ stateDir: root, repo, now });
+		const waiting = feed.entries.find((entry) => entry.issue === 1);
+		assert.ok(waiting);
+		assert.deepEqual(waiting.unverifiable, []);
+
+		const claim = JSON.parse(
+			await readFile(join(root, "claims", `${waiting.runId}.json`), "utf8"),
+		);
+
+		const review = claim.handoff.current.certification.review;
+		const reason = "review_unverifiable";
+
+		const judged = {
+			...review,
+			blocking: true,
+			seats: review.seats.map((seat: { seat: string }) =>
+				seat.seat === "code-review"
+					? {
+							...seat,
+							judgments: [
+								{
+									scenario: "S3",
+									outcome: "unverifiable",
+									reason: "No trusted\u202e npm run check\nresult.",
+								},
+							],
+						}
+					: seat,
+			),
+		};
+
+		await save(root, ["claims", `${waiting.runId}.json`], {
+			...claim,
+			status: "blocked",
+			handoff: {
+				...claim.handoff,
+				current: { ...claim.handoff.current, review: judged },
+				published: {
+					...claim.handoff.published,
+					readiness: { kind: "not_ready", reason, since: now },
+				},
+				work: { kind: "held", reason, since: now },
+			},
+		});
+
+		const updated = await readOwnerFeed({ stateDir: root, repo, now });
+
+		const held: FeedEntry | undefined = updated.entries.find(
+			(entry) => entry.runId === waiting.runId,
+		);
+
+		assert.equal(held?.reason, reason);
+		assert.equal(held?.kind, "blocked");
+		assert.equal(held?.group, "needs_you");
+		assert.deepEqual(held?.unverifiable, [{ scenario: "S3" }]);
+		assert.doesNotMatch(JSON.stringify(updated), /npm run check/);
+		const wire = parseJson(JSON.stringify(updated));
+		assert.ok(wire !== undefined);
+		assert.deepEqual(v1Problems(wire), []);
+
+		const unnamed = parseJson(
+			JSON.stringify({
+				...updated,
+				entries: updated.entries.map((entry) => ({
+					...entry,
+					unverifiable: [{}],
+				})),
+			}),
+		);
+
+		assert.ok(unnamed !== undefined);
+		assert.notDeepEqual(v1Problems(unnamed), []);
+	});
+});
+
 test("private fixtures also work at restrictive umasks without changing their semantics", async () => {
 	await withUmask(0o077, async () => {
 		await state(async (root) => {

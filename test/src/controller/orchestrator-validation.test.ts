@@ -803,6 +803,29 @@ describe("controller-only validate", () => {
 			assert.ok(
 				!(book.work.kind === "effect" && book.work.request.kind === "open_pr"),
 			);
+
+			if (outcome === "unverifiable") {
+				assert.ok(book.work.kind === "held", JSON.stringify(book.work));
+				assert.equal(book.work.reason, "review_unverifiable");
+				assert.ok(
+					f.executor.launches.every(
+						(l) => l.stage !== "build" || (l.round ?? 0) === 0,
+					),
+				);
+				assert.ok(book.accounts.every((a) => a.execution.stage !== "build"));
+
+				const marker = (f.github.issues.get(14)?.comments ?? []).at(-1)?.body;
+				assert.match(marker ?? "", /"status":"blocked"/);
+				assert.match(marker ?? "", /\(review_unverifiable\)/);
+				assert.match(marker ?? "", /\n- S2: no live evidence\n/);
+
+				const launches = f.executor.launches.length;
+				await f.start().tick();
+				assert.equal(f.executor.launches.length, launches);
+
+				return;
+			}
+
 			assert.ok(
 				book.work.kind === "rebuilding" &&
 					book.work.execution.round === 1 &&

@@ -22,6 +22,7 @@ import {
 	stopRound,
 } from "../candidate/handoff.ts";
 import {
+	ownerJudgments,
 	REVIEW_TOOLS,
 	ReviewEvidenceUnavailable,
 	type ReviewInputRefusal,
@@ -5484,6 +5485,12 @@ export class Orchestrator {
 				? run.handoff.work.reason
 				: undefined;
 
+		const judgments =
+			run.handoff?.kind === "selected" &&
+			run.handoff.current.review !== undefined
+				? ownerJudgments(run.handoff.current.review)
+				: [];
+
 		const next = {
 			repo: this.#input.repo,
 			status,
@@ -5526,13 +5533,19 @@ export class Orchestrator {
 					{ ...marker, seq: marked.seq, cursor: marked.cursor },
 					holdReason,
 					projection.round,
+					judgments,
 				);
 		}
 
 		if (changed) {
 			const post = await this.#writer.postComment(
 				run.issue,
-				formatMarker(marker, holdReason, projection?.round ?? marker.round),
+				formatMarker(
+					marker,
+					holdReason,
+					projection?.round ?? marker.round,
+					judgments,
+				),
 			);
 
 			if (post.kind === "posted") {

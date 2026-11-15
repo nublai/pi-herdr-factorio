@@ -179,6 +179,7 @@ export type HandoffReason =
 	| "head_lag"
 	| "checks_incomplete"
 	| "review_failed"
+	| "review_unverifiable"
 	| "review_input_too_large"
 	| "summary_too_large"
 	| "pr_identity"

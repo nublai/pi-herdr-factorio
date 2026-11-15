@@ -26,6 +26,7 @@ const HOLD_WORDS: Record<HandoffReason, string> = {
 	head_lag: "waiting for GitHub to see the new commit",
 	checks_incomplete: "waiting for required checks",
 	review_failed: "review found a problem",
+	review_unverifiable: "review could not verify a check; you decide",
 	review_input_too_large: "the change is too large for review",
 	summary_too_large: "the PR summary is too long",
 	pr_identity: "the PR identity could not be verified",

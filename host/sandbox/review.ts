@@ -21,12 +21,17 @@ import {
 	reviewSeats,
 	seatPrompt,
 	type SeatReceipt,
+	trustedEvidence,
 } from "../../src/candidate/review.ts";
 import type { ReviewExecution } from "../../src/candidate/state.ts";
 import { validationDir } from "../../src/candidate/validation.ts";
 import { parseWorkflow } from "../../src/config/parse.ts";
 import { isGitSha, WORKFLOW_PATH } from "../../src/config/schema.ts";
-import { fileArtifacts, regularText } from "../../src/contract/artifacts.ts";
+import {
+	fileArtifacts,
+	present,
+	regularText,
+} from "../../src/contract/artifacts.ts";
 import {
 	aggregateEfficiency,
 	parseEfficiency,
@@ -88,6 +93,14 @@ function capturedReviewText(path: string, cap?: number): string {
 		return regularText(path, cap);
 	} catch {
 		throw new ReviewEvidenceUnavailable("review_execution_binding");
+	}
+}
+
+function storedReport(path: string): string | null {
+	try {
+		return present(path) ? regularText(path, 64 * 1024) : null;
+	} catch {
+		return null;
 	}
 }
 
@@ -335,9 +348,8 @@ async function candidateReviewInputs(
 	)
 		throw new ReviewEvidenceUnavailable("review_binding");
 
-	const gate = objectOf(
-		parseJson(capturedReviewText(join(dir, "receipt.json"))),
-	);
+	const gateReceipt = capturedReviewText(join(dir, "receipt.json"));
+	const gate = objectOf(parseJson(gateReceipt));
 
 	if (
 		countOf(fieldOf(gate, "modelCalls")) !== 0 ||
@@ -594,6 +606,12 @@ async function candidateReviewInputs(
 			),
 			guidance: workflow.guidance.stages.review ?? "",
 			verdict,
+			evidence: trustedEvidence({
+				binding: expected.binding,
+				verdict,
+				gateReceipt,
+				report: storedReport(join(dir, "report.json")),
+			}),
 		});
 
 		if (prompt.kind === "refused") return prompt;

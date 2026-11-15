@@ -37,6 +37,7 @@
 			"ci": "Pending",
 			"failure": null,
 			"notProven": [],
+			"unverifiable": [],
 			"steps": []
 		},
 		{
@@ -63,6 +64,7 @@
 			"ci": "Pending",
 			"failure": null,
 			"notProven": [],
+			"unverifiable": [],
 			"steps": []
 		},
 		{
@@ -93,6 +95,7 @@
 				"reason": "review_input_too_large"
 			},
 			"notProven": [],
+			"unverifiable": [],
 			"steps": []
 		},
 		{
@@ -119,6 +122,7 @@
 			"ci": "Pending",
 			"failure": null,
 			"notProven": [],
+			"unverifiable": [],
 			"steps": []
 		},
 		{
@@ -145,6 +149,7 @@
 			"ci": "Pending",
 			"failure": null,
 			"notProven": [],
+			"unverifiable": [],
 			"steps": []
 		},
 		{
@@ -171,6 +176,7 @@
 			"ci": "Pending",
 			"failure": null,
 			"notProven": [],
+			"unverifiable": [],
 			"steps": []
 		},
 		{
@@ -197,6 +203,7 @@
 			"ci": "Passed",
 			"failure": null,
 			"notProven": ["The saved checks and review cannot be verified here."],
+			"unverifiable": [],
 			"steps": []
 		}
 	],
