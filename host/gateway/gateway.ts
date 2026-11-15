@@ -101,6 +101,8 @@ type Exchange = {
 	rejected: number | null;
 	/** The gateway gave up before any upstream response headers arrived. */
 	unreachable: boolean;
+	/** Tokens this request holds against a reserving ceiling until it is metered. */
+	reserved: number;
 };
 
 /**
@@ -413,6 +415,8 @@ export class Gateway implements AdmissionState {
 	#requests = 0;
 	#modelTokens = 0;
 	#modelRequests = 0;
+	/** Tokens outstanding requests hold against a reserving ceiling. */
+	#reserved = 0;
 
 	constructor(options: GatewayOptions) {
 		if (!options.credentials.ok)
@@ -620,6 +624,7 @@ export class Gateway implements AdmissionState {
 			dispatched: null,
 			rejected: null,
 			unreachable: false,
+			reserved: 0,
 		};
 	}
 
@@ -921,7 +926,7 @@ export class Gateway implements AdmissionState {
 
 		// One byte per input token is conservative; bound output explicitly even
 		// when the client omits a provider limit, so a lost result is chargeable.
-		const bounded = boundBody(
+		let bounded = boundBody(
 			exchange.meter,
 			body,
 			this.#table.ceiling.modelTokens,
@@ -952,6 +957,40 @@ export class Gateway implements AdmissionState {
 
 		if (!this.#audit.healthy())
 			return this.#deny(exchange, res, "audit-unavailable");
+
+		// A reserving ceiling admits a model request only if its input estimate
+		// (one token per body byte) plus its output bound fits what earlier
+		// requests charged and outstanding ones reserved left, and lowers the
+		// output bound to fit. Synchronous from here to dispatch, so concurrent
+		// requests cannot both take the same room.
+		if (this.#table.ceiling.reserve === true && exchange.meter !== null) {
+			if (objectOf(parseJson(body.toString("utf8"))) === null)
+				return this.#deny(exchange, res, "body-not-allowed");
+
+			const room =
+				this.#table.ceiling.modelTokens -
+				this.#modelTokens -
+				this.#reserved -
+				body.length;
+
+			if (room < 1) {
+				this.closeGate("ceiling");
+
+				return this.#deny(exchange, res, "budget-closed");
+			}
+
+			bounded = boundBody(
+				exchange.meter,
+				body,
+				Math.min(this.#table.ceiling.modelTokens, room),
+			);
+
+			if (bounded.kind === "deny")
+				return this.#deny(exchange, res, bounded.code);
+
+			exchange.reserved = body.length + bounded.max;
+			this.#reserved += exchange.reserved;
+		}
 
 		this.#forward(
 			exchange,
@@ -1272,6 +1311,8 @@ export class Gateway implements AdmissionState {
 		exchange.inputTokens = usage.inputTokens;
 		exchange.outputTokens = usage.outputTokens;
 		exchange.observedModel = usage.observedModel;
+		this.#reserved -= exchange.reserved;
+		exchange.reserved = 0;
 
 		if (state !== undefined) {
 			state.inputTokens += usage.inputTokens;

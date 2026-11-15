@@ -2116,6 +2116,7 @@ describe("gateway anthropic route", () => {
 			ceilingTokens?: number;
 			fallback?: string;
 			port?: number;
+			reserve?: true;
 		} = {},
 	) {
 		const base = anthropicTable({
@@ -2126,6 +2127,10 @@ describe("gateway anthropic route", () => {
 
 		const table: RouteTable = {
 			...base,
+			ceiling:
+				options.reserve === undefined
+					? base.ceiling
+					: { ...base.ceiling, reserve: options.reserve },
 			routes: base.routes.map((route) =>
 				route.meter === null
 					? route
@@ -2270,6 +2275,149 @@ describe("gateway anthropic route", () => {
 				peakConcurrent: 1,
 			},
 		);
+	});
+
+	// The fixture upstream reports 12,476 input tokens for every request. A
+	// real request cannot carry more input tokens than body bytes, so these
+	// bodies are padded to 12,600 bytes, the gateway's input estimate.
+	const reservedBody = (extra: Record<string, JsonValue> = {}) => {
+		const bare = messages(extra);
+
+		const padded = messages({
+			...extra,
+			messages: [
+				{
+					role: "user",
+					content: `Reply ok${" ".repeat(12_600 - Buffer.byteLength(bare))}`,
+				},
+			],
+		});
+
+		assert.equal(Buffer.byteLength(padded), 12_600);
+
+		return padded;
+	};
+
+	it("refuses before forwarding a reserved request whose input estimate cannot fit the remaining allowance (#805 B4)", async () => {
+		mode = "full";
+
+		const h = await anthropicHarness({ ceilingTokens: 12_000, reserve: true });
+		const before = sent.length;
+
+		const reply = await call(
+			h.socketPath,
+			"POST",
+			"/anthropic/v1/messages",
+			piHeaders,
+			reservedBody(),
+		);
+
+		assert.deepEqual([reply.status, reply.code], [403, "budget-closed"]);
+		assert.equal(sent.length, before);
+
+		const summary = h.gateway.summary();
+
+		assert.equal(summary.modelTokens, 0);
+		assert.ok(summary.modelTokens <= 12_000);
+		assert.equal(summary.gate, "closed");
+		assert.ok(
+			h.events.some(
+				(event) => event.event === "gate_closed" && event.reason === "ceiling",
+			),
+		);
+	});
+
+	it("bounds each reserved request by what earlier and outstanding requests left, so the charge never passes the allowance (#805 B4)", async () => {
+		mode = "full";
+
+		const h = await anthropicHarness({ ceilingTokens: 30_000, reserve: true });
+		const before = sent.length;
+		const statuses: (number | string | null)[][] = [];
+
+		for (let i = 0; i < 3; i++) {
+			const reply = await call(
+				h.socketPath,
+				"POST",
+				"/anthropic/v1/messages",
+				piHeaders,
+				reservedBody(),
+			);
+
+			statuses.push([reply.status, reply.code]);
+		}
+
+		assert.deepEqual(statuses, [
+			[200, null],
+			[200, null],
+			[403, "budget-closed"],
+		]);
+		assert.deepEqual(
+			sent.slice(before).map((seen) => JSON.parse(seen.body).max_tokens),
+			[30_000 - 12_600, 30_000 - 12_480 - 12_600],
+		);
+
+		const summary = h.gateway.summary();
+
+		assert.equal(summary.modelTokens, 2 * 12_480);
+		assert.ok(summary.modelTokens <= 30_000);
+
+		const held = await anthropicHarness({
+			ceilingTokens: 30_000,
+			reserve: true,
+		});
+
+		mode = "hang";
+		const sentBefore = sent.length;
+
+		const hanging = call(
+			held.socketPath,
+			"POST",
+			"/anthropic/v1/messages",
+			piHeaders,
+			reservedBody(),
+		);
+
+		while (sent.length === sentBefore)
+			await new Promise((done) => setTimeout(done, 5));
+
+		mode = "full";
+
+		const outstanding = await call(
+			held.socketPath,
+			"POST",
+			"/anthropic/v1/messages",
+			piHeaders,
+			reservedBody(),
+		);
+
+		assert.deepEqual(
+			[outstanding.status, outstanding.code],
+			[403, "budget-closed"],
+		);
+		assert.equal((await hanging).status, 504);
+		assert.equal(sent.length, sentBefore + 1);
+	});
+
+	it("keeps an unreserved table's output bound and admission unchanged (#805 B4)", async () => {
+		mode = "full";
+
+		const h = await anthropicHarness({ ceilingTokens: 12_000 });
+		const before = sent.length;
+
+		const reply = await call(
+			h.socketPath,
+			"POST",
+			"/anthropic/v1/messages",
+			piHeaders,
+			reservedBody(),
+		);
+
+		assert.equal(reply.status, 200);
+		assert.deepEqual(
+			sent.slice(before).map((seen) => JSON.parse(seen.body).max_tokens),
+			[12_000],
+		);
+		assert.equal(h.gateway.summary().modelTokens, 12_480);
 	});
 
 	it("bounds max_tokens by the client, the stage ceiling and the model maximum, and charges a lost result at that bound", async () => {

@@ -1170,6 +1170,7 @@ export async function runStage(
 			model: bareModel(input.settings.model),
 			fallback: input.settings.fallback,
 			modelTokens: tokenCap - ledger.total,
+			reserve: input.settings.reserveTokens,
 			modelRequests: Math.min(
 				input.stage === "maintain"
 					? 1
