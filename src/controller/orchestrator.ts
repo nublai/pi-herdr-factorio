@@ -3268,7 +3268,7 @@ export class Orchestrator {
 			this.#observeClaim(run, await this.#stillReady(run));
 
 			if (!this.#claimView(run).launch) {
-				// An ending run keeps its slot so later ticks retry its unfinished release post.
+				// An ending run stays tracked, without a slot, so later ticks retry its unfinished release post.
 				if (run.phase.kind !== "ending") this.state.runs.delete(issue);
 
 				return null;
