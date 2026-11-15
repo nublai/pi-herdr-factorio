@@ -69,6 +69,7 @@ import {
 	contractBytes,
 	contractDigestOf,
 } from "../../../src/contract/contract.ts";
+import { controllerDraftChecker } from "../../../host/controller/checkers.ts";
 import {
 	inlined,
 	sourceExcerpts,
@@ -744,6 +745,152 @@ describe("accept same-session draft checks", () => {
 		const prompts = h.pis[0]?.received.filter((c) => c.type === "prompt") ?? [];
 		assert.equal(prompts.length, 3);
 		assert.match(String(prompts[1]?.message), /<draft-feedback-[a-f0-9]+>/);
+	});
+	it("a refused judge-only draft costs a same-session revision, not an attempt", {
+		timeout: 30000,
+	}, async (t) => {
+		const repo = "owner/repo",
+			sha = "b".repeat(40);
+
+		assert.ok(isRepoSlug(repo) && isGitSha(sha));
+		const root = mkdtempSync(join(tmpdir(), "factory-judge-draft-"));
+		t.after(() => rmSync(root, { recursive: true, force: true }));
+
+		const contract: Contract = {
+			version: 2,
+			runId: digest(RUN),
+			issue: 7,
+			base: { repo, sha },
+			snapshot: {
+				digest: digest("c".repeat(64)),
+				source: "unedited",
+				eventId: "1",
+				eventAt: "2026-11-15T00:00:00Z",
+			},
+			link: null,
+			summary: "Docs",
+			behavior: ["Document the flag"],
+			exclusions: [],
+			acceptance: [
+				{ id: "A1", kind: "new_behavior", text: "Flag works" },
+				{ id: "A2", kind: "preservation", text: "Docs stay accurate" },
+			],
+			compatibility: [],
+			limits: [],
+			files: ["src/flag.ts"],
+			evidence: [],
+		};
+
+		const draft = (judge: string) =>
+			JSON.stringify({
+				version: 2,
+				scenarios: [
+					{ id: "S1", criteria: ["A1"], checks: ["flag.test.ts"], judge: null },
+					{ id: "S2", criteria: ["A2"], checks: [], judge },
+				],
+				files: [
+					{
+						path: "flag.test.ts",
+						type: "node:test",
+						content:
+							"import { test } from 'node:test';\ntest('flag', () => {});\n",
+					},
+				],
+			});
+
+		const gate = draft("Require the trusted npm run check gate to pass."),
+			execution = draft(
+				"Run the new test against the base and confirm it fails.",
+			),
+			rewritten = draft(
+				"Confirm the README tells contributors to run the tests with npm test.",
+			);
+
+		for (const [label, replies] of [
+			["exhausted", [gate, execution, gate]],
+			["rewritten", [gate, rewritten]],
+		] as const) {
+			let prompts = 0,
+				fetches = 0;
+
+			const h = harness([
+				(command, pi) => {
+					if (command.type === "prompt") {
+						prompts++;
+						pi.emit(
+							started(String(command.id)),
+							{ type: "turn_start" },
+							assistant({ tokens: 100 }),
+							{ type: "agent_settled", aborted: false },
+						);
+					}
+
+					if (command.type === "get_last_assistant_text")
+						pi.emit({
+							type: "response",
+							id: command.id ?? null,
+							command: "get_last_assistant_text",
+							success: true,
+							data: { text: replies[prompts - 1] ?? "" },
+						});
+
+					if (command.type === "abort")
+						pi.emit({ type: "agent_settled", aborted: true });
+				},
+			]);
+
+			const draftCheck = controllerDraftChecker({
+				stateDir: join(root, label),
+				stageDir: join(root, label, "stage"),
+				attempt: 1,
+				input: {
+					contract,
+					digest: contractDigestOf(contractBytes(contract)),
+					repo,
+					issue: 7,
+					baseSha: sha,
+				},
+				fetch: async () => {
+					fetches++;
+
+					return null;
+				},
+				runner: {
+					kind: "judge-draft",
+					async run() {
+						throw new Error("no base run in this test");
+					},
+				},
+			});
+
+			const result = await runStage(
+				input({ stage: "accept", draftCheck }, { budget, maxTokens: 100000 }),
+				h.host,
+			);
+
+			assert.equal(result.kind, "passed", label);
+			assert.equal(h.launches.length, 1, label);
+			assert.deepEqual(h.outputs, [replies.at(-1)], label);
+
+			const sent = (h.pis[0]?.received ?? [])
+				.filter((c) => c.type === "prompt")
+				.map((c) => String(c.message));
+
+			assert.equal(sent.length, replies.length, label);
+			assert.match(
+				sent[1] ?? "",
+				/scenario S2 was refused as judge_restates_gate\./,
+			);
+
+			if (label === "exhausted") {
+				assert.match(
+					sent[2] ?? "",
+					/scenario S2 was refused as judge_requires_execution\./,
+				);
+				assert.equal(result.receipt.draftRuns, 2);
+				assert.equal(fetches, 0);
+			} else assert.equal(fetches, 1);
+		}
 	});
 	it("null hook leaves one prompt; low token or wall reserves record a skip", async () => {
 		for (const [maxTokens, wallMs, skip] of [

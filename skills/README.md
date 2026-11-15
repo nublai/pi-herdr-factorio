@@ -11,7 +11,7 @@ Each skill sets `disable-model-invocation`, because it is a stage prompt and not
 | Skill | Upstream | License | `SOURCE.md` |
 | --- | --- | --- | --- |
 | `audit-ticket` | none, a clean-room rewrite | this repository's MIT | `audit-ticket/SOURCE.md` |
-| `acceptance` | none, clean-room scenario-holdout skill | this repository's MIT | `acceptance/SOURCE.md` |
+| `acceptance`, checked scenarios and read-only judgments with accept-time gate and execution refusals | none, clean-room scenario-holdout skill | this repository's MIT | `acceptance/SOURCE.md` |
 | `build` | factory protocol plus bundled pstack playbook | repository MIT and pstack's bundled license | `build/SOURCE.md` |
 | `address-pr-comments` | `mnapoli/skill-address-pr-review` at `db7024d` | MIT, Matthieu Napoli, `address-pr-comments/LICENSE` | `address-pr-comments/SOURCE.md` |
 | `grill-me` | `mattpocock/skills` `grilling` at `59db609` | MIT, Matt Pocock, `grill-me/LICENSE` | `grill-me/SOURCE.md` |

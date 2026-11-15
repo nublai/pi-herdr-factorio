@@ -16,11 +16,13 @@ import {
 	type BaseReceipt,
 	type DiagnosisNeeds,
 	type HeldoutReplay,
+	type JudgeDraftFeedback,
 } from "../../src/candidate/diagnosis.ts";
 import type { GitSha } from "../../src/config/schema.ts";
 import type { AcceptanceBinding } from "../../src/contract/acceptance.ts";
 import {
 	acceptanceDigestOf,
+	JUDGE_REFUSAL_SENTENCES,
 	writeAcceptance,
 	type AcceptanceSuite,
 } from "../../src/contract/acceptance.ts";
@@ -83,7 +85,25 @@ export function controllerDraftChecker(config: {
 	return async (text: string, context: DraftCheckContext) => {
 		const parsed = writeAcceptance(text, config.input.contract);
 
-		if (parsed.kind !== "suite") return null;
+		if (parsed.kind !== "suite") {
+			if (!("scenario" in parsed)) return null;
+
+			const feedback: JudgeDraftFeedback = {
+				run: context.run,
+				verdict: "judge_refused",
+				reason: parsed.reason,
+				scenario: parsed.scenario,
+				sentence: JUDGE_REFUSAL_SENTENCES[parsed.reason],
+			};
+
+			exclusive(
+				join(config.stageDir, `draft-${context.run}.json`),
+				JSON.stringify({ feedback }),
+			);
+
+			return feedback;
+		}
+
 		const { contract, digest, repo, issue, baseSha } = config.input;
 
 		const dir = join(config.stageDir, `draft-${context.run}`),

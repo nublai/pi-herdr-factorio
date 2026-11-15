@@ -2,6 +2,7 @@ import type { GitSha } from "../config/schema.ts";
 import {
 	parseAcceptanceBinding,
 	type AcceptanceBinding,
+	type JudgeOnlyRefusal,
 } from "../contract/acceptance.ts";
 import type { Contract, CriterionKind } from "../contract/contract.ts";
 import type { JsonValue } from "../core/json.ts";
@@ -1062,7 +1063,7 @@ export type DraftFileFeedback = Readonly<{
 	omittedFailures: number;
 }>;
 
-export type DraftFeedback = Readonly<{
+export type BaseDraftFeedback = Readonly<{
 	run: 1 | 2;
 	verdict: "would_qualify" | "would_refuse";
 	reason: BaseReason | null;
@@ -1071,6 +1072,16 @@ export type DraftFeedback = Readonly<{
 	signals?: readonly SuiteSignal[];
 	omitted: number;
 }>;
+
+export type JudgeDraftFeedback = Readonly<{
+	run: 1 | 2;
+	verdict: "judge_refused";
+	reason: JudgeOnlyRefusal;
+	scenario: string;
+	sentence: string;
+}>;
+
+export type DraftFeedback = BaseDraftFeedback | JudgeDraftFeedback;
 
 export function runtimeCause(cause: string): boolean {
 	return (
@@ -1098,7 +1109,7 @@ export function draftCheckFeedback(
 	receipt: BaseReceipt,
 	details: readonly DraftDetail[],
 	issue: number,
-): DraftFeedback {
+): BaseDraftFeedback {
 	const { assessment } = assessBase(receipt.evidence);
 
 	const reason =
@@ -1202,8 +1213,8 @@ export function draftCheckFeedback(
 			: draftText(s.file, 300),
 	}));
 
-	const feedback = (files: number, hits: number): DraftFeedback => {
-		const value: DraftFeedback = {
+	const feedback = (files: number, hits: number): BaseDraftFeedback => {
+		const value: BaseDraftFeedback = {
 			run: 1,
 			verdict: reason === null ? "would_qualify" : "would_refuse",
 			reason,
@@ -1217,7 +1228,7 @@ export function draftCheckFeedback(
 			: value;
 	};
 
-	const size = (f: DraftFeedback) =>
+	const size = (f: BaseDraftFeedback) =>
 		Buffer.byteLength(JSON.stringify(f).replaceAll("<", "\\u003c"));
 
 	let files = 0,
@@ -1239,6 +1250,8 @@ export function draftCheckFeedback(
 }
 
 export function draftNeedsRevision(feedback: DraftFeedback): boolean {
+	if (feedback.verdict === "judge_refused") return true;
+
 	return feedback.reason === null
 		? feedback.files.some((f) => f.suspect)
 		: retryableBaseReason(feedback.reason);
