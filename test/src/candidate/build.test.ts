@@ -19,6 +19,8 @@ import {
 	PATCH_RECEIPT_MAX_BYTES,
 	TEST_TAIL_BYTES,
 	buildPrompt,
+	testInputEdits,
+	prepareRepairTree,
 	checkBuildDisk,
 	collectPatch,
 	commandReceipts,
@@ -49,6 +51,89 @@ function fixture(t: { after(fn: () => void): void }) {
 		stateDir: join(root, "store"),
 	};
 }
+
+test("testInputEdits identifies unrun bytes, modes and deletions without counting replacements or new tests", {
+	timeout: 30_000,
+}, () => {
+	const entry = (text: string, mode = 0o100644) => ({
+		data: Buffer.from(text),
+		mode,
+	});
+
+	const base = new Map([
+		["test/z.test.ts", entry("base")],
+		["test/deleted.ts", entry("base")],
+		["test/replaced.test.ts", entry("base")],
+		["test/mode.ts", entry("base")],
+		["src/value.ts", entry("base")],
+	]);
+
+	const candidate = new Map([
+		["test/z.test.ts", entry("changed")],
+		["test/replaced.test.ts", entry("changed")],
+		["test/mode.ts", entry("base", 0o100755)],
+		["test/new.test.ts", entry("new")],
+		["src/value.ts", entry("changed")],
+	]);
+
+	assert.deepEqual(
+		testInputEdits(base, candidate, [{ path: "test/replaced.test.ts" }]),
+		{
+			unrunTestEdits: ["test/deleted.ts", "test/mode.ts", "test/z.test.ts"],
+			addsTestFile: true,
+		},
+	);
+	assert.deepEqual(testInputEdits(base, base, []), {
+		unrunTestEdits: [],
+		addsTestFile: false,
+	});
+});
+
+test("repair feedback names only unrun test edits and excludes controller-removed acceptance", {
+	timeout: 30_000,
+}, async (t) => {
+	const f = fixture(t);
+
+	for (const root of [f.base, f.workspace]) {
+		mkdirSync(join(root, "test/acceptance"), { recursive: true });
+		writeFileSync(join(root, "test/acceptance/private.ts"), "private");
+		writeFileSync(join(root, "test/old.test.ts"), "base");
+	}
+
+	for (const scenario of ["clean", "unrun", "replaced"] as const) {
+		writeFileSync(join(f.workspace, "value.ts"), "new");
+		writeFileSync(
+			join(f.workspace, "test/old.test.ts"),
+			scenario === "clean" ? "base" : "changed",
+		);
+		const patch = await collectPatch(f);
+		assert.equal(patch.kind, "collected");
+
+		if (patch.kind !== "collected") return;
+		const dest = join(f.root, `repair-${scenario}`);
+		await prepareRepairTree(
+			f.base,
+			dest,
+			patch.patch,
+			patch.changedPaths,
+			'{"version":1,"review":[]}',
+			scenario === "replaced" ? [{ path: "test/old.test.ts" }] : [],
+		);
+
+		const feedback = JSON.parse(
+			readFileSync(join(dest, ".factory-feedback.json"), "utf8"),
+		);
+
+		assert.deepEqual(feedback.review, []);
+
+		if (scenario === "unrun") {
+			assert.equal(feedback.controller.length, 1);
+			assert.deepEqual(feedback.controller[0].files, ["test/old.test.ts"]);
+			assert.match(feedback.controller[0].message, /base bytes/);
+			assert.match(feedback.controller[0].message, /new test file/);
+		} else assert.equal(feedback.controller, undefined);
+	}
+});
 
 test("keeps immutable patch and visible-test stores separate for rounds zero to two", async (t) => {
 	const f = fixture(t);
