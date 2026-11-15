@@ -119,6 +119,9 @@ stages:
   review:
     model: openai/gpt-6.1-sol
     fallback_model: openai/gpt-6.1-terra
+    seats:
+      second-judge:
+        model: anthropic/claude-sonnet-5-5
     max_turns: 20
     wall_ms: 900000
     stall_ms: 300000
