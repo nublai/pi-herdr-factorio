@@ -13,6 +13,7 @@ import {
 	candidateProjection,
 	candidateUsage,
 	candidateGenerations,
+	earlierReviews,
 	notProven,
 	renderLimitation,
 } from "../candidate/handoff.ts";
@@ -366,7 +367,8 @@ async function unverifiableHold(
 		verdict !== null &&
 		trustedEvidence({ binding: review, verdict, gateReceipt, report }) !== null;
 
-	const judgments = unverifiableOnly(review);
+	const earlier = book?.kind === "selected" ? earlierReviews(book) : [];
+	const judgments = unverifiableOnly(review, earlier);
 	const contract = await readStoredContract(root, entry.runId);
 
 	const suite =
@@ -398,7 +400,7 @@ async function unverifiableHold(
 	const commentId = textOf(reference?.commentId);
 
 	return {
-		unverifiable: ownerJudgments(review).map(({ scenario }) => ({
+		unverifiable: ownerJudgments(review, earlier).map(({ scenario }) => ({
 			scenario,
 		})),
 		unverifiableCode: unverifiableCode({

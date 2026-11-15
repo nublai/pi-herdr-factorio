@@ -753,6 +753,20 @@ export function stopRound(
 	});
 }
 
+/**
+ * The reviews of the generations from earlier rounds than the current one,
+ * the repair history a judge split is checked against.
+ */
+export function earlierReviews(
+	state: Pick<Selected, "current" | "history">,
+): readonly ReviewReceipt[] {
+	return state.history.flatMap((g) =>
+		g.intent.round < state.current.intent.round
+			? (g.review ?? g.certification?.review ?? [])
+			: [],
+	);
+}
+
 function failOrRepair(
 	state: Selected,
 	cause: RepairCause,
@@ -2503,8 +2517,22 @@ export function handoffCandidate(
 					...updated,
 					current: { ...updated.current, review: event.result.review },
 				};
+
+				const held = unverifiableOnly(
+					event.result.review,
+					earlierReviews(state),
+				);
+
+				if (held.some((j) => j.route === "split")) {
+					next =
+						state.published === null
+							? hold(updated, "review_unverifiable", now)
+							: stopRound(updated, "review_unverifiable", now);
+					break;
+				}
+
 				const fingerprints = findingFingerprints(event.result.review);
-				const ownerOnly = unverifiableOnly(event.result.review).length > 0;
+				const ownerOnly = held.length > 0;
 
 				if (
 					state.current.intent.round > 0 &&

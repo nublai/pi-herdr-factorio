@@ -18,6 +18,7 @@ import {
 	candidateAllowance,
 	candidateProjection,
 	candidateUsage,
+	earlierReviews,
 	handoffCandidate,
 	stopRound,
 } from "../candidate/handoff.ts";
@@ -5515,7 +5516,10 @@ export class Orchestrator {
 		const judgments =
 			run.handoff?.kind === "selected" &&
 			run.handoff.current.review !== undefined
-				? ownerJudgments(run.handoff.current.review)
+				? ownerJudgments(
+						run.handoff.current.review,
+						earlierReviews(run.handoff),
+					)
 				: [];
 
 		const next = {
@@ -5606,7 +5610,10 @@ export class Orchestrator {
 		const detail = formatUnverifiableDetail({
 			runId: run.runId,
 			generation,
-			judgments: unverifiableJudgments(run.handoff.current.review),
+			judgments: unverifiableJudgments(
+				run.handoff.current.review,
+				earlierReviews(run.handoff),
+			),
 		});
 
 		if (

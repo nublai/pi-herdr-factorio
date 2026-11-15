@@ -56,6 +56,8 @@ import {
 } from "../../../src/github/adapter.ts";
 import { fileRunFiles } from "../../../host/controller/run-files.ts";
 import { candidateLifecycleFixture, withUmask } from "../../helpers.ts";
+import { parseCandidateState } from "../../../src/candidate/codec.ts";
+import { generationIntent, refOf } from "../../../src/candidate/state.ts";
 import {
 	addRun,
 	addAnsweredRun,
@@ -1301,6 +1303,100 @@ test("a review_unverifiable hold from two judges carries judges_disagree or seco
 
 		const neither = await pair("unverifiable", { outcome: "timeout" });
 		assert.equal(neither.unverifiableCode, "other");
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("a judge split that persists after one repair round reaches the feed as judges_disagree with its scenario and count, never either judge's text (#805 B2)", async () => {
+	const root = await mkdtemp(join(tmpdir(), "owner-feed-"));
+	const prose = "Split judge prose that must stay off the feed";
+
+	try {
+		await emptyState(root);
+
+		const acceptance = await saveJudgeSuite(root, {
+			S3: "The diff keeps the guard in src/a.ts.",
+		});
+
+		const runId = await addWaitingRun(root, "Hold for the owner", acceptance);
+		await holdUnverifiable(root, runId, [{ scenario: "S3", reason: prose }]);
+
+		const path = join(root, "claims", `${runId}.json`);
+		const claim = JSON.parse(await readFile(path, "utf8"));
+		const book = parseCandidateState(claim.handoff);
+		assert.ok(book?.kind === "selected");
+
+		const review = claim.handoff.current.review;
+
+		const base = review.seats.filter(
+			(seat: { seat: string }) => seat.seat !== "second-judge",
+		);
+
+		const split = {
+			...review,
+			seats: [
+				...base.map((seat: { seat: string }) =>
+					seat.seat === "code-review"
+						? {
+								...seat,
+								judgments: [{ scenario: "S3", outcome: "fail", reason: prose }],
+							}
+						: seat,
+				),
+				{
+					...base[0],
+					seat: "second-judge",
+					judgments: [{ scenario: "S3", outcome: "pass", reason: prose }],
+				},
+			],
+		};
+
+		const earlier = book.current.intent;
+
+		const repaired = generationIntent({
+			pin: book.pin,
+			patch: earlier,
+			round: 1,
+			generation: earlier.generation,
+			baseSha: earlier.baseSha,
+			origin: { kind: "repair", feedbackFrom: refOf(earlier) },
+			publication: earlier.publication,
+		});
+
+		const handoff = {
+			...claim.handoff,
+			history: [
+				...claim.handoff.history,
+				{ ...claim.handoff.current, review: split },
+			],
+			current: {
+				...claim.handoff.current,
+				intent: repaired,
+				review: split,
+				certification: null,
+			},
+		};
+
+		assert.ok(parseCandidateState(handoff)?.kind === "selected");
+		await save(root, ["claims", `${runId}.json`], { ...claim, handoff });
+
+		const feed = await readOwnerFeed({ stateDir: root, repo, now });
+		const found = feed.entries.find((e) => e.runId === runId);
+
+		assert.ok(found);
+		assert.equal(found.reason, "review_unverifiable");
+		assert.equal(found.unverifiableCode, "judges_disagree");
+		assert.equal(found.unverifiableCount, 1);
+		assert.deepEqual(found.unverifiable, [{ scenario: "S3" }]);
+		assert.ok(
+			!JSON.stringify(feed).includes(prose),
+			"judge prose reached the feed",
+		);
+
+		const wire = parseJson(JSON.stringify(feed));
+		assert.ok(wire !== undefined);
+		assert.deepEqual(v1Problems(wire), []);
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
