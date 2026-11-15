@@ -1,12 +1,12 @@
 # scripts
 
-This folder holds repository tools that a person or `npm run check` runs from the repository root. None of them run inside the factory. The trusted gate copies this folder from the candidate, like `src/`.
+This folder holds repository tools that a person or `npm run check` runs from the repository root. The trusted gate copies this folder from the candidate, like `src/`, but runs the main-owned copies of `check-layout.mjs` and `check-decisions.mjs` from `/g/tooling/scripts/` against the merged candidate tree at `/w`.
 
 | Script | Run by | What it does |
 | --- | --- | --- |
-| `check-layout.mjs` | `npm run check:layout`, `npm run check` | Runs the layout guard against HEAD and the working tree. See below. |
+| `check-layout.mjs` | `npm run check:layout`, `npm run check`, trusted gates | Runs the layout guard against HEAD and the working tree. See below. |
 | `layout-baseline.json` | `check-layout.mjs` | What the layout guard expects: file owners and review seats, allowed reverse imports, path readers, allowed path literals, shell path tokens and the trusted gate's test selection. |
-| `check-decisions.mjs` | `npm run check:decisions`, `npm run check` | Checks `docs/decisions.tsv` against `decisions-checkpoint.json`. |
+| `check-decisions.mjs` | `npm run check:decisions`, `npm run check`, trusted gates | Checks `docs/decisions.tsv` against `decisions-checkpoint.json`. |
 | `decisions-checkpoint.json` | `check-decisions.mjs` | The row count, byte length and SHA-256 of the committed decisions prefix. |
 | `design-tokens.mjs` | A person, after a Shep update | Generates `host/viewer/design/tokens.css` from `tokens.json`. Run `node scripts/design-tokens.mjs sync --shep <dir>` from a pinned Shep revision. Never edit `tokens.css` by hand. |
 | `provenance.sh` | A person | Regenerates `research/PROVENANCE.md` from the local-only `research/upstream/` captures. |

@@ -278,6 +278,8 @@ function repository(
 				{ name: "typecheck", argv: ["node", "-e", "0"] },
 				{ name: "lint", argv: ["node", "-e", "0"] },
 				{ name: "format", argv: ["node", "-e", "0"] },
+				{ name: "layout", argv: ["node", "-e", "0"] },
+				{ name: "decisions", argv: ["node", "-e", "0"] },
 			],
 			testGlobs: ["test/src/**/*.test.ts"],
 		}),

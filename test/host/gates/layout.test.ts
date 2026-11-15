@@ -255,6 +255,56 @@ describe("layout guard", () => {
 		assert.deepEqual(run(guard, pristine).problems, []);
 	});
 
+	for (const name of ["layout", "decisions"]) {
+		it(`trusted ${name} checks the exported candidate despite its no-op script`, () => {
+			const manifest = objectOf(
+				parseJson(read(pristine, ".github/factory/gates/gates.json")),
+			);
+
+			const checks = required(arrayOf(fieldOf(manifest, "checks")), "checks");
+
+			const check = checks.find(
+				(value) => fieldOf(objectOf(value), "name") === name,
+			);
+
+			const argv = required(textsOf(fieldOf(objectOf(check), "argv")), name);
+			const root = scratch();
+
+			const tooling = existsSync("/g/tooling/scripts/check-layout.mjs")
+				? "/g/tooling"
+				: repo;
+
+			const args = argv
+				.slice(1)
+				.map((arg) =>
+					arg.replace("/g/tooling/", `${tooling}/`).replace(/^\/w$/, root),
+				);
+
+			const execute = () =>
+				spawnSync(process.execPath, args, {
+					cwd: root,
+					encoding: "utf8",
+					env: { ...process.env, NODE_COMPILE_CACHE: compileCache },
+				});
+
+			assert.equal(execute().status, 0);
+			write(root, `scripts/check-${name}.mjs`, "process.exit(0);\n");
+
+			if (name === "layout")
+				write(root, "src/unclassified-gate-control.ts", "export {};\n");
+			else appendFileSync(join(root, "docs/decisions.tsv"), "malformed\trow\n");
+
+			const failed = execute();
+			assert.equal(failed.status, 1, failed.stderr);
+			assert.match(
+				failed.stderr,
+				name === "layout"
+					? /src\/unclassified-gate-control\.ts is unclassified/
+					: /docs\/decisions\.tsv:\d+ has 2 cells, expected 6/,
+			);
+		});
+	}
+
 	describe("imports", () => {
 		it("fails the trusted scanner when the JSON module it imports is removed", () => {
 			const root = scratch();

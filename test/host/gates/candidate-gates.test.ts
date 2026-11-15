@@ -78,6 +78,8 @@ function repo(t: { after(fn: () => void): void }) {
 				{ name: "typecheck", argv: ["node", "-e", "0"] },
 				{ name: "lint", argv: ["node", "-e", "0"] },
 				{ name: "format", argv: ["node", "-e", "0"] },
+				{ name: "layout", argv: ["node", "-e", "0"] },
+				{ name: "decisions", argv: ["node", "-e", "0"] },
 			],
 			testGlobs: ["test/src/**/*.test.ts"],
 		}),
@@ -717,6 +719,26 @@ test("trusted lint and format check the roots npm run check does, without checki
 	const formatRoots = roots(pkg.scripts["format:check"], "biome format");
 	assert.deepEqual(formatRoots, lintRoots);
 	assert.deepEqual(argv("format").slice(-formatRoots.length), formatRoots);
+	assert.deepEqual(
+		manifest.checks.map((check: { name: string }) => check.name),
+		["typecheck", "lint", "format", "layout", "decisions"],
+	);
+
+	for (const name of ["layout", "decisions"]) {
+		const script = `scripts/check-${name}.mjs`;
+		assert.match(
+			pkg.scripts.check,
+			new RegExp(`npm run check:${name}(?: &&|$)`),
+		);
+		assert.ok(pkg.scripts[`check:${name}`].endsWith(script));
+		assert.deepEqual(argv(name), [
+			"node",
+			"--experimental-strip-types",
+			`/g/tooling/${script}`,
+			"--root",
+			"/w",
+		]);
+	}
 });
 
 test("removes nested ignore files and candidate-deleted source", async (t) => {
@@ -1366,6 +1388,62 @@ for (const [cases, reason] of [
 	});
 }
 
+for (const name of ["layout", "decisions"]) {
+	for (const mutation of ["missing", "duplicate"]) {
+		test(`trusted manifest refuses ${mutation} ${name}`, async (t) => {
+			const f = repo(t);
+			const path = ".github/factory/gates/gates.json";
+			const manifest = JSON.parse(readFileSync(join(f.root, path), "utf8"));
+			manifest.checks =
+				mutation === "missing"
+					? manifest.checks.filter(
+							(check: { name: string }) => check.name !== name,
+						)
+					: [
+							...manifest.checks,
+							manifest.checks.find(
+								(check: { name: string }) => check.name === name,
+							),
+						];
+			f.put(path, JSON.stringify(manifest));
+			const gateSha = f.commit();
+
+			const receipt = await checkCandidate({
+				...gateInput(f, gateSha),
+				gateSha,
+			});
+
+			assert.equal(receipt.status, "incomplete");
+			assert.equal(receipt.reason, "missing_checks");
+		});
+	}
+
+	test(`receipt cannot omit or fail ${name}`, async (t) => {
+		const f = repo(t);
+		const receipt = await checkCandidate(gateInput(f, f.gateSha));
+		assert.equal(receipt.status, "passed");
+		assert.equal(
+			receiptPasses({
+				...receipt,
+				requiredChecks: receipt.requiredChecks.filter(
+					(check) => check !== name,
+				),
+				checks: receipt.checks.filter((check) => check.name !== name),
+			}),
+			false,
+		);
+		assert.equal(
+			receiptPasses({
+				...receipt,
+				checks: receipt.checks.map((check) =>
+					check.name === name ? { ...check, exitCode: 1 } : check,
+				),
+			}),
+			false,
+		);
+	});
+}
+
 test("Docker and runner infrastructure exits never blame a candidate", async (t) => {
 	const f = repo(t);
 
@@ -1632,6 +1710,8 @@ test("trusted test concurrency is step-specific and preserves baseline/main coun
 		"typecheck",
 		"lint",
 		"format",
+		"layout",
+		"decisions",
 		"main_tests",
 		"candidate_tests",
 		"heldout",
@@ -1647,6 +1727,8 @@ test("trusted test concurrency is step-specific and preserves baseline/main coun
 		),
 		[
 			"--test-concurrency=3",
+			null,
+			null,
 			null,
 			null,
 			null,
@@ -1678,6 +1760,8 @@ for (const step of ["main_tests", "candidate_tests", "heldout"]) {
 			"typecheck",
 			"lint",
 			"format",
+			"layout",
+			"decisions",
 			"main_tests",
 			"candidate_tests",
 			"heldout",

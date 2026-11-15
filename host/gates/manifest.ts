@@ -10,7 +10,13 @@ import {
 	type JsonObject,
 } from "../../src/core/json.ts";
 
-export const CHECK_NAMES = ["typecheck", "lint", "format"];
+export const CHECK_NAMES = [
+	"typecheck",
+	"lint",
+	"format",
+	"layout",
+	"decisions",
+];
 
 export type Dependency = {
 	readonly path: string;
