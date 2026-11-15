@@ -3266,6 +3266,18 @@ export class Orchestrator {
 
 		this.state.runs.set(issue, run);
 		this.#observeClaim(run, this.#confirmedBy(run));
+
+		if (local.kind === "found") {
+			this.#observeClaim(run, await this.#stillReady(run));
+
+			if (!this.#claimView(run).launch) {
+				// An ending run stays tracked, without a slot, so later ticks retry its unfinished release post.
+				if (run.phase.kind !== "ending") this.state.runs.delete(issue);
+
+				return null;
+			}
+		}
+
 		this.state.totals.claims++;
 		this.#see(issue, record.updatedAt, { kind: "claimed" });
 		this.#input.log("claim_taken", {
