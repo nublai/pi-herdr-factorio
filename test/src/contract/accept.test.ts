@@ -121,6 +121,30 @@ const MUST_ACCEPT_JUDGES = [
 	"Running tests record their captured identity.",
 	"Confirm the test succeeds in preserving the original error message.",
 	"Verify the test suite passes an abort signal to each test.",
+	"Run failures keep their original stage and reason in the persisted record.",
+	"Confirm the gate scripts install dependencies and run the tests offline.",
+	"Confirm the docs say operators may rerun the stage and run the tests locally.",
+	"Confirm the new check passes on an empty scenario list.",
+	"Confirm the README tells contributors to install dependencies and run the tests with npm test.",
+	"Verify the CONTRIBUTING guide says to fork the repo, then run npm run check before opening a PR.",
+	"Check that the docs explain how to configure the token and run the CLI against a fixture issue.",
+	"Run commands listed in the docs match the package.json scripts.",
+	"Confirm the guide says contributors should rebase and then run the tests.",
+];
+
+const ACCEPTED_BY_DESIGN_PRECISION = [
+	"All existing tests continue to pass.",
+	"Existing tests pass.",
+	"Typecheck, lint and format pass.",
+	"Tests, typecheck, lint and format all pass.",
+	"The candidate passes all trusted gates.",
+	"Confirm the new test fails on the base commit.",
+	"Confirm the pipeline is green.",
+	"No existing test regresses.",
+	"Read the diff and run the CLI.",
+	"Read the diff then run npm test.",
+	"Confirm by reproducing the failure.",
+	"Reproduce the original failure.",
 ];
 
 const MUST_REJECT_JUDGES = [
@@ -128,22 +152,14 @@ const MUST_REJECT_JUDGES = [
 	"Independently introduce each regression and verify the dedicated test fails",
 	"Verify the trusted npm run check gate passes, including existing tests and the new controller regression tests; do not invoke the aggregate gate from held-out tests.",
 	"Ensure CI is green.",
-	"All existing tests continue to pass.",
 	"Verify npm run check succeeds.",
 	"Mutation-test each case.",
-	"Existing tests pass.",
 	"Verify that all tests pass.",
 	"Require npm test to pass.",
-	"Typecheck, lint and format pass.",
-	"Tests, typecheck, lint and format all pass.",
-	"The candidate passes all trusted gates.",
-	"Confirm the new test fails on the base commit.",
 	"Temporarily revert the fix and confirm the test fails.",
 	"Break the retry condition and verify the test catches it.",
 	"Invoke the CLI with --help and inspect the output.",
 	"Verify CI passes.",
-	"Confirm the pipeline is green.",
-	"No existing test regresses.",
 	"Verify that npm run check exits successfully, including typecheck, lint, format checking and the existing tests.",
 	"Require the separately executed trusted baseline, main and candidate gates to pass, including typecheck, lint, formatting, and existing status and accounting tests.",
 	"Require the trusted typecheck, lint, format and main-test gates to pass, including all existing main tests; do not rerun npm run check inside held-out tests.",
@@ -154,8 +170,6 @@ const MUST_REJECT_JUDGES = [
 	"Introduce a regression in the retry guard and confirm the dedicated test fails.",
 	"Mutation test each case.",
 	"Verify the gates are green.",
-	"Read the diff and run the CLI.",
-	"Read the diff then run npm test.",
 	"Read the diff. Run the tests.",
 	"Read the diff; invoke the command.",
 	"Confirm by executing the CLI.",
@@ -170,7 +184,6 @@ const MUST_REJECT_JUDGES = [
 	"Execute code to confirm the behavior.",
 	"Run the CLI and inspect its output.",
 	"Verify by invoking the command.",
-	"Confirm by reproducing the failure.",
 	"Check by mutating the retry condition.",
 	"Verify by injecting a regression.",
 	"Check by introducing a regression.",
@@ -180,6 +193,17 @@ const MUST_REJECT_JUDGES = [
 	"Require npm run test to pass.",
 	"Confirm `NPM RUN CHECK:LAYOUT` succeeds.",
 	"Require npm run check:decisions to pass.",
+	"The full test suite must still pass.",
+	"Existing tests must continue passing.",
+	"Verify no existing tests fail.",
+	"Confirm all existing tests pass on the candidate.",
+	"All gates should be green on the candidate.",
+	"Require that CI succeeds on the candidate head.",
+	"Inject a fault into the ledger write and confirm the test catches it.",
+	"Execute npm run check:layout and require exit code 0.",
+	"Run npx tsx src/cli.ts --version and compare the output.",
+	"Invoke the factory CLI with an unknown flag and check the error.",
+	"Mutate the deferral check and confirm a test fails.",
 ];
 
 describe("held-out acceptance output", () => {
@@ -215,11 +239,30 @@ describe("held-out acceptance output", () => {
 
 			assert.equal(parsed.kind, "malformed");
 
-			if (parsed.kind === "malformed")
+			if (parsed.kind === "malformed") {
 				assert.ok(
 					parsed.reason === "judge_restates_gate" ||
 						parsed.reason === "judge_requires_execution",
 				);
+				assert.equal("scenario" in parsed && parsed.scenario, "S3");
+			}
+		});
+
+	for (const judge of ACCEPTED_BY_DESIGN_PRECISION)
+		it(`accepts by design (precision): ${judge}`, { timeout: 1000 }, () => {
+			assert.equal(
+				writeAcceptance(
+					JSON.stringify({
+						...suite,
+						scenarios: [
+							...suite.scenarios,
+							{ id: "S3", criteria: ["A2"], checks: [], judge },
+						],
+					}),
+					contract,
+				).kind,
+				"suite",
+			);
 		});
 
 	it("reads and reuses a pre-validator stored suite without re-judging its text", {
@@ -433,7 +476,7 @@ describe("held-out acceptance output", () => {
 					}),
 					contract,
 				),
-				{ kind: "malformed", reason: "judge_restates_gate" },
+				{ kind: "malformed", reason: "judge_restates_gate", scenario: "S3" },
 			);
 		});
 
@@ -442,7 +485,6 @@ describe("held-out acceptance output", () => {
 		"Run the controller regression test.",
 		"Execute the CLI and inspect its output.",
 		"Mutate the retry condition and verify the dedicated test fails.",
-		"Reproduce the original failure.",
 		"Verify by running the tests.",
 		"Read the diff; then independently execute the CLI.",
 	])
@@ -460,7 +502,11 @@ describe("held-out acceptance output", () => {
 					}),
 					contract,
 				),
-				{ kind: "malformed", reason: "judge_requires_execution" },
+				{
+					kind: "malformed",
+					reason: "judge_requires_execution",
+					scenario: "S3",
+				},
 			);
 		});
 

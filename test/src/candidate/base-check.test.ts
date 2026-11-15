@@ -32,12 +32,16 @@ import {
 	baseRefusalNotice,
 	baseRetryFeedback,
 	draftCheckFeedback,
+	draftNeedsRevision,
 	parseBaseReceipt,
 	retryableBaseReason,
 	type BaseReason,
 } from "../../../src/candidate/diagnosis.ts";
 import { isGitSha } from "../../../src/config/schema.ts";
-import { writeAcceptance } from "../../../src/contract/acceptance.ts";
+import {
+	JUDGE_REFUSAL_SENTENCES,
+	writeAcceptance,
+} from "../../../src/contract/acceptance.ts";
 import {
 	contractBytes,
 	contractDigestOf,
@@ -1033,6 +1037,78 @@ test("controller draft checks are private, reuse a fresh tarball and never use t
 		).trim(),
 		storedCanary,
 	);
+});
+
+test("a refused judge-only draft returns revision feedback naming its scenario without a base run", {
+	timeout: 30000,
+}, async (t) => {
+	const w = await controllerWorld(t);
+	const stageDir = join(w.state, "stages", w.contract.runId, "accept-1");
+
+	const check = controllerDraftChecker({
+		stateDir: w.state,
+		stageDir,
+		attempt: 1,
+		input: {
+			contract: w.contract,
+			digest: w.binding.contractDigest,
+			repo: w.binding.repo,
+			issue: w.binding.issue,
+			baseSha: w.sha,
+		},
+		fetch: w.fetch,
+		runner: {
+			kind: "draft-refused",
+			async run() {
+				throw new Error("a refused draft must not reach the base run");
+			},
+		},
+	});
+
+	for (const [run, judge, reason] of [
+		[
+			1,
+			"Require the trusted npm run check gate to pass.",
+			"judge_restates_gate",
+		],
+		[2, "Run the new test against the base.", "judge_requires_execution"],
+	] as const) {
+		const text = JSON.stringify({
+			version: 2,
+			scenarios: [
+				{ id: "S1", criteria: ["A1"], checks: ["one.test.mjs"], judge: null },
+				{ id: "S4", criteria: ["A2"], checks: [], judge },
+			],
+			files: [
+				{
+					path: "one.test.mjs",
+					type: "node:test",
+					content: `${prefix}test('red',()=>assert.equal(1,2));`,
+				},
+			],
+		});
+
+		const feedback = await check(text, {
+			signal: w.signal,
+			deadline: Date.now() + 60000,
+			run,
+		});
+
+		assert.deepEqual(feedback, {
+			run,
+			verdict: "judge_refused",
+			reason,
+			scenario: "S4",
+			sentence: JUDGE_REFUSAL_SENTENCES[reason],
+		});
+		assert.ok(feedback !== null && draftNeedsRevision(feedback));
+		assert.equal(
+			statSync(join(stageDir, `draft-${run}.json`)).mode & 0o777,
+			0o600,
+		);
+	}
+
+	assert.equal(w.counter.fetches, 0);
 });
 
 where(

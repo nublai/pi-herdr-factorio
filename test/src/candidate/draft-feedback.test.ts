@@ -23,6 +23,10 @@ import {
 	type TestFailure,
 } from "../../../src/candidate/diagnosis.ts";
 import { isGitSha } from "../../../src/config/schema.ts";
+import {
+	draftFeedbackPrompt,
+	JUDGE_REFUSAL_SENTENCES,
+} from "../../../src/contract/acceptance.ts";
 import { contractDigestOf } from "../../../src/contract/contract.ts";
 import { digestOf } from "../../../src/core/run.ts";
 import { isRepoSlug } from "../../../src/trust/platform.ts";
@@ -400,4 +404,33 @@ test("old protocol qualified receipt stays readable and controller never reruns 
 	assert.equal(result.kind, "ready");
 	assert.equal(fetches, 0);
 	assert.equal(readFileSync(join(dir, "result.json"), "utf8"), text);
+});
+
+test("a judge refusal asks for a rewrite of the named scenario and always needs a revision", () => {
+	for (const reason of [
+		"judge_restates_gate",
+		"judge_requires_execution",
+	] as const) {
+		const feedback = {
+			run: 1 as const,
+			verdict: "judge_refused" as const,
+			reason,
+			scenario: "S4",
+			sentence: JUDGE_REFUSAL_SENTENCES[reason],
+		};
+
+		assert.equal(draftNeedsRevision(feedback), true);
+		const prompt = draftFeedbackPrompt(feedback, "n".repeat(32));
+		assert.match(prompt, new RegExp(`scenario S4 was refused as ${reason}\\.`));
+		assert.ok(prompt.includes(JUDGE_REFUSAL_SENTENCES[reason]));
+		assert.match(prompt, /reply with the complete suite/);
+		assert.doesNotMatch(
+			prompt,
+			/ran your own draft against the unchanged base/,
+		);
+		assert.match(
+			prompt,
+			/<draft-feedback-n{32}>\n\{.*"scenario":"S4".*\}\n<\/draft-feedback-n{32}>$/,
+		);
+	}
 });
