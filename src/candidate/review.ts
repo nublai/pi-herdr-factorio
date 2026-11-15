@@ -22,6 +22,7 @@ export {
 } from "../core/run.ts";
 
 import type { Contract } from "../contract/contract.ts";
+import { judgeOnlyRefusal } from "../contract/acceptance.ts";
 import {
 	arrayOf,
 	countOf,
@@ -574,6 +575,35 @@ export function ownerJudgments(review: {
 			scenario: /^S[1-9][0-9]{0,2}$/.test(j.scenario) ? j.scenario : "S?",
 			reason: plainReason(j.reason),
 		}));
+}
+
+export const UNVERIFIABLE_CODES = [
+	"evidence_missing",
+	"needs_execution",
+	"other",
+] as const;
+
+export type UnverifiableCode = (typeof UNVERIFIABLE_CODES)[number];
+
+/**
+ * Why review could not verify, from controller facts only, by precedence:
+ * `evidence_missing` when the review had no trusted-pipeline evidence, then
+ * `needs_execution` when any unverifiable scenario's judge is one the accept
+ * validator refuses as `judge_requires_execution`, otherwise `other`. A
+ * `null` judge is a scenario whose bound judge text is unavailable.
+ */
+export function unverifiableCode(input: {
+	readonly trusted: boolean;
+	readonly judges: readonly (string | null)[];
+}): UnverifiableCode {
+	if (!input.trusted) return "evidence_missing";
+
+	return input.judges.some(
+		(judge) =>
+			judge !== null && judgeOnlyRefusal(judge) === "judge_requires_execution",
+	)
+		? "needs_execution"
+		: "other";
 }
 
 export function reviewSeats(

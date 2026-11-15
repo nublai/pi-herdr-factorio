@@ -33,6 +33,7 @@ import {
 	type CandidateExecution,
 	type CandidateState,
 	MAX_REVIEW_ATTEMPTS,
+	refOf,
 } from "../candidate/state.ts";
 import { sameAssessmentRef } from "../candidate/validation.ts";
 import {
@@ -5550,6 +5551,25 @@ export class Orchestrator {
 
 			if (post.kind === "posted") {
 				this.state.totals.markersPosted++;
+
+				if (
+					marker.status === "blocked" &&
+					holdReason === "review_unverifiable" &&
+					judgments.length > 0 &&
+					run.handoff?.kind === "selected" &&
+					!(await this.#input.files.writeUnverifiableComment({
+						runId: run.runId,
+						repo: this.#input.repo,
+						issue: run.issue,
+						generation: refOf(run.handoff.current.intent),
+						commentId: post.id,
+					}))
+				)
+					this.#input.log("unverifiable_reference_unavailable", {
+						issue: run.issue,
+						runId: run.runId,
+					});
+
 				this.#landed(run, marker);
 			} else {
 				run.inflight = { marker, outcome: post.kind, tick: this.#ticks };

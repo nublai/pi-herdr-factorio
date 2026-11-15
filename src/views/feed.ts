@@ -1,5 +1,5 @@
 import { lstat, readFile, readdir } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import {
 	ATTENTION_KINDS,
 	readAttention,
@@ -22,7 +22,13 @@ import {
 	ownerJudgments,
 	type OwnerJudgment,
 	reviewR8,
+	trustedEvidence,
+	unverifiableCode,
+	unverifiableOnly,
+	type UnverifiableCode,
 } from "../candidate/review.ts";
+import type { CandidateState } from "../candidate/state.ts";
+import { validationDir } from "../candidate/validation.ts";
 import { frozenRowOf, parseRunStart, isKnownCap } from "../ledger/schema.ts";
 import { terminalFailureOf } from "../ledger/terminal.ts";
 import { objectOf, fieldOf, countOf, textOf, parseJson } from "../core/json.ts";
@@ -52,6 +58,9 @@ export type FeedEntry = AttentionRun & {
 	failure: { stage: string; class: string; reason: string } | null;
 	notProven: readonly string[];
 	unverifiable: readonly Pick<OwnerJudgment, "scenario">[];
+	unverifiableCode: UnverifiableCode | null;
+	unverifiableCount: number;
+	unverifiableUrl: string | null;
 	steps: readonly FeedStep[];
 };
 
@@ -108,6 +117,15 @@ export async function localJson(
 	root: string,
 	...parts: string[]
 ): Promise<JsonValue | undefined> {
+	const text = await localText(root, ...parts);
+
+	return text === undefined ? undefined : parseJson(text);
+}
+
+async function localText(
+	root: string,
+	...parts: string[]
+): Promise<string | undefined> {
 	try {
 		let path = root;
 		const base = await lstat(root);
@@ -135,7 +153,7 @@ export async function localJson(
 
 		if (!info.isFile() || info.size > 8 * 1024 * 1024) return undefined;
 
-		return parseJson(await readFile(path, "utf8"));
+		return await readFile(path, "utf8");
 	} catch {
 		return undefined;
 	}
@@ -305,6 +323,106 @@ async function questionsUrl(
 		questions.digest === digest
 		? `${entry.issueUrl}#issuecomment-${commentId}`
 		: null;
+}
+
+type UnverifiableHold = Pick<
+	FeedEntry,
+	"unverifiable" | "unverifiableCode" | "unverifiableCount" | "unverifiableUrl"
+>;
+
+const NO_UNVERIFIABLE_HOLD: UnverifiableHold = {
+	unverifiable: [],
+	unverifiableCode: null,
+	unverifiableCount: 0,
+	unverifiableUrl: null,
+};
+
+async function unverifiableHold(
+	root: string,
+	entry: AttentionRun,
+	book: CandidateState | null,
+): Promise<UnverifiableHold> {
+	const current = book?.kind === "selected" ? book.current : null;
+	const review = current?.review;
+
+	if (
+		current === null ||
+		review === undefined ||
+		entry.reason !== "review_unverifiable"
+	)
+		return NO_UNVERIFIABLE_HOLD;
+
+	const { intent, verdict } = current;
+
+	const dir = relative(
+		root,
+		validationDir(root, entry.runId, intent.round, intent.generation),
+	).split(sep);
+
+	const gateReceipt = (await localText(root, ...dir, "receipt.json")) ?? null;
+	const report = (await localText(root, ...dir, "report.json")) ?? null;
+
+	const trusted =
+		verdict !== null &&
+		trustedEvidence({ binding: review, verdict, gateReceipt, report }) !== null;
+
+	const judgments = unverifiableOnly(review);
+	const contract = await readStoredContract(root, entry.runId);
+
+	const suite =
+		contract.kind === "found"
+			? await fileArtifacts(root).read(
+					entry.runId,
+					contract.contract,
+					contract.digest,
+				)
+			: null;
+
+	const scenarios =
+		suite?.kind === "found" &&
+		suite.receipt.acceptanceDigest === review.acceptanceDigest
+			? suite.suite.scenarios
+			: [];
+
+	const reference = objectOf(
+		await localJson(
+			root,
+			"contracts",
+			entry.runId,
+			"unverifiable-comment.json",
+		),
+	);
+
+	const ref = objectOf(reference?.generation);
+	const repo = textOf(reference?.repo);
+	const commentId = textOf(reference?.commentId);
+
+	return {
+		unverifiable: ownerJudgments(review).map(({ scenario }) => ({
+			scenario,
+		})),
+		unverifiableCode: unverifiableCode({
+			trusted,
+			judges: judgments.map(
+				(j) => scenarios.find((s) => s.id === j.scenario)?.judge ?? null,
+			),
+		}),
+		unverifiableCount: judgments.length,
+		unverifiableUrl:
+			reference?.version === 1 &&
+			reference.runId === entry.runId &&
+			reference.issue === entry.issue &&
+			repo !== null &&
+			isRepoSlug(repo) &&
+			entry.issueUrl === `https://github.com/${repo}/issues/${entry.issue}` &&
+			ref?.round === intent.round &&
+			ref.generation === intent.generation &&
+			ref.digest === intent.digest &&
+			commentId !== null &&
+			/^[1-9][0-9]{0,19}$/.test(commentId)
+				? `${entry.issueUrl}#issuecomment-${commentId}`
+				: null,
+	};
 }
 
 async function detail(
@@ -498,14 +616,7 @@ async function detail(
 		ci: verdict === null ? "Pending" : verdict.pass ? "Passed" : "Failed",
 		failure,
 		notProven: notProvenEntries,
-		unverifiable:
-			book?.kind === "selected" &&
-			entry.reason === "review_unverifiable" &&
-			book.current.review !== undefined
-				? ownerJudgments(book.current.review).map(({ scenario }) => ({
-						scenario,
-					}))
-				: [],
+		...(await unverifiableHold(root, entry, book)),
 		steps: await stepReceipts(root, entry, host),
 	};
 }

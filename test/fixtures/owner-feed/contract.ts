@@ -86,6 +86,9 @@ const ENTRY = {
 	failure: "object|null",
 	notProven: "array",
 	unverifiable: "array",
+	unverifiableCode: "string|null",
+	unverifiableCount: "number",
+	unverifiableUrl: "string|null",
 	steps: "array",
 } satisfies FieldTypes;
 

@@ -38,6 +38,9 @@
 			"failure": null,
 			"notProven": ["The saved checks and review cannot be verified here."],
 			"unverifiable": [],
+			"unverifiableCode": null,
+			"unverifiableCount": 0,
+			"unverifiableUrl": null,
 			"steps": []
 		}
 	],

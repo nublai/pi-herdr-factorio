@@ -23,6 +23,7 @@ import {
 	familyClaimsHold,
 	reviewR8,
 	trustedEvidence,
+	unverifiableCode,
 	unverifiableOnly,
 } from "../../../src/candidate/review.ts";
 import {
@@ -1237,6 +1238,43 @@ function evidenceBlock(prompt: string): JsonValue | undefined {
 
 	return parseJson(block[1] ?? "");
 }
+
+describe("owner reason code for an unverifiable-only review (#793)", () => {
+	const execution = "Run the CLI and confirm it exits 0.";
+	const readOnly = "The diff keeps the guard in src/a.ts.";
+	const restated = "Trusted npm run check passes.";
+
+	it("is evidence_missing whenever trusted evidence was absent, ahead of every judge", () => {
+		for (const judges of [[], [null], [readOnly], [execution, readOnly]])
+			assert.equal(
+				unverifiableCode({ trusted: false, judges }),
+				"evidence_missing",
+			);
+	});
+
+	it("is needs_execution when any judge is one the accept validator refuses as judge_requires_execution", () => {
+		for (const judges of [
+			[execution],
+			[readOnly, execution],
+			[null, "Verify by re-running the suite."],
+			["Inject a regression and confirm the test fails."],
+		])
+			assert.equal(
+				unverifiableCode({ trusted: true, judges }),
+				"needs_execution",
+				JSON.stringify(judges),
+			);
+	});
+
+	it("is other for read-only, restated-gate or unavailable judges", () => {
+		for (const judges of [[], [null], [readOnly], [restated], [readOnly, null]])
+			assert.equal(
+				unverifiableCode({ trusted: true, judges }),
+				"other",
+				JSON.stringify(judges),
+			);
+	});
+});
 
 describe("trusted pipeline evidence for review (#735)", () => {
 	const verdict = passingVerdict(patch("one"));

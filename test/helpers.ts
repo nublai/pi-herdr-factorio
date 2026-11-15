@@ -153,7 +153,9 @@ export const admissionPin: AdmissionPin = {
 };
 
 export function candidateLifecycleFixture(
-	change: Partial<Pick<AdmissionPin, "repo" | "workflowDigest">> = {},
+	change: Partial<
+		Pick<AdmissionPin, "repo" | "workflowDigest" | "acceptanceDigest">
+	> = {},
 ) {
 	const pinned = change.repo ?? repo;
 
@@ -274,6 +276,7 @@ export function candidateLifecycleFixture(
 
 		const verdict = {
 			...passingVerdict(patch.patchDigest),
+			acceptanceDigest: pin.acceptanceDigest,
 			candidateSha: head,
 			baseSha: g.baseSha,
 			gateSha: g.baseSha,

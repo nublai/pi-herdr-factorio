@@ -302,7 +302,7 @@ function maskQuoted(judge: string): string {
 	);
 }
 
-function judgeOnlyRefusal(judge: string): JudgeOnlyRefusal | null {
+export function judgeOnlyRefusal(judge: string): JudgeOnlyRefusal | null {
 	const clauses = maskQuoted(judge)
 		.replaceAll("`", "")
 		.split(/;|[.!?]+(?:\s+|$)/)

@@ -814,10 +814,34 @@ describe("controller-only validate", () => {
 				);
 				assert.ok(book.accounts.every((a) => a.execution.stage !== "build"));
 
-				const marker = (f.github.issues.get(14)?.comments ?? []).at(-1)?.body;
+				const posted = (f.github.issues.get(14)?.comments ?? []).at(-1);
+				const marker = posted?.body;
 				assert.match(marker ?? "", /"status":"blocked"/);
 				assert.match(marker ?? "", /\(review_unverifiable\)/);
 				assert.match(marker ?? "", /\n- S2: no live evidence\n/);
+
+				const reference = readFileSync(
+					join(
+						f.files.artifactRoot,
+						"contracts",
+						runOf(14),
+						"unverifiable-comment.json",
+					),
+					"utf8",
+				);
+
+				assert.deepEqual(JSON.parse(reference), {
+					version: 1,
+					runId: runOf(14),
+					repo,
+					issue: 14,
+					generation: {
+						round: book.current.intent.round,
+						generation: book.current.intent.generation,
+						digest: book.current.intent.digest,
+					},
+					commentId: String(posted?.id),
+				});
 
 				const launches = f.executor.launches.length;
 				await f.start().tick();

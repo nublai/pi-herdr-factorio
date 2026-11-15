@@ -147,6 +147,9 @@ An entry of type `FeedEntry` in `src/views/feed.ts` has these fields.
 | `failure` | object or null | `{stage, class, reason}` from the ledger. |
 | `notProven` | array of string | Fixed sentences about what checks and review did not prove. |
 | `unverifiable` | array | `{scenario}` for each judgment review could not verify, when the run is held with reason `review_unverifiable`. Otherwise empty. See [Unverifiable judgments](#unverifiable-judgments). |
+| `unverifiableCode` | string or null | Why review could not verify: `evidence_missing`, `needs_execution` or `other`, when the run is held with reason `review_unverifiable`. Otherwise null. |
+| `unverifiableCount` | number | How many judgments review could not verify, when the run is held with reason `review_unverifiable`. Otherwise 0. |
+| `unverifiableUrl` | string or null | The blocked marker comment that gives the reviewer's reasons, when the run is held with reason `review_unverifiable` and the controller recorded the comment. Otherwise null. |
 | `steps` | array | One `FeedStep` per model stage that left a receipt. |
 
 A `FeedStep` has these members.
@@ -178,9 +181,28 @@ Shep's bridge must retain `questionsUrl` and use it as the tap target for an ent
 
 ### Unverifiable judgments
 
-When review blocks only on `unverifiable` judgments, the run starts no repair and waits for the owner with reason `review_unverifiable`, kind `blocked` and group `needs_you` ([Factory CLI](factory-cli.md#unverifiable-review-routing)). `unverifiable` lists those judgments, at most 10. Each item carries only `scenario`, a scenario ID of the form `S<n>`. The reviewer's reasons are model-written, so they stay out of the feed. They appear only in the run's blocked marker comment on the issue, made inert for GitHub, cut to 160 characters and kept within the 4 KiB marker cap. Every other entry has `unverifiable: []`.
+When review blocks only on `unverifiable` judgments, the run starts no repair and waits for the owner with reason `review_unverifiable`, kind `blocked` and group `needs_you` ([Factory CLI](factory-cli.md#unverifiable-review-routing)). The feed carries no model-written text for this hold. The reviewer's reasons appear only in the run's blocked marker comment on the issue, made inert for GitHub, cut to 160 characters and kept within the 4 KiB marker cap. The entry carries four controller fields instead.
 
-This is an added v1 field and an added `reason` value. A v1 reader that ignores it keeps working and shows the new reason as plain text. Shep's bridge needs no change. To show the list, it can read the scenario IDs from `unverifiable` and link to `issueUrl` for the reasons.
+- `unverifiable` lists those judgments, at most 10. Each item carries only `scenario`, a scenario ID of the form `S<n>`.
+- `unverifiableCount` is the number of unverifiable judgments in the held review, which can exceed the 10 listed.
+- `unverifiableCode` is one reason code for the whole hold.
+- `unverifiableUrl` links to the blocked marker comment with the reasons.
+
+Every other entry has `unverifiable: []`, `unverifiableCode: null`, `unverifiableCount: 0` and `unverifiableUrl: null`.
+
+**Reason code.** The controller emits exactly these three values. It derives them while reading the feed from stored records and never parses model text. When more than one applies, the first in this order wins.
+
+| Code | When |
+| --- | --- |
+| `evidence_missing` | Review ran without trusted-pipeline evidence. The feed recomputes `trustedEvidence` (`src/candidate/review.ts`) from the held generation's stored verdict, gate receipt and CI report, the same records review preparation used, and gets null because a record is missing or does not match. |
+| `needs_execution` | Trusted evidence was present, and at least one unverifiable scenario's judge text, read from the stored acceptance suite bound by the review's acceptance digest, is one the accept validator refuses as `judge_requires_execution` (`judgeOnlyRefusal` in `src/contract/acceptance.ts`). Such suites predate that validator. |
+| `other` | Anything else, including a judge that only restates a trusted gate and a suite that cannot be read. |
+
+A later v1 may add a code. Show an unknown code as plain text, the same as an unknown `reason`.
+
+**Comment link.** The controller records the blocked marker comment's ID from the authenticated POST response, as it does for the questions comment. The private `contracts/<runId>/unverifiable-comment.json` receipt holds only the run, repository, issue, held generation (round, number and digest) and comment ID. The controller replaces it each time it posts such a marker. The feed checks the receipt's private path and that each binding matches the entry and the held generation, then constructs `https://github.com/<repo>/issues/<issue>#issuecomment-<id>`. It never uses a URL from issue text, comment text or a model reply, and it never guesses one. A lost or unknown POST response, a failed receipt write or a receipt for another generation gives `unverifiableUrl: null`. Fall back to `issueUrl`.
+
+These are added v1 fields and an added `reason` value. A v1 reader that ignores them keeps working and shows the new reason as plain text. Shep's bridge needs no change. To show the hold, it can render the code, the count and the scenario IDs as plain text, and open `unverifiableUrl`, or `issueUrl` when it is null, for the reasons.
 
 ### Attention kinds and groups
 
@@ -198,7 +220,7 @@ Within v1, a change may:
 
 - Add a field to any object.
 - Add a key to `counts`, a new attention kind with it.
-- Add a value to a field with an open vocabulary: `status`, `stage`, `reason`, `failure.*`, `steps[].outcome`, `gaps[]`, `controller.state`, `controller.localSwitch`, `durableUsage.kind`, `ci`, `group` and `kind`.
+- Add a value to a field with an open vocabulary: `status`, `stage`, `reason`, `unverifiableCode`, `failure.*`, `steps[].outcome`, `gaps[]`, `controller.state`, `controller.localSwitch`, `durableUsage.kind`, `ci`, `group` and `kind`.
 
 `version` becomes 2 when a change would break a reader written for v1. That means a change that:
 
@@ -238,7 +260,7 @@ Use these keys:
 
 - **Collapse key.** `repo` plus `issue`. One key per issue means a run that moves from `question_asked` to `question_answered`, or fails and restarts, replaces its earlier notification.
 - **Change test.** Compare the decision fingerprint, the three fields `kind`, `runId` and `reason`, between two reads of the same key. `reason` carries the hold reason in `readAttention` in `src/views/attention.ts`. Two holds on one run, such as `disabled` and then `run_tokens`, keep the same `kind`, `group` and `runId` and differ only in `reason`. `test/src/views/feed.test.ts` has a case that changes only the `claim_unverified` reason of one run between two reads.
-- **Tap target.** For `question_asked` with `status: "needs_info"`, use `questionsUrl` when present and fall back to `issueUrl`. For other entries, use `prUrl` when present and otherwise `issueUrl`. The attention CLI's text report still opens the issue for questions.
+- **Tap target.** For `question_asked` with `status: "needs_info"`, use `questionsUrl` when present and fall back to `issueUrl`. For a `review_unverifiable` hold, `unverifiableUrl` opens the reasons; a bridge may use it when present. For other entries, use `prUrl` when present and otherwise `issueUrl`. The attention CLI's text report still opens the issue for questions.
 
 An issue in `unreadable` has no entry. Its key is still `repo` plus `issue`.
 
@@ -250,7 +272,7 @@ Existing v1 clients need no change for #731. The bridge may remove its duplicate
 
 ## Actions
 
-The app is read-only. Every action opens GitHub through `issueUrl`, `prUrl` or `questionsUrl`. Shep R24 says the app never calls the factory, and this contract keeps that rule.
+The app is read-only. Every action opens GitHub through `issueUrl`, `prUrl`, `questionsUrl` or `unverifiableUrl`. Shep R24 says the app never calls the factory, and this contract keeps that rule.
 
 The factory has one non-GitHub owner action, the local hold.
 
@@ -270,6 +292,8 @@ The CLI has no hold command. A phone action that changes the hold, or does anyth
 | `entries[].reason` | The controller. | A closed vocabulary. The `HandoffReason` values that `wireReason` checks (`src/candidate/codec.ts:653`), `candidate_book_unavailable`, `feedback_overflow`, `working_generation`, `claim_unverified:<why>[:<failure>]` and `feedback_unavailable:<reason>[:<failure>]`. Each part of the last two comes from a fixed list in `unverifiedHolds` and `feedbackHolds` in `src/views/attention.ts`. |
 | `entries[].failure` | The ledger row or terminal record. | `stage` and `class` are fixed lists. `reason` must match `^[a-z][a-z0-9_]{0,63}$` (`src/ledger/schema.ts:456`, `src/ledger/schema.ts:636`). |
 | `entries[].unverifiable[]` | The stored review receipt of the held generation. | Only `scenario`, which matches `S<n>`, otherwise `S?`. The review model's reason never appears. At most 10 entries. |
+| `entries[].unverifiableCode` | The controller. | `evidence_missing`, `needs_execution` or `other`, from `UNVERIFIABLE_CODES` in `src/candidate/review.ts`. |
+| `entries[].unverifiableUrl` | The controller's private comment receipt. | Built as `<issueUrl>#issuecomment-<id>`, where the ID has 1 to 20 digits and the receipt matches the entry. |
 | `entries[].notProven` | Fixed sentences from `renderLimitation` (`src/candidate/handoff.ts:2722`), and one fallback sentence in `src/views/feed.ts`. | Criterion and scenario IDs appear only when they match `A<n>` or `S<n>`. A judgment outcome appears only as a value of `JUDGMENT_OUTCOMES` (`src/candidate/review.ts:255`). Criterion text, scenario text and review reasons never appear. |
 | `gaps[]` | The controller. | Fixed codes (`unrecognized_claim`, `state_unavailable`), or a code with an issue number or a 12-character run prefix (`invalid_claim:<12 characters>`, `ambiguous_issue:<n>`, `candidate_book_unavailable:<12 characters>`, `invalid_link:<12 characters>`, `duplicate_intake_marker:<12 characters>`). |
 | `unreadable[].reason` | The controller. | One constant sentence in `src/views/feed.ts`. |
@@ -288,6 +312,7 @@ The bridge builds pushes from changes between two feed reads. The controller sen
 - Nothing pushes for a run the owner is viewing in the app.
 - There is one collapse key per [stable key](#identify-a-run).
 - The title is at most 64 bytes and the body at most 256 bytes. Both count UTF-8 bytes and are trimmed on a character boundary.
+- Push text is generic. A push for a `review_unverifiable` hold says only that the run needs the owner's decision. It never includes `unverifiableCode`, `unverifiableCount`, scenario IDs or any review text.
 - Pushes go through Shep's one push sender.
 
 **Proposal.** A decision is new when the key had no `needs_you` entry in the previous read, or one of its `needs_you` entries has a decision fingerprint (`kind`, `runId` and `reason`) that was not among the key's `needs_you` fingerprints in the previous read.
@@ -300,7 +325,7 @@ An unavailable read, per [Detect an unavailable feed](#detect-an-unavailable-fee
 
 ## Captures
 
-`test/fixtures/owner-feed/captures/` holds one feed for each attention kind that can occur, and one for a run that is working. Each is the real `owner-feed --json` process reading synthetic fixture state with the clock fixed, so the files hold no real issue text, no state path and no home path.
+`test/fixtures/owner-feed/captures/` holds one feed for each attention kind that can occur, one for a run that is working, and one for a `review_unverifiable` hold. Each is the real `owner-feed --json` process reading synthetic fixture state with the clock fixed, so the files hold no real issue text, no state path and no home path.
 
 | File | What it shows |
 | --- | --- |
@@ -311,6 +336,7 @@ An unavailable read, per [Detect an unavailable feed](#detect-an-unavailable-fee
 | `budget.json` | `budget_exhausted`. |
 | `failed.json` | A failure with `failure.stage`, `class` and `reason`. |
 | `working.json` | A running build with a step, a valid intake ID and a title that holds HTML and Markdown. |
+| `review_unverifiable.json` | A published PR held as `review_unverifiable`, kind `blocked`, with two scenario IDs, `unverifiableCode: "evidence_missing"`, `unverifiableCount: 2` and the marker comment URL from a synthetic controller receipt. The reviewer's reasons in its state never appear. |
 
 There is no `spec_review` capture. `test/fixtures/owner-feed/feed-v1.json` is the older multi-run golden. Each capture holds one run, so a client sees one kind at a time.
 
