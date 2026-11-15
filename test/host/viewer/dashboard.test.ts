@@ -683,74 +683,103 @@ test("READY precedes the first tick; tick start and failed status writes still f
 	});
 });
 
+/**
+ * Runs 30 serve-loop ticks and returns the ticks, notify child calls and
+ * mean time per tick. With `hold`, every child notify after READY stays
+ * pending until the caller releases it.
+ */
+async function timedTicks(
+	stateDir: string,
+	hold: {
+		readonly pending: Promise<void>;
+		readonly release: () => void;
+	} | null,
+) {
+	const stop = new AbortController();
+	let calls = 0;
+	let ticks = 0;
+	let started = 0;
+	let ready = false;
+
+	const loop = serveLoop({
+		platform: EXE_DEV_PLATFORM,
+		stateDir,
+		signal: stop.signal,
+		orchestrator: {
+			pollIntervalMs: 1,
+			tick: async () => {
+				assert.equal(ready, true, "READY must settle before the first tick");
+				ticks++;
+
+				return report;
+			},
+		},
+		notify: async (message) => {
+			if (message === "READY=1") {
+				await new Promise<void>((resolve) => setImmediate(resolve));
+				ready = true;
+				started = performance.now();
+
+				return;
+			}
+
+			calls++;
+
+			if (hold !== null) await hold.pending;
+		},
+		log: (event) => assert.equal(event, "controller_stopping"),
+		sleep: async () => {
+			await new Promise<void>((resolve) => setImmediate(resolve));
+
+			if (ticks === 30) stop.abort();
+		},
+	});
+
+	const timeout = setTimeout(() => {
+		stop.abort();
+		hold?.release();
+	}, 3000);
+
+	try {
+		await loop;
+	} finally {
+		clearTimeout(timeout);
+	}
+
+	return { ticks, calls, perTickMs: (performance.now() - started) / ticks };
+}
+
 test("watchdog child settlement stays off the tick path, with at most one in flight", async (context) => {
 	await state(async (root) => {
+		const baselineState = join(root, "baseline-state");
 		const tickState = join(root, "tick-state");
+		await mkdir(baselineState, { mode: 0o700 });
 		await mkdir(tickState, { mode: 0o700 });
-		const stop = new AbortController();
 		let release: () => void = () => undefined;
-		let calls = 0;
-		let ticks = 0;
-		let started = 0;
-		let ready = false;
 
-		const done = new Promise<void>((resolve) => {
+		const pending = new Promise<void>((resolve) => {
 			release = resolve;
 		});
 
-		const loop = serveLoop({
-			platform: EXE_DEV_PLATFORM,
-			stateDir: tickState,
-			signal: stop.signal,
-			orchestrator: {
-				pollIntervalMs: 1,
-				tick: async () => {
-					assert.equal(ready, true, "READY must settle before the first tick");
-					ticks++;
-
-					return report;
-				},
-			},
-			notify: async (message) => {
-				if (message === "READY=1") {
-					await new Promise<void>((resolve) => setImmediate(resolve));
-					ready = true;
-					started = performance.now();
-
-					return;
-				}
-
-				calls++;
-				await done;
-			},
-			log: (event) => assert.equal(event, "controller_stopping"),
-			sleep: async () => {
-				await new Promise<void>((resolve) => setImmediate(resolve));
-
-				if (ticks === 30) stop.abort();
-			},
-		});
-
-		const timeout = setTimeout(() => {
-			stop.abort();
-			release();
-		}, 3000);
-
 		try {
-			await loop;
-			const perTickMs = (performance.now() - started) / ticks;
-			assert.equal(ticks, 30);
+			const baseline = await timedTicks(baselineState, null);
+			const held = await timedTicks(tickState, { pending, release });
+			assert.equal(baseline.ticks, 30);
+			assert.equal(held.ticks, 30);
 			assert.equal(
-				calls,
+				held.calls,
 				1,
 				"ticks must neither wait nor launch overlapping children",
 			);
-			assert.ok(perTickMs < 10, `${perTickMs} ms per tick exceeds 10 ms`);
+			// The same loop and status I/O without a pending child sets the bar, so a slow disk cannot fail this.
+			assert.ok(
+				held.perTickMs < baseline.perTickMs * 2 + 5,
+				`${held.perTickMs} ms per tick with a pending child exceeds twice the ${baseline.perTickMs} ms baseline plus 5 ms`,
+			);
 			context.diagnostic(
-				`notify scheduling plus local status I/O: ${perTickMs.toFixed(3)} ms/tick; 30 ticks finished with child still pending`,
+				`pending child ${held.perTickMs.toFixed(3)} ms/tick, baseline ${baseline.perTickMs.toFixed(3)} ms/tick; 30 ticks finished with the child still pending`,
 			);
 		} finally {
-			clearTimeout(timeout);
 			release();
 		}
 	});
