@@ -1983,7 +1983,9 @@ function classifyCiFailure(input: ClassifyInput): FailureClass {
 		return infrastructure("runner_error");
 
 	if (
-		NORMAL_CHECKS.some((n) => !required.includes(n)) ||
+		NORMAL_CHECKS.some(
+			(n) => n !== "layout" && n !== "decisions" && !required.includes(n),
+		) ||
 		required.some((n) => checks.filter((c) => c.name === n).length !== 1) ||
 		checks.length !== required.length
 	)

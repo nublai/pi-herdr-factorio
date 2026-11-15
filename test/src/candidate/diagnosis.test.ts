@@ -1766,17 +1766,49 @@ test("classifier: a non-heldout candidate check failure alone is candidate and n
 	});
 });
 
+test("pre-upgrade seven-check failure keeps its candidate diagnosis", {
+	timeout: 30_000,
+}, () => {
+	const requiredChecks = [
+		"baseline_tests",
+		"typecheck",
+		"lint",
+		"format",
+		"main_tests",
+		"candidate_tests",
+		"heldout",
+	];
+
+	const checks = requiredChecks.map((name) => ({
+		name,
+		exitCode: name === "lint" ? 1 : 0,
+	}));
+
+	const input = unitInput({
+		receiptPatch: { requiredChecks, checks, heldoutFailures: [] },
+		replay: null,
+	});
+
+	assert.deepEqual(classifyFailure(input), {
+		kind: "candidate",
+		reason: "candidate_check",
+		scenarios: [],
+	});
+});
+
 for (const check of ["layout", "decisions"]) {
 	test(`${check} alone classifies as a candidate check failure`, {
 		timeout: 30_000,
 	}, () => {
-		const checks = REQUIRED_CI_CHECKS.map((name) => ({
+		const requiredChecks = [...REQUIRED_CI_CHECKS, "layout", "decisions"];
+
+		const checks = requiredChecks.map((name) => ({
 			name,
 			exitCode: name === check ? 1 : 0,
 		}));
 
 		const input = unitInput({
-			receiptPatch: { checks, heldoutFailures: [] },
+			receiptPatch: { requiredChecks, checks, heldoutFailures: [] },
 			replay: null,
 		});
 

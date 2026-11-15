@@ -40,7 +40,6 @@ import {
 	digestOf,
 	REPAIR_BUILD_MAX_TOKENS,
 	REVIEW_MAX_TOKENS,
-	REQUIRED_CI_CHECKS,
 	type Verdict,
 	type Run,
 } from "../../../src/core/run.ts";
@@ -87,7 +86,12 @@ import {
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fieldOf, objectOf, parseJson } from "../../../src/core/json.ts";
+import {
+	fieldOf,
+	objectOf,
+	parseJson,
+	textOf,
+} from "../../../src/core/json.ts";
 import { EXE_DEV_PLATFORM } from "../../../src/trust/platform.ts";
 
 const sha = "a".repeat(40);
@@ -432,6 +436,18 @@ function validated(
 		counters: {},
 	};
 
+	const requiredChecks = [
+		"baseline_tests",
+		"typecheck",
+		"lint",
+		"format",
+		"layout",
+		"decisions",
+		"main_tests",
+		"candidate_tests",
+		"heldout",
+	];
+
 	const verdict: Verdict = {
 		patchDigest: g.patchDigest,
 		acceptanceDigest: pin.acceptanceDigest,
@@ -442,11 +458,11 @@ function validated(
 		originalBase: g.originalBase,
 		baseSha: g.baseSha,
 		pass: passes,
-		checks: REQUIRED_CI_CHECKS.map((name) => ({
+		checks: requiredChecks.map((name) => ({
 			name,
 			passed: passes || name !== "heldout",
 		})),
-		requiredChecks: [...REQUIRED_CI_CHECKS],
+		requiredChecks,
 		unjudged: [],
 	};
 
@@ -7859,6 +7875,57 @@ function replayBooks(
 		}),
 	});
 }
+
+test("69e1494 seven-check stored books survive upgrade across certified phases", {
+	timeout: 30_000,
+}, () => {
+	const cases = parseJson(
+		readFileSync(
+			new URL(
+				"../../fixtures/candidate/stored-books-69e1494.json",
+				import.meta.url,
+			),
+			"utf8",
+		),
+	);
+
+	assert.ok(Array.isArray(cases));
+	assert.equal(cases.length, 29);
+
+	const books: BookCase[] = [];
+
+	for (const [index, entry] of cases.entries()) {
+		assert.ok(Array.isArray(entry));
+		const name = textOf(entry[0]);
+		const wire = entry[1];
+
+		assert.ok(name !== null && wire !== undefined);
+		const parsed = parseCandidateState(wire);
+
+		if (index >= 17) {
+			assert.ok(parsed === null, name);
+			books.push({ name, wire, events: [] });
+			continue;
+		}
+
+		assert.ok(parsed, name);
+		assert.ok(parseCandidateState(wireOf(parsed)), name);
+		const events = bookEvents(parsed);
+
+		for (const event of events) {
+			const step = handoffCandidate(parsed, event);
+
+			assert.ok(parseCandidateState(wireOf(step.state)), name);
+		}
+
+		books.push({ name, wire, events });
+	}
+
+	assert.equal(
+		digestOf(replayBooks(books, [], true)),
+		digestOf(replayBooks(books, [], false)),
+	);
+});
 
 test("stored books keep their bytes and refusals through parse, transition and fresh-process reload", () => {
 	const books = storedBookCases();

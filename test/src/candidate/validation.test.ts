@@ -12,11 +12,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseJson, type JsonValue } from "../../../src/core/json.ts";
-import {
-	verdictPasses,
-	digestOf,
-	REQUIRED_CI_CHECKS,
-} from "../../../src/core/run.ts";
+import { verdictPasses, digestOf } from "../../../src/core/run.ts";
 import {
 	collectVerdict,
 	collectTrustedReport,
@@ -136,6 +132,18 @@ const run: CiRun = {
 	createdAt: "2026-10-31T00:00:00Z",
 };
 
+const GATE_CHECKS = [
+	"baseline_tests",
+	"typecheck",
+	"lint",
+	"format",
+	"layout",
+	"decisions",
+	"main_tests",
+	"candidate_tests",
+	"heldout",
+] as const;
+
 const receipt = {
 	version: 2,
 	gateSha,
@@ -144,8 +152,8 @@ const receipt = {
 	modelCalls: 0,
 	status: "passed",
 	heldoutDigest: digestOf("checks"),
-	requiredChecks: [...REQUIRED_CI_CHECKS],
-	checks: REQUIRED_CI_CHECKS.map((name) => ({ name, exitCode: 0 })),
+	requiredChecks: [...GATE_CHECKS],
+	checks: GATE_CHECKS.map((name) => ({ name, exitCode: 0 })),
 };
 
 const binding = {
@@ -288,7 +296,7 @@ describe("exact workflow reporter with CLI install receipt", () => {
 	const cliReceipt = {
 		...receipt,
 		nonce,
-		requiredChecks: ["install", ...REQUIRED_CI_CHECKS],
+		requiredChecks: ["install", ...GATE_CHECKS],
 		checks: [{ name: "install", exitCode: 0 }, ...receipt.checks],
 		heldoutCounts: { "test/acceptance/42/checks/a.test.ts": 3 },
 	};
@@ -414,7 +422,7 @@ globalThis.fetch = async (url, init) => {
 		[
 			"seven-row legacy fixture",
 			{
-				requiredChecks: [...REQUIRED_CI_CHECKS],
+				requiredChecks: [...GATE_CHECKS],
 				checks: receipt.checks,
 			},
 		],
@@ -687,7 +695,7 @@ async function reportDeadlineFixture(
 		...receipt,
 		nonce,
 		heldoutDigest: heldout.digest,
-		requiredChecks: ["install", ...REQUIRED_CI_CHECKS],
+		requiredChecks: ["install", ...GATE_CHECKS],
 		checks: [{ name: "install", exitCode: 0 }, ...receipt.checks],
 	};
 

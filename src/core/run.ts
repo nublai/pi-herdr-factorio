@@ -79,8 +79,6 @@ export const REQUIRED_CI_CHECKS = [
 	"typecheck",
 	"lint",
 	"format",
-	"layout",
-	"decisions",
 	"main_tests",
 	"candidate_tests",
 	"heldout",
