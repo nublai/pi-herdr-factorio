@@ -2777,6 +2777,132 @@ test("a published feedback round whose judge split persists stops as review_unve
 	assert.equal(notice.withdraw, "review_unverifiable");
 });
 
+/**
+ * The review the host publishes when code-review ran out of the shared
+ * bound: its scenario `timeout`, and every later seat `budgetStopped`.
+ */
+function exhaustedReceipt(e: ReviewExecution): ReviewReceipt {
+	const r = splitReceipt(e, "timeout", "timeout", "unused");
+
+	return {
+		...r,
+		seats: r.seats.map((seat) =>
+			seat.seat === "code-review"
+				? seat
+				: { ...seat, findings: [], budgetStopped: true as const },
+		),
+	};
+}
+
+test("a review a first judge's bound exhaustion stopped holds as review_unverifiable with judge_budget_exhausted, at the review token cap, never failing or repairing (#805 B3)", () => {
+	const active = reviewing(
+		validated(select(), true, undefined, undefined, undefined, ["S1"]),
+	);
+
+	const review = exhaustedReceipt(active.execution);
+
+	const step = handoffCandidate(active.state, {
+		kind: "review_settled",
+		execution: active.execution,
+		tokens: REVIEW_MAX_TOKENS,
+		result: {
+			kind: "passed",
+			review,
+			patch: { kind: "found", receipt: patch, patch: "patch" },
+		},
+	});
+
+	const held = selected(step.state);
+
+	assert.equal(step.effect, null);
+	assert.ok(held.work.kind === "held");
+	assert.equal(held.work.reason, "review_unverifiable");
+	assert.equal(held.current.certification, null);
+	assert.deepEqual(
+		held.accounts.find((a) => a.execution.id === active.execution.id)?.spend,
+		{ kind: "known", tokens: REVIEW_MAX_TOKENS },
+	);
+
+	const restored = parseCandidateState(JSON.parse(JSON.stringify(held)));
+	assert.ok(restored?.kind === "selected");
+	assert.ok(restored.current.review !== undefined);
+
+	const judged = unverifiableOnly(restored.current.review);
+
+	assert.deepEqual(
+		judged.map((j) => [j.scenario, j.route]),
+		[["S1", "exhausted"]],
+	);
+	assert.equal(
+		unverifiableCode({
+			trusted: true,
+			judges: [null],
+			routes: judged.map((j) => j.route),
+		}),
+		"judge_budget_exhausted",
+	);
+
+	for (const bad of [
+		{ budgetStopped: false },
+		{ budgetStopped: true, findings: [receipt(active.execution).seats[0]] },
+	])
+		assert.equal(
+			parseCandidateState(
+				JSON.parse(
+					JSON.stringify({
+						...held,
+						current: {
+							...held.current,
+							review: {
+								...review,
+								seats: review.seats.map((seat) =>
+									seat.seat === "simplify" ? { ...seat, ...bad } : seat,
+								),
+							},
+						},
+					}),
+				),
+			),
+			null,
+		);
+});
+
+test("a published feedback round a first judge's bound exhaustion stopped stops as review_unverifiable, not review_failed (#805 B3)", () => {
+	const queued = queuedFeedback();
+	const rebuilding = rebuildingFeedback(queued);
+	const changed = { ...patch, round: 1, patchDigest: digestOf("exhausted") };
+
+	const built = handoffCandidate(rebuilding.state, {
+		kind: "repair_settled",
+		execution: rebuilding.execution,
+		tokens: 10,
+		result: { kind: "passed", patch: changed },
+	}).state;
+
+	const active = reviewing(
+		validated(handoffCandidate(built, readyObservation(built)).state),
+	);
+
+	const stopped = selected(
+		handoffCandidate(active.state, {
+			kind: "review_settled",
+			execution: active.execution,
+			tokens: 30,
+			result: {
+				kind: "passed",
+				review: exhaustedReceipt(active.execution),
+				patch: { kind: "found", receipt: changed, patch: "exhausted" },
+			},
+		}).state,
+	);
+
+	const notice = pending(stopped, "post_notice");
+
+	assert.ok(notice.then.kind === "held");
+	assert.equal(notice.then.reason, "review_unverifiable");
+	assert.equal(notice.withdraw, "review_unverifiable");
+});
+
 for (const published of [false, true])
 	test(`a later round's unverifiable-only review sharing an earlier finding fingerprint holds for the owner; main movement ${published ? "keeps a stopped feedback round held" : "refreshes the unpublished run"} (#793)`, {
 		timeout: 30_000,

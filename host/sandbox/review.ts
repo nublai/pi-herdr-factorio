@@ -12,6 +12,7 @@ import {
 	renderFeedbackCards,
 } from "../../src/candidate/feedback.ts";
 import {
+	budgetStoppedSeat,
 	candidateReviewPrompt,
 	judgePlaceholder,
 	type JudgeSeat,
@@ -781,6 +782,20 @@ export async function runReview(
 	const judgeOf = (seat: string): JudgeSeat | null =>
 		judging && (seat === "code-review" || seat === SECOND_JUDGE) ? seat : null;
 
+	const modelOf = (seat: string) =>
+		seat === SECOND_JUDGE && judgeModel !== null
+			? judgeModel
+			: seat === "code-review"
+				? (input.settings.codeReviewModel ?? input.settings.model)
+				: input.settings.model;
+
+	// A judge that ran out of its bound used the shared allowance, so a later
+	// seat that then runs out too gave no answer through no fault of its own:
+	// it and every seat after it are recorded `budgetStopped`, and the review
+	// holds for the owner instead of failing.
+	let judgeBound = false;
+	let stopped = false;
+
 	for (const seat of prepared.input.seats) {
 		const sessionDir = join(dir, seat);
 
@@ -797,6 +812,21 @@ export async function runReview(
 					family: FAMILY_MISSING,
 					builder,
 					requested: "none",
+					tokens: 0,
+				}),
+			);
+
+			continue;
+		}
+
+		if (stopped) {
+			receipts.push(
+				budgetStoppedSeat({
+					seat,
+					scenarios: prepared.input.scenarios,
+					family: FAMILY_MISSING,
+					builder,
+					requested: modelOf(seat),
 					tokens: 0,
 				}),
 			);
@@ -844,12 +874,7 @@ export async function runReview(
 					source: { bytes: 0, omissions: 0, capHit: false },
 					settings: {
 						...input.settings,
-						model:
-							seat === SECOND_JUDGE && judgeModel !== null
-								? judgeModel
-								: seat === "code-review"
-									? (input.settings.codeReviewModel ?? input.settings.model)
-									: input.settings.model,
+						model: modelOf(seat),
 						fallback:
 							seat === "security-review" ? input.settings.fallback : null,
 						maxTokens,
@@ -940,6 +965,25 @@ export async function runReview(
 					tokens: record.usage.total,
 				}),
 			);
+
+			if (why === "bound") judgeBound = true;
+
+			continue;
+		}
+
+		if (judgeBound && record.outcome.kind === "budget_exhausted") {
+			receipts.push(
+				budgetStoppedSeat({
+					seat,
+					scenarios: prepared.input.scenarios,
+					family:
+						parseFamily(fieldOf(record.record, "family")) ?? FAMILY_MISSING,
+					builder,
+					requested: textOf(fieldOf(models, "requested")) ?? modelOf(seat),
+					tokens: record.usage.total,
+				}),
+			);
+			stopped = true;
 
 			continue;
 		}

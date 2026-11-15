@@ -375,6 +375,10 @@ function wireReviewFields(
 			(s.fallback !== true && s.fallback !== false) ||
 			(s.unconfigured !== undefined &&
 				(s.unconfigured !== true || s.seat !== "second-judge")) ||
+			(s.budgetStopped !== undefined &&
+				(s.budgetStopped !== true ||
+					!Array.isArray(s.findings) ||
+					s.findings.length > 0)) ||
 			!wireCount(s.tokens) ||
 			!Array.isArray(s.findings) ||
 			!Array.isArray(s.judgments)

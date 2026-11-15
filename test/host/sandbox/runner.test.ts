@@ -66,6 +66,7 @@ import {
 	scenarioJudgments,
 	seatPrompt,
 	type SeatReceipt,
+	unverifiableCode,
 	unverifiableOnly,
 } from "../../../src/candidate/review.ts";
 import {
@@ -9672,7 +9673,7 @@ describe("multi-seat candidate review", () => {
 			for (const other of ["pass", "fail"] as const) {
 				const cascades = side === "code-review" && kind === "budget";
 
-				it(`normalizes a ${kind} ${side} beside a ${other} into the judge table with recorded tokens${cascades ? "; the spent allowance then stops the findings seats as before" : ""} (#805 B3)`, async () => {
+				it(`normalizes a ${kind} ${side} beside a ${other} into the judge table with recorded tokens${cascades ? "; the spent allowance then holds the review with every later seat budget-stopped" : ""} (#805 B3)`, async () => {
 					const h = await setup("clean", 1, false, {
 						secondJudgeModel: model(CLAUDE),
 						journals: judgeJournals(1),
@@ -9691,18 +9692,33 @@ describe("multi-seat candidate review", () => {
 							h.create,
 						);
 
-						if (cascades) {
-							assert.equal(result.kind, "budget_exhausted");
-							assert.equal(h.hosts.length, 2);
-
-							return;
-						}
-
 						assert.equal(result.kind, "passed");
 
 						const seats: SeatReceipt[] = JSON.parse(
 							readFileSync(join(h.dir, "output.txt"), "utf8"),
 						);
+
+						if (cascades) {
+							assert.equal(h.hosts.length, 2);
+							assert.equal(seats[0]?.judgments[0]?.outcome, "timeout");
+							assert.equal(seats[0]?.tokens, 61);
+							assert.deepEqual(
+								seats.map((seat) => [seat.seat, seat.budgetStopped ?? false]),
+								[
+									["code-review", false],
+									["security-review", true],
+									["simplify", true],
+									["second-judge", true],
+								],
+							);
+							assert.equal(result.receipt.usage.total, 61);
+							assert.deepEqual(
+								unverifiableOnly({ seats }).map((j) => j.route),
+								["exhausted"],
+							);
+
+							return;
+						}
 
 						const normalized = seats.find((seat) => seat.seat === side);
 						const judged = normalized?.judgments ?? [];
@@ -9726,6 +9742,122 @@ describe("multi-seat candidate review", () => {
 					}
 				});
 			}
+
+	for (const [cap, maxTokens, maxTurns, wallMs, seatTokens, spent] of [
+		["spends exactly the 60 tokens left", 60, 10, 60_000, 60, 60],
+		["has no turn left", 30_000, 0, 60_000, 10, 0],
+		["has no wall time left", 30_000, 10, 0, 10, 0],
+	] as const)
+		it(`holds for the owner, keeping its receipts and spend, when the first judge ${cap} and the findings seats after it cannot run (#805 B3)`, async () => {
+			const h = await setup("clean", 1, false, {
+				secondJudgeModel: model(CLAUDE),
+				journals: judgeJournals(1),
+				seatTokens: { "code-review": seatTokens },
+			});
+
+			try {
+				const result = await reviewModule.runReview(
+					{
+						...h.run,
+						settings: {
+							...h.run.settings,
+							maxTokens,
+							budget: { ...h.run.settings.budget, maxTurns, wallMs },
+						},
+					},
+					h.dir,
+					h.create,
+				);
+
+				assert.equal(result.kind, "passed");
+				assert.equal(result.usage, spent);
+				assert.equal(result.receipt.usage.total, spent);
+				assert.deepEqual(
+					h.hosts.map((host) => host.launches.length),
+					spent > 0 ? [1, 0] : [0, 0],
+				);
+
+				const seats: SeatReceipt[] = JSON.parse(
+					readFileSync(join(h.dir, "output.txt"), "utf8"),
+				);
+
+				assert.deepEqual(
+					seats.map((seat) => [
+						seat.seat,
+						seat.budgetStopped ?? false,
+						seat.findings.length,
+						seat.judgments.map((j) => j.outcome),
+						seat.tokens,
+					]),
+					[
+						["code-review", false, 0, ["timeout"], spent],
+						["security-review", true, 0, [], 0],
+						["simplify", true, 0, [], 0],
+						["second-judge", true, 0, ["timeout"], 0],
+					],
+				);
+				assert.match(seats[0]?.judgments[0]?.reason ?? "", /bound/);
+				assert.match(seats[3]?.judgments[0]?.reason ?? "", /did not run/);
+				assert.equal(seats[3]?.requested, CLAUDE);
+
+				const { executor, execution, args } = h.fixture;
+
+				const request = {
+					runId: execution.runId,
+					stage: "review" as const,
+					attempt: 1,
+					round: 0,
+					execution,
+					workflowSha: args.workflowSha,
+					workflowDigest: args.workflowDigest,
+				};
+
+				const output = await executor.output(request);
+
+				assert.ok(output instanceof Object && output.kind === "review");
+				assert.equal(output.receipt.blocking, true);
+				assert.equal(await executor.spent(request), spent);
+
+				const held = unverifiableOnly(output.receipt);
+
+				assert.deepEqual(
+					held.map((j) => [j.scenario, j.route]),
+					[["S1", "exhausted"]],
+				);
+				assert.equal(
+					unverifiableCode({
+						trusted: true,
+						judges: [null],
+						routes: held.map((j) => j.route),
+					}),
+					"judge_budget_exhausted",
+				);
+			} finally {
+				h.close();
+			}
+		});
+
+	it("keeps a findings seat's budget exhaustion a budget_exhausted review attempt when no judge ran out (#805 B3)", async () => {
+		const h = await setup("clean", 1, false, {
+			secondJudgeModel: model(CLAUDE),
+			journals: judgeJournals(1),
+			seatTokens: { "security-review": 61 },
+		});
+
+		try {
+			const result = await reviewModule.runReview(
+				{ ...h.run, settings: { ...h.run.settings, maxTokens: 70 } },
+				h.dir,
+				h.create,
+			);
+
+			assert.equal(result.kind, "budget_exhausted");
+			assert.equal(h.hosts.length, 2);
+			assert.equal(existsSync(join(h.dir, "output.txt")), false);
+		} finally {
+			h.close();
+		}
+	});
 
 	it("normalizes a refused code-review beside an unconfigured second judge into the missing column (#805 B3)", async () => {
 		const h = await setup("clean", 1, false, { refusedSeat: "code-review" });
@@ -10046,11 +10178,13 @@ describe("multi-seat candidate review", () => {
 					h.create,
 				);
 
-				assert.equal(result.kind, "budget_exhausted");
+				// The fixture has a judge-only scenario, so code-review is the first
+				// judge: its exhaustion holds the review for the owner (#805 B3).
+				assert.equal(result.kind, "passed");
 				assert.equal(result.usage, maxTokens === 0 ? 0 : 10);
 				assert.equal(result.receipt.usage.total, result.usage);
 				assert.equal(h.calls.length, maxTokens === 0 ? 0 : 1);
-				assert.equal(existsSync(join(h.dir, "output.txt")), false);
+				assertBudgetHold(h.dir);
 			} finally {
 				h.close();
 			}
@@ -10066,13 +10200,40 @@ describe("multi-seat candidate review", () => {
 				h.create,
 			);
 
-			assert.equal(result.kind, "budget_exhausted");
+			assert.equal(result.kind, "passed");
 			assert.equal(result.receipt.usage.total, 10);
 			assert.equal(h.calls.length, 1);
+			assertBudgetHold(h.dir);
 		} finally {
 			h.close();
 		}
 	});
+
+	/** The published review holds every scenario and accepts no seat after code-review. */
+	function assertBudgetHold(dir: string): void {
+		const seats: SeatReceipt[] = JSON.parse(
+			readFileSync(join(dir, "output.txt"), "utf8"),
+		);
+
+		assert.deepEqual(
+			unverifiableOnly({ seats }).map((j) => j.route),
+			["exhausted"],
+		);
+		assert.equal(seats[0]?.judgments[0]?.outcome, "timeout");
+		assert.deepEqual(
+			seats.slice(1).map((seat) => [seat.seat, seat.findings.length]),
+			[
+				["security-review", 0],
+				["simplify", 0],
+				["second-judge", 0],
+			],
+		);
+		assert.ok(
+			seats
+				.slice(1, 3)
+				.every((seat) => seat.budgetStopped === true && seat.tokens === 0),
+		);
+	}
 });
 
 describe("controller-run specify review", () => {

@@ -1402,6 +1402,104 @@ test("a judge split that persists after one repair round reaches the feed as jud
 	}
 });
 
+test("a review a first judge's bound exhaustion stopped reaches the feed as judge_budget_exhausted with its scenarios, count and verified detail link, never judge text (#805 B3)", async () => {
+	const root = await mkdtemp(join(tmpdir(), "owner-feed-"));
+	const prose = "Exhausted judge prose that must stay off the feed";
+
+	try {
+		await emptyState(root);
+
+		const acceptance = await saveJudgeSuite(root, {
+			S2: "Run the CLI and confirm it exits 0.",
+			S3: "The diff keeps the guard in src/a.ts.",
+		});
+
+		const runId = await addWaitingRun(root, "Hold for the owner", acceptance);
+		await saveTrustedRecords(root, runId);
+		await holdUnverifiable(root, runId, [{ scenario: "S3", reason: prose }]);
+
+		const path = join(root, "claims", `${runId}.json`);
+		const claim = JSON.parse(await readFile(path, "utf8"));
+		const book = parseCandidateState(claim.handoff);
+		assert.ok(book?.kind === "selected");
+
+		const review = claim.handoff.current.review;
+
+		const timeouts = ["S2", "S3"].map((scenario) => ({
+			scenario,
+			outcome: "timeout",
+			reason: prose,
+		}));
+
+		const base = review.seats.filter(
+			(seat: { seat: string }) => seat.seat !== "second-judge",
+		);
+
+		const exhausted = {
+			...review,
+			seats: [
+				...base.map((seat: { seat: string }) =>
+					seat.seat === "code-review"
+						? { ...seat, judgments: timeouts }
+						: { ...seat, findings: [], budgetStopped: true },
+				),
+				{
+					...base[0],
+					seat: "second-judge",
+					findings: [],
+					judgments: timeouts,
+					budgetStopped: true,
+				},
+			],
+		};
+
+		const handoff = {
+			...claim.handoff,
+			current: { ...claim.handoff.current, review: exhausted },
+		};
+
+		assert.ok(parseCandidateState(handoff)?.kind === "selected");
+		await save(root, ["claims", `${runId}.json`], { ...claim, handoff });
+
+		assert.ok(
+			await fileRunFiles(root).writeUnverifiableComment({
+				runId,
+				repo,
+				issue: 1,
+				generation: refOf(book.current.intent),
+				commentId: "123456789",
+			}),
+		);
+
+		const feed = await readOwnerFeed({ stateDir: root, repo, now });
+		const found = feed.entries.find((e) => e.runId === runId);
+
+		assert.ok(found);
+		assert.equal(found.reason, "review_unverifiable");
+		assert.equal(found.group, "needs_you");
+		assert.equal(found.unverifiableCode, "judge_budget_exhausted");
+		assert.equal(found.unverifiableCount, 2);
+		assert.deepEqual(found.unverifiable, [
+			{ scenario: "S2" },
+			{ scenario: "S3" },
+		]);
+		assert.equal(
+			found.unverifiableUrl,
+			`https://github.com/${repo}/issues/1#issuecomment-123456789`,
+		);
+		assert.ok(
+			!JSON.stringify(feed).includes(prose),
+			"judge prose reached the feed",
+		);
+
+		const wire = parseJson(JSON.stringify(feed));
+		assert.ok(wire !== undefined);
+		assert.deepEqual(v1Problems(wire), []);
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
 test("private fixtures also work at restrictive umasks without changing their semantics", async () => {
 	await withUmask(0o077, async () => {
 		await state(async (root) => {

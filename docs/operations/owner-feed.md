@@ -147,7 +147,7 @@ An entry of type `FeedEntry` in `src/views/feed.ts` has these fields.
 | `failure` | object or null | `{stage, class, reason}` from the ledger. |
 | `notProven` | array of string | Fixed sentences about what checks and review did not prove. |
 | `unverifiable` | array | `{scenario}` for each judgment review could not verify, when the run is held with reason `review_unverifiable`. Otherwise empty. See [Unverifiable judgments](#unverifiable-judgments). |
-| `unverifiableCode` | string or null | Why review held the run: `second_judge_missing`, `evidence_missing`, `judges_disagree`, `needs_execution` or `other`, when the run is held with reason `review_unverifiable`. Otherwise null. |
+| `unverifiableCode` | string or null | Why review held the run: `judge_budget_exhausted`, `second_judge_missing`, `evidence_missing`, `judges_disagree`, `needs_execution` or `other`, when the run is held with reason `review_unverifiable`. Otherwise null. |
 | `unverifiableCount` | number | How many judgments review could not verify, when the run is held with reason `review_unverifiable`. Otherwise 0. |
 | `unverifiableUrl` | string or null | The review detail comment that gives the reviewer's full reasons, when the run is held with reason `review_unverifiable` and the controller recorded the comment. Otherwise null. |
 | `steps` | array | One `FeedStep` per model stage that left a receipt. |
@@ -190,10 +190,11 @@ When review's only blocking items are judge-only judgments that are held rather 
 
 Every other entry has `unverifiable: []`, `unverifiableCode: null`, `unverifiableCount: 0` and `unverifiableUrl: null`.
 
-**Reason code.** The controller emits exactly these five values and never emits model-written prose. It derives them while reading the feed from stored records. For `needs_execution` it deterministically classifies the digest-bound judge text, which a model wrote, into this controller-defined closed set. No part of that text reaches the feed. When more than one applies, the first in this order wins.
+**Reason code.** The controller emits exactly these six values and never emits model-written prose. It derives them while reading the feed from stored records. For `needs_execution` it deterministically classifies the digest-bound judge text, which a model wrote, into this controller-defined closed set. No part of that text reaches the feed. When more than one applies, the first in this order wins.
 
 | Code | When |
 | --- | --- |
+| `judge_budget_exhausted` | A judge ran out of the review's shared token, turn or time bound, and a later seat then could not run. The review's later seats are controller placeholders marked `budgetStopped`, with no findings, so the review never certifies or repairs and every judge-only scenario is held. |
 | `judges_disagree` (persistent) | The judges split one `fail` and one `pass` on a held scenario, and a review from an earlier round of the run split on it too, so one repair did not settle it. |
 | `second_judge_missing` | A held scenario had no second judge, because `stages.review.seats.second-judge.model` was not configured when review ran. The review's `second-judge` seat is a controller placeholder marked `unconfigured`, and no model was called for it. |
 | `evidence_missing` | Review ran without trusted-pipeline evidence. The feed recomputes `trustedEvidence` (`src/candidate/review.ts`) from the held generation's stored verdict, gate receipt and CI report, the same records review preparation used, and gets null because a record is missing or does not match. |
@@ -295,7 +296,7 @@ The CLI has no hold command. A phone action that changes the hold, or does anyth
 | `entries[].reason` | The controller. | A closed vocabulary. The `HandoffReason` values that `wireReason` checks (`src/candidate/codec.ts:653`), `candidate_book_unavailable`, `feedback_overflow`, `working_generation`, `claim_unverified:<why>[:<failure>]` and `feedback_unavailable:<reason>[:<failure>]`. Each part of the last two comes from a fixed list in `unverifiedHolds` and `feedbackHolds` in `src/views/attention.ts`. |
 | `entries[].failure` | The ledger row or terminal record. | `stage` and `class` are fixed lists. `reason` must match `^[a-z][a-z0-9_]{0,63}$` (`src/ledger/schema.ts:456`, `src/ledger/schema.ts:636`). |
 | `entries[].unverifiable[]` | The stored review receipt of the held generation. | Only `scenario`, which matches `S<n>`, otherwise `S?`. The review model's reason never appears. At most 10 entries. |
-| `entries[].unverifiableCode` | The controller. | `evidence_missing`, `needs_execution`, `other`, `judges_disagree` or `second_judge_missing`, from `UNVERIFIABLE_CODES` in `src/candidate/review.ts`. |
+| `entries[].unverifiableCode` | The controller. | `evidence_missing`, `needs_execution`, `other`, `judges_disagree`, `second_judge_missing` or `judge_budget_exhausted`, from `UNVERIFIABLE_CODES` in `src/candidate/review.ts`. |
 | `entries[].unverifiableUrl` | The controller's private comment receipt. | Built as `<issueUrl>#issuecomment-<id>`, where the ID has 1 to 20 digits and the receipt matches the entry. |
 | `entries[].notProven` | Fixed sentences from `renderLimitation` (`src/candidate/handoff.ts:2722`), and one fallback sentence in `src/views/feed.ts`. | Criterion and scenario IDs appear only when they match `A<n>` or `S<n>`. A judgment outcome appears only as a value of `JUDGMENT_OUTCOMES` (`src/candidate/review.ts:255`). Criterion text, scenario text and review reasons never appear. |
 | `gaps[]` | The controller. | Fixed codes (`unrecognized_claim`, `state_unavailable`), or a code with an issue number or a 12-character run prefix (`invalid_claim:<12 characters>`, `ambiguous_issue:<n>`, `candidate_book_unavailable:<12 characters>`, `invalid_link:<12 characters>`, `duplicate_intake_marker:<12 characters>`). |

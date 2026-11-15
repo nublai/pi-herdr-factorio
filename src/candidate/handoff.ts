@@ -2523,7 +2523,7 @@ export function handoffCandidate(
 					earlierReviews(state),
 				);
 
-				if (held.some((j) => j.route === "split")) {
+				if (held.some((j) => j.route === "split" || j.route === "exhausted")) {
 					next =
 						state.published === null
 							? hold(updated, "review_unverifiable", now)

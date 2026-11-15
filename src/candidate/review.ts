@@ -297,6 +297,9 @@ export const SECOND_JUDGE_UNCONFIGURED =
 export const SECOND_JUDGE_BOUND =
 	"The second judge reached its token, turn or time bound before it answered.";
 
+export const JUDGE_BUDGET_STOPPED =
+	"This judge did not run: an earlier judge used the review's shared token, turn or time bound.";
+
 /** The two seats that judge judge-only scenarios. */
 export type JudgeSeat = "code-review" | typeof SECOND_JUDGE;
 
@@ -411,6 +414,33 @@ export function noAnswerSeat(input: {
 	});
 }
 
+/**
+ * The controller-written seat for a seat that gave no answer because a
+ * judge had already used the review's shared token, turn or time bound:
+ * marked `budgetStopped`, with no findings, and on `second-judge` a
+ * `timeout` judgment per scenario with a fixed controller reason. Such a
+ * review holds for the owner and never certifies or repairs.
+ */
+export function budgetStoppedSeat(input: {
+	readonly seat: string;
+	readonly scenarios: readonly string[];
+	readonly family: FamilyInput;
+	readonly builder: FamilyInput;
+	readonly requested: string;
+	readonly tokens: number;
+}): SeatReceipt {
+	const judge = placeholderSeat({
+		...input,
+		seat: SECOND_JUDGE,
+		scenarios: input.seat === SECOND_JUDGE ? input.scenarios : [],
+		outcome: "timeout",
+		reason: JUDGE_BUDGET_STOPPED,
+		refusal: null,
+	});
+
+	return { ...judge, seat: input.seat, budgetStopped: true };
+}
+
 export type Finding = {
 	readonly id: string;
 	readonly severity: "blocking" | "advisory";
@@ -483,6 +513,11 @@ export type SeatReceipt = SeatResult & {
 	 * judge is configured. Its judgments are controller placeholders.
 	 */
 	readonly unconfigured?: true;
+	/**
+	 * Set only on a seat that gave no answer because a judge had already used
+	 * the review's shared bound (`budgetStoppedSeat`). It has no findings.
+	 */
+	readonly budgetStopped?: true;
 	readonly primary?: string;
 	readonly refusal?: string | null;
 	readonly fallbackRecord?: JsonValue;
@@ -700,7 +735,10 @@ export function parseSeat(
  * `pass` certifies, `fail` takes the repair path, and `disagree`,
  * `unverified` and `missing` hold the run for the owner. `split` is never
  * a table cell: it is a one-fail, one-pass pair that an earlier round's
- * review also split on, so it holds instead of repairing again.
+ * review also split on, so it holds instead of repairing again. Nor is
+ * `exhausted`: every scenario of a review in which a judge used the shared
+ * bound before every seat ran, so it holds instead of certifying or
+ * repairing.
  */
 export type JudgeRoute =
 	| "pass"
@@ -708,7 +746,8 @@ export type JudgeRoute =
 	| "disagree"
 	| "unverified"
 	| "missing"
-	| "split";
+	| "split"
+	| "exhausted";
 
 /** The second judge's column: an outcome, or `missing` when none is configured. */
 export type SecondJudgeOutcome = JudgmentOutcome | "missing";
@@ -792,7 +831,10 @@ export type ScenarioJudgment = {
 };
 
 type JudgedReview = {
-	readonly seats: readonly (SeatResult & { readonly unconfigured?: true })[];
+	readonly seats: readonly (SeatResult & {
+		readonly unconfigured?: true;
+		readonly budgetStopped?: true;
+	})[];
 };
 
 /** Each code-review judgment combined with the second judge's by `JUDGE_TABLE`. */
@@ -862,13 +904,18 @@ const HELD_ROUTES: readonly JudgeRoute[] = [
  * that scenario as `split`, with every other held scenario, and never
  * repairs again, whatever else blocks. Otherwise every scenario that did
  * not pass holds when no blocking finding exists and no scenario fails.
- * Empty for any other review, which certifies or repairs.
+ * A review with a `budgetStopped` seat holds every scenario as
+ * `exhausted`, because a seat that never answered cannot pass, fail or
+ * certify. Empty for any other review, which certifies or repairs.
  */
 export function unverifiableOnly(
 	review: JudgedReview,
 	earlier: readonly JudgedReview[] = [],
 ): readonly ScenarioJudgment[] {
 	const routes = scenarioJudgments(review);
+
+	if (review.seats.some((seat) => seat.budgetStopped === true))
+		return routes.map((j) => ({ ...j, route: "exhausted" as const }));
 
 	const before = new Set(
 		earlier.flatMap((r) =>
@@ -929,6 +976,7 @@ export const ROUTE_TEXT: Readonly<
 	unverified: "Neither judge could verify it",
 	missing: "No second judge is configured",
 	split: "The judges still disagree after one repair round",
+	exhausted: "A judge used the review's shared bound before every seat ran",
 };
 
 function ownerJudgment(j: ScenarioJudgment, max: number): OwnerJudgment {
@@ -990,12 +1038,15 @@ export const UNVERIFIABLE_CODES = [
 	"other",
 	"judges_disagree",
 	"second_judge_missing",
+	"judge_budget_exhausted",
 ] as const;
 
 export type UnverifiableCode = (typeof UNVERIFIABLE_CODES)[number];
 
 /**
  * Why review held the run, from controller facts only, by precedence:
+ * `judge_budget_exhausted` when a judge used the review's shared bound
+ * before every seat ran,
  * `judges_disagree` when a judge split persisted after one repair round,
  * `second_judge_missing` when any held scenario had no second judge
  * configured, `evidence_missing` when the review had no trusted-pipeline
@@ -1010,6 +1061,8 @@ export function unverifiableCode(input: {
 	readonly routes?: readonly JudgeRoute[];
 }): UnverifiableCode {
 	const routes = input.routes ?? [];
+
+	if (routes.includes("exhausted")) return "judge_budget_exhausted";
 
 	if (routes.includes("split")) return "judges_disagree";
 
@@ -1090,6 +1143,8 @@ export function reviewCandidate(
 		if (
 			(seat.unconfigured !== undefined &&
 				(seat.unconfigured !== true || seat.seat !== SECOND_JUDGE)) ||
+			(seat.budgetStopped !== undefined &&
+				(seat.budgetStopped !== true || seat.findings.length > 0)) ||
 			parseSeat(
 				JSON.stringify({
 					seat: seat.seat,
