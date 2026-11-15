@@ -449,7 +449,7 @@ test("L04 pins acceptance replacement decisions separately from source selection
 				limits: ["No new dependencies"],
 				files: [path],
 				evidence: [],
-				replacesTests: [{ path, reason: "Replace the test" }],
+				replacesTests: [{ path, test: "pinned", reason: "Replace the test" }],
 			}),
 			new Set([path]),
 		);
