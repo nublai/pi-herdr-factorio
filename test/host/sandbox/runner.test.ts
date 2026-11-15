@@ -10417,6 +10417,65 @@ describe("controller-run specify review", () => {
 		}
 	});
 
+	it("accepts a replaced test only when the base checkout declares that exact test (#735 round 3)", async () => {
+		const path = "test/src/controller/recovery.test.ts";
+
+		const pinned =
+			"waits through transient recovery reads after ready was removed, then finishes needs_info";
+
+		const draft = (test: string) =>
+			JSON.stringify({
+				kind: "contract",
+				summary: "Release a recovering build when factory:ready is removed",
+				behavior: ["Removing factory:ready releases a recovering build"],
+				exclusions: [],
+				acceptance: [
+					{ kind: "new_behavior", text: "The recovering build is released" },
+				],
+				compatibility: [],
+				limits: [],
+				files: ["server/cli.ts"],
+				evidence: [],
+				replacesTests: [
+					{ path, test, reason: "#789 releases instead of waiting" },
+				],
+			});
+
+		for (const [texts, kind] of [
+			[[draft(pinned), CLEAN_REVIEW], "passed"],
+			[[draft("waits through transient recovery reads")], "failed"],
+			[[draft(pinned), CRITIQUE, draft("an undeclared test")], "failed"],
+		] as const) {
+			const h = setup(texts);
+
+			try {
+				mkdirSync(join(h.dir, "test/src/controller"), { recursive: true });
+				writeFileSync(
+					join(h.dir, path),
+					`import { it } from "node:test";\nit(${JSON.stringify(pinned)}, async () => {});\n`,
+				);
+
+				const specify = h.run.specify;
+				assert.ok(specify);
+
+				const result = await specifyModule.runSpecify(
+					{
+						...h.run,
+						specify: { ...specify, files: [...specify.files, path] },
+					},
+					h.dir,
+					h.create,
+				);
+
+				assert.equal(result.kind, kind);
+				assert.equal(h.calls.length, texts.length);
+				assert.equal(existsSync(join(h.dir, "output.txt")), kind === "passed");
+			} finally {
+				h.close();
+			}
+		}
+	});
+
 	it("does not review questions or malformed drafts", async () => {
 		for (const text of [QUESTIONS, "not JSON"]) {
 			const h = setup([text]);
