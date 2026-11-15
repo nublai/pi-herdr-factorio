@@ -343,7 +343,10 @@ describe("private acceptance artifacts", () => {
 		assert.equal(spare, 0);
 		const legal = { ...boundary, files };
 		assert.equal(Buffer.byteLength(modelText(legal)), ACCEPTANCE_MAX_BYTES);
-		assert.equal(writeAcceptance(modelText(legal), contract).kind, "suite");
+		assert.equal(
+			writeAcceptance(modelText(legal), contract, new Set()).kind,
+			"suite",
+		);
 		const root = fresh();
 		const stored = await fileArtifacts(root).store({ ...input, suite: legal });
 		assert.equal(stored.kind, "found");
@@ -355,10 +358,13 @@ describe("private acceptance artifacts", () => {
 			await fileArtifacts(root).store({ ...input, suite: legal }),
 			stored,
 		);
-		assert.deepEqual(writeAcceptance(`${modelText(legal)} `, contract), {
-			kind: "malformed",
-			reason: "too_large",
-		});
+		assert.deepEqual(
+			writeAcceptance(`${modelText(legal)} `, contract, new Set()),
+			{
+				kind: "malformed",
+				reason: "too_large",
+			},
+		);
 	});
 
 	it("rejects an oversized suite before creating the regeneration guard", async () => {

@@ -2205,6 +2205,7 @@ test("draft and held-out base checks keep both repetitions serial", async (t) =>
 			],
 		}),
 		contract,
+		new Set(),
 	);
 
 	assert.equal(parsed.kind, "suite");

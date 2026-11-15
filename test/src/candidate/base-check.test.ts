@@ -40,6 +40,7 @@ import {
 import { isGitSha } from "../../../src/config/schema.ts";
 import {
 	JUDGE_REFUSAL_SENTENCES,
+	draftFeedbackPrompt,
 	writeAcceptance,
 } from "../../../src/contract/acceptance.ts";
 import {
@@ -148,9 +149,13 @@ test("v2 criteria are strict objects and suite kinds are derived with exclusive 
 			"malformed",
 		);
 
-	const parsed = writeAcceptance(JSON.stringify(suite), {
-		acceptance: [...criteria],
-	});
+	const parsed = writeAcceptance(
+		JSON.stringify(suite),
+		{
+			acceptance: [...criteria],
+		},
+		new Set(),
+	);
 
 	assert.equal(parsed.kind, "suite");
 
@@ -173,9 +178,13 @@ test("v2 criteria are strict objects and suite kinds are derived with exclusive 
 		],
 	])
 		assert.equal(
-			writeAcceptance(JSON.stringify({ ...suite, scenarios }), {
-				acceptance: [...criteria],
-			}).kind,
+			writeAcceptance(
+				JSON.stringify({ ...suite, scenarios }),
+				{
+					acceptance: [...criteria],
+				},
+				new Set(),
+			).kind,
 			"malformed",
 		);
 });
@@ -423,6 +432,7 @@ export async function baseFixture(
 			],
 		}),
 		contract,
+		new Set(),
 	);
 
 	assert.ok(parsed.kind === "suite");
@@ -864,6 +874,7 @@ async function controllerWorld(
 			],
 		}),
 		contract,
+		new Set(),
 	);
 
 	assert.ok(parsed.kind === "suite");
@@ -948,6 +959,7 @@ test("controller draft checks are private, reuse a fresh tarball and never use t
 		stageDir,
 		attempt: 2,
 		input: {
+			files: new Set(),
 			contract: w.contract,
 			digest: w.binding.contractDigest,
 			repo: w.binding.repo,
@@ -1039,6 +1051,85 @@ test("controller draft checks are private, reuse a fresh tarball and never use t
 	);
 });
 
+test("the #430 held-out source is refused at draft time before a base run", {
+	timeout: 30000,
+}, async (t) => {
+	const w = await controllerWorld(t);
+	const stageDir = join(w.state, "stages", w.contract.runId, "accept-path");
+
+	const check = controllerDraftChecker({
+		stateDir: w.state,
+		stageDir,
+		attempt: 1,
+		input: {
+			contract: w.contract,
+			digest: w.binding.contractDigest,
+			repo: w.binding.repo,
+			issue: w.binding.issue,
+			baseSha: w.sha,
+			files: new Set(["test/host/sandbox/launcher.test.ts"]),
+		},
+		fetch: w.fetch,
+		runner: {
+			kind: "must-not-run",
+			async run() {
+				throw new Error("invalid dependency reached execution");
+			},
+		},
+	});
+
+	const text = JSON.stringify({
+		version: 2,
+		scenarios: [
+			{
+				id: "S1",
+				criteria: ["A1"],
+				checks: ["regression.test.mjs"],
+				judge: null,
+			},
+			{
+				id: "S2",
+				criteria: ["A2"],
+				checks: [],
+				judge: "Confirm existing behavior is unchanged in the diff.",
+			},
+		],
+		files: [
+			{
+				path: "regression.test.mjs",
+				type: "node:test",
+				content: readFileSync(
+					"test/fixtures/acceptance/430-wrapper-regression.txt",
+					"utf8",
+				),
+			},
+		],
+	});
+
+	const feedback = await check(text, {
+		signal: w.signal,
+		deadline: Date.now() + 30000,
+		run: 1,
+	});
+
+	assert.ok(feedback !== null && draftNeedsRevision(feedback));
+	assert.equal(feedback?.verdict, "judge_refused");
+	assert.match(
+		JSON.stringify(feedback),
+		/test\/host\/sandbox\/launcher\.test\.ts/,
+	);
+	assert.match(JSON.stringify(feedback), /heldout_reads_preserved_test/);
+	assert.match(
+		draftFeedbackPrompt(feedback, "nonce"),
+		/Rewrite that check to avoid the non-replaceable test dependency/,
+	);
+	assert.match(
+		draftFeedbackPrompt(feedback, "nonce"),
+		/test\/host\/sandbox\/launcher\.test\.ts/,
+	);
+	assert.equal(w.counter.fetches, 0);
+});
+
 test("a refused judge-only draft returns revision feedback naming its scenario without a base run", {
 	timeout: 30000,
 }, async (t) => {
@@ -1050,6 +1141,7 @@ test("a refused judge-only draft returns revision feedback naming its scenario w
 		stageDir,
 		attempt: 1,
 		input: {
+			files: new Set(),
 			contract: w.contract,
 			digest: w.binding.contractDigest,
 			repo: w.binding.repo,
@@ -1818,6 +1910,7 @@ async function replay(
 			})),
 		}),
 		contract,
+		new Set(),
 	);
 
 	assert.ok(parsed.kind === "suite", JSON.stringify(parsed));

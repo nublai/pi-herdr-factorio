@@ -530,6 +530,7 @@ export async function preparedReviewFixture(
 			],
 		}),
 		contract,
+		new Set(),
 	);
 
 	assert.ok(accepted.kind === "suite");

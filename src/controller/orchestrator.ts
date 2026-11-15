@@ -3603,6 +3603,7 @@ export class Orchestrator {
 			acceptDraft:
 				stage === "accept" && prepared.inputs?.contract !== undefined
 					? {
+							files: prepared.inputs.files,
 							contract: prepared.inputs.contract.contract,
 							digest: prepared.inputs.contract.digest,
 							repo: prepared.inputs.contract.contract.base.repo,

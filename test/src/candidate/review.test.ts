@@ -212,6 +212,7 @@ async function checkReviewTree(mode: string) {
 				],
 			}),
 			contract,
+			new Set(),
 		);
 
 		if (accepted.kind !== "suite") throw new Error("suite");

@@ -385,6 +385,7 @@ async function drive(t: { after(fn: () => void): void }, raw: Entry) {
 			})),
 		}),
 		contract,
+		new Set(),
 	);
 
 	assert.ok(parsed.kind === "suite", JSON.stringify(parsed));
@@ -1972,6 +1973,7 @@ async function jobWorld(
 			})),
 		}),
 		contract,
+		new Set(),
 	);
 
 	assert.ok(parsed.kind === "suite");

@@ -209,6 +209,339 @@ const MUST_REJECT_JUDGES = [
 	"Mutate the deferral check and confirm a test fails.",
 ];
 
+describe("held-out test-path dependencies", () => {
+	it("imports acceptance without loading the TypeScript compiler", {
+		timeout: 30000,
+	}, () => {
+		const module = new URL(
+			"../../../src/contract/acceptance.ts",
+			import.meta.url,
+		).href;
+
+		execFileSync(
+			process.execPath,
+			[
+				"--experimental-strip-types",
+				"--input-type=module",
+				"-e",
+				`
+			import { createRequire } from 'node:module';
+			const require = createRequire(import.meta.url);
+			const compiler = require.resolve('typescript');
+			await import(${JSON.stringify(module)});
+			if (require.cache[compiler] !== undefined) throw new Error('acceptance import loaded compiler');
+		`,
+			],
+			{ timeout: 10000, encoding: "utf8" },
+		);
+	});
+
+	const existing = new Set([
+		"test/host/sandbox/launcher.test.ts",
+		"src/version.ts",
+		"host/wrapper.ts",
+		"docs/reference.md",
+		"test/README.md",
+		"test/fixtures/input.json",
+		"test/helpers.ts",
+		"test/host/sandbox/launcher.cases.ts",
+	]);
+
+	const original = readFileSync(
+		"test/fixtures/acceptance/430-wrapper-regression.txt",
+		"utf8",
+	);
+
+	const output = (content: string, preservation = false) =>
+		JSON.stringify({
+			...suite,
+			files: suite.files.map((file) =>
+				file.path === (preservation ? "invalid.test.ts" : "version.test.ts")
+					? { ...file, content }
+					: file,
+			),
+		});
+
+	it("refuses the real #430 check with its existing non-replaceable test path", {
+		timeout: 30000,
+	}, () => {
+		const parsed = writeAcceptance(output(original), contract, existing);
+		assert.equal(parsed.kind, "malformed");
+		assert.ok(
+			"reason" in parsed && parsed.reason === "heldout_reads_preserved_test",
+		);
+		assert.ok("scenario" in parsed && parsed.scenario === "S1");
+		assert.ok(
+			"path" in parsed && parsed.path === "test/host/sandbox/launcher.test.ts",
+		);
+	});
+
+	for (const expression of [
+		"readFileSync('test/host/sandbox/launcher.test.ts', 'utf8')",
+		"readFileSync(join('test', 'host', 'sandbox', 'launcher.test.ts'), 'utf8')",
+		"readFileSync(resolve(process.cwd(), 'test/host/sandbox/launcher.test.ts'), 'utf8')",
+		"fs.promises.readFile('test/host/sandbox/launcher.test.ts', 'utf8')",
+		"readFile('test/host/sandbox/launcher.test.ts', 'utf8')",
+		"textRead('test/host/sandbox/launcher.test.ts', 'utf8')",
+		"import '../../../../test/host/sandbox/launcher.test.ts?raw'",
+		"import text from '../../../../test/host/sandbox/launcher.test.ts' with { type: 'text' }",
+		"import('../../../../test/host/sandbox/launcher.test.ts', { with: { type: 'text' } })",
+		"import('../../../../test/host/sandbox/launcher.test.ts?raw')",
+		"import * as paths from 'node:path'; fs.readFileSync(paths.resolve(process.cwd(), 'test', 'host/sandbox/launcher.test.ts'), 'utf8')",
+		"import * as fsp from 'node:fs/promises'; fsp.readFile('test/host/sandbox/launcher.test.ts', 'utf8')",
+		"const base = 'test/host'; const file = join(base, 'sandbox', 'launcher.test.ts'); readFileSync(file, 'utf8')",
+	])
+		it(`refuses a literal existing test read: ${expression}`, {
+			timeout: 30000,
+		}, () => {
+			const content = `import fs, { readFileSync, readFile } from 'node:fs'; import { readFile as textRead } from 'node:fs/promises'; import { join, resolve } from 'node:path'; ${expression};`;
+			const parsed = writeAcceptance(output(content), contract, existing);
+			assert.ok(
+				"reason" in parsed && parsed.reason === "heldout_reads_preserved_test",
+			);
+		});
+
+	for (const expression of [
+		"readFileSync(new URL('../../../../test/host/sandbox/launcher.test.ts', import.meta.url))",
+		"const file = fileURLToPath(new URL('../../../../test/host/sandbox/launcher.test.ts', import.meta.url)); readFileSync(file)",
+		"readFileSync(join(import.meta.dirname, '../../../../test/host/sandbox/launcher.test.ts'))",
+		"readFileSync(resolve(__dirname, '../../../../test/host/sandbox/launcher.test.ts'))",
+		"readFileSync(`test/host/sandbox/launcher.test.ts`)",
+		"const ROOT = process.cwd(); readFileSync(join(ROOT, 'test/host/sandbox/launcher.test.ts'))",
+		"const target = 'test/host/sandbox/launcher.test.ts'; if (existsSync(target)) { readFileSync(target); }",
+		"if (readFileSync('test/host/sandbox/launcher.test.ts')) {}",
+		"const half = 10 / 2; readFileSync('test/host/sandbox/launcher.test.ts'); const r = half / 5;",
+		"import('../../../../test/host/sandbox/launcher.test.ts')",
+		"import(join('../../../../test', 'host/sandbox/launcher.test.ts'))",
+		"readFileSync('test/host/sandbox/launcher.cases.ts')",
+	])
+		it(`refuses a parsed literal test read: ${expression}`, {
+			timeout: 30000,
+		}, () => {
+			const content = `import { readFileSync, existsSync } from 'node:fs'; import { join, resolve } from 'node:path'; import { fileURLToPath } from 'node:url'; ${expression};`;
+			const parsed = writeAcceptance(output(content), contract, existing);
+			assert.ok(
+				"reason" in parsed && parsed.reason === "heldout_reads_preserved_test",
+			);
+		});
+
+	it("resolves file-relative reads from a nested check location", {
+		timeout: 30000,
+	}, () => {
+		const content =
+			"import { readFileSync } from 'node:fs'; readFileSync(new URL('../../../../../test/host/sandbox/launcher.test.ts', import.meta.url));";
+
+		const text = output(content).replaceAll(
+			"version.test.ts",
+			"nested/version.test.ts",
+		);
+
+		const parsed = writeAcceptance(text, contract, existing);
+		assert.ok(
+			"reason" in parsed && parsed.reason === "heldout_reads_preserved_test",
+		);
+		assert.equal(
+			writeAcceptance(
+				text.replaceAll("../../../../../test/", "../../../../test/"),
+				contract,
+				existing,
+			).kind,
+			"suite",
+		);
+	});
+
+	it("bounds parser recursion on a size-limited unary expression", {
+		timeout: 30000,
+	}, () => {
+		const content = "!".repeat(16000) + "true;";
+		const started = performance.now();
+		assert.equal(
+			writeAcceptance(output(content), contract, existing).kind,
+			"suite",
+		);
+		assert.ok(performance.now() - started < 1500);
+	});
+
+	it("bounds pathological nesting across a maximum-sized suite", {
+		timeout: 30000,
+	}, () => {
+		const content = "(".repeat(16000) + ") {".repeat(16000);
+
+		const files = Array.from({ length: 4 }, (_, i) => ({
+			path: `p${i}.test.mjs`,
+			type: "node:test",
+			content,
+		}));
+
+		const text = JSON.stringify({
+			version: 2,
+			files,
+			scenarios: files.map((file, i) => ({
+				id: `S${i + 1}`,
+				criteria: [i === 3 ? "A2" : "A1"],
+				checks: [file.path],
+				judge: null,
+			})),
+		});
+
+		const started = performance.now();
+		assert.equal(writeAcceptance(text, contract, existing).kind, "suite");
+		const elapsed = performance.now() - started;
+		assert.ok(
+			elapsed < 1500,
+			`scan took ${elapsed.toFixed(0)} ms, limit 1500 ms`,
+		);
+	});
+
+	for (const [name, content, preservation, replaceable] of [
+		[
+			"candidate-added test",
+			original.replaceAll(
+				"test/host/sandbox/launcher.test.ts",
+				"test/host/sandbox/new-regression.test.ts",
+			),
+			false,
+			false,
+		],
+		["preservation read", original, true, false],
+		[
+			"test Markdown",
+			"import { readFileSync } from 'node:fs'; import { join } from 'node:path'; readFileSync(join('test', 'README.md'));",
+			false,
+			false,
+		],
+		[
+			"test fixture JSON",
+			"import { readFile } from 'node:fs/promises'; import { resolve } from 'node:path'; readFile(resolve(process.cwd(), 'test/fixtures/input.json'));",
+			false,
+			false,
+		],
+		[
+			"non-test support file",
+			"import { readFileSync } from 'node:fs'; readFileSync('test/helpers.ts');",
+			false,
+			false,
+		],
+		[
+			"non-test source",
+			original.replaceAll(
+				"test/host/sandbox/launcher.test.ts",
+				"src/version.ts",
+			),
+			false,
+			false,
+		],
+		["contract replacement", original, false, true],
+		[
+			"dynamic parameter shadows a literal binding",
+			"import { readFileSync } from 'node:fs'; const filename = 'test/host/sandbox/launcher.test.ts'; function inspect(filename) { return readFileSync(filename); } inspect('src/version.ts');",
+			false,
+			false,
+		],
+		[
+			"a parameter shadows the imported reader",
+			"import { readFileSync } from 'node:fs'; const inspect = (readFileSync) => readFileSync('test/host/sandbox/launcher.test.ts'); inspect((text) => text);",
+			false,
+			false,
+		],
+		[
+			"host source",
+			original.replaceAll(
+				"test/host/sandbox/launcher.test.ts",
+				"host/wrapper.ts",
+			),
+			false,
+			false,
+		],
+		[
+			"documentation",
+			original.replaceAll(
+				"test/host/sandbox/launcher.test.ts",
+				"docs/reference.md",
+			),
+			false,
+			false,
+		],
+		[
+			"read expression inside a regex",
+			"import { readFileSync } from 'node:fs'; const pattern = /readFileSync('test\\/host\\/sandbox\\/launcher.test.ts')/;",
+			false,
+			false,
+		],
+		[
+			"cwd in a non-root join segment",
+			"import { readFileSync } from 'node:fs'; import { join } from 'node:path'; readFileSync(join('test', process.cwd(), 'host/sandbox/launcher.test.ts'));",
+			false,
+			false,
+		],
+		[
+			"plain module import is not a text read",
+			"import '../../../../test/host/sandbox/launcher.test.ts';",
+			false,
+			false,
+		],
+		[
+			"dynamic path (known limit)",
+			"import { readFileSync } from 'node:fs'; readFileSync(process.env.TEST_PATH, 'utf8');",
+			false,
+			false,
+		],
+		[
+			"literal not read",
+			"const path = 'test/host/sandbox/launcher.test.ts';",
+			false,
+			false,
+		],
+		[
+			"commented read",
+			"// readFileSync('test/host/sandbox/launcher.test.ts')",
+			false,
+			false,
+		],
+		[
+			"unrelated readFile function",
+			"function readFile(path) {} readFile('test/host/sandbox/launcher.test.ts');",
+			false,
+			false,
+		],
+	] as const)
+		it(`allows ${name}`, { timeout: 30000 }, () => {
+			assert.equal(
+				writeAcceptance(
+					output(content, preservation),
+					{
+						...contract,
+						replacesTests: replaceable
+							? [
+									{
+										path: "test/host/sandbox/launcher.test.ts",
+										reason: "Owner-authorized regression",
+									},
+								]
+							: [],
+					},
+					existing,
+				).kind,
+				"suite",
+			);
+		});
+
+	it("bounds cyclic path bindings and repeated expansion", {
+		timeout: 30000,
+	}, () => {
+		const declarations = Array.from(
+			{ length: 20 },
+			(_, i) => `const p${i + 1} = join(p${i}, p${i});`,
+		).join(" ");
+
+		const content = `import { readFileSync } from 'node:fs'; import { join } from 'node:path'; const p0 = 'test'; ${declarations} const cycle = cycle; readFileSync(p20); readFileSync(cycle);`;
+		assert.equal(
+			writeAcceptance(output(content), contract, existing).kind,
+			"suite",
+		);
+	});
+});
+
 describe("held-out acceptance output", () => {
 	for (const judge of MUST_ACCEPT_JUDGES)
 		it(`must accept judge: ${judge}`, { timeout: 1000 }, () => {
@@ -222,6 +555,7 @@ describe("held-out acceptance output", () => {
 						],
 					}),
 					contract,
+					new Set(),
 				).kind,
 				"suite",
 			);
@@ -238,6 +572,7 @@ describe("held-out acceptance output", () => {
 					],
 				}),
 				contract,
+				new Set(),
 			);
 
 			assert.equal(parsed.kind, "malformed");
@@ -263,6 +598,7 @@ describe("held-out acceptance output", () => {
 						],
 					}),
 					contract,
+					new Set(),
 				).kind,
 				"suite",
 			);
@@ -356,7 +692,7 @@ describe("held-out acceptance output", () => {
 			assert.ok(!body?.includes(privateText));
 	});
 	it("validates every criterion and the complete file manifest", () => {
-		const parsed = writeAcceptance(JSON.stringify(suite), contract);
+		const parsed = writeAcceptance(JSON.stringify(suite), contract, new Set());
 		assert.equal(parsed.kind, "suite");
 	});
 	it("rejects empty, malformed, duplicate-key and unbound output", () => {
@@ -370,7 +706,11 @@ describe("held-out acceptance output", () => {
 			JSON.stringify({ ...suite, files: [] }),
 			JSON.stringify({ ...suite, extra: "ignored?" }),
 		]) {
-			assert.equal(writeAcceptance(text, contract).kind, "malformed", text);
+			assert.equal(
+				writeAcceptance(text, contract, new Set()).kind,
+				"malformed",
+				text,
+			);
 		}
 	});
 	it("rejects paths, types, sizes, duplicate identities and orphan files", () => {
@@ -388,6 +728,7 @@ describe("held-out acceptance output", () => {
 				writeAcceptance(
 					JSON.stringify({ ...suite, files: [{ ...suite.files[0], path }] }),
 					contract,
+					new Set(),
 				).kind,
 				"malformed",
 				path,
@@ -414,7 +755,11 @@ describe("held-out acceptance output", () => {
 			},
 		])
 			assert.equal(
-				writeAcceptance(JSON.stringify({ ...suite, ...change }), contract).kind,
+				writeAcceptance(
+					JSON.stringify({ ...suite, ...change }),
+					contract,
+					new Set(),
+				).kind,
 				"malformed",
 			);
 	});
@@ -429,6 +774,7 @@ describe("held-out acceptance output", () => {
 					],
 				}),
 				contract,
+				new Set(),
 			),
 			{ kind: "malformed", reason: "coverage" },
 		);
@@ -450,6 +796,7 @@ describe("held-out acceptance output", () => {
 					],
 				}),
 				contract,
+				new Set(),
 			).kind,
 			"suite",
 		);
@@ -478,6 +825,7 @@ describe("held-out acceptance output", () => {
 						],
 					}),
 					contract,
+					new Set(),
 				),
 				{ kind: "malformed", reason: "judge_restates_gate", scenario: "S3" },
 			);
@@ -504,6 +852,7 @@ describe("held-out acceptance output", () => {
 						],
 					}),
 					contract,
+					new Set(),
 				),
 				{
 					kind: "malformed",
@@ -533,6 +882,7 @@ describe("held-out acceptance output", () => {
 						],
 					}),
 					contract,
+					new Set(),
 				).kind,
 				"suite",
 			);
@@ -551,6 +901,7 @@ describe("held-out acceptance output", () => {
 					})),
 				}),
 				contract,
+				new Set(),
 			).kind,
 			"suite",
 		);
@@ -736,7 +1087,12 @@ describe("held-out acceptance output", () => {
 
 	for (const large of [false, true])
 		it(`inlines only the author's refused files with an honest 12 KiB flag (${large ? "truncated" : "complete"})`, () => {
-			const parsed = writeAcceptance(JSON.stringify(suite), contract);
+			const parsed = writeAcceptance(
+				JSON.stringify(suite),
+				contract,
+				new Set(),
+			);
+
 			assert.equal(parsed.kind, "suite");
 
 			if (parsed.kind !== "suite") return;
@@ -923,7 +1279,7 @@ describe("acceptance author disclosure", () => {
 describe("acceptance receipts with family evidence", () => {
 	async function stored(family?: FamilyInput) {
 		const root = mkdtempSync(join(tmpdir(), "factory-accept-family-"));
-		const parsed = writeAcceptance(JSON.stringify(suite), contract);
+		const parsed = writeAcceptance(JSON.stringify(suite), contract, new Set());
 
 		if (parsed.kind !== "suite") throw new Error("suite");
 
@@ -1084,6 +1440,7 @@ describe("held-out checks resolve the repository root through the real base chec
 				],
 			}),
 			preserved,
+			new Set(),
 		);
 
 		assert.ok(parsed.kind === "suite");

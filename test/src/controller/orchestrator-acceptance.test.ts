@@ -1,5 +1,6 @@
 import { ACCEPTANCE_MAX_TOKENS } from "../../../src/contract/acceptance.ts";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { parseMarker } from "../../../src/trust/markers.ts";
 import {
@@ -648,6 +649,61 @@ describe("held-out acceptance stage", () => {
 				"absent",
 			);
 		});
+
+	it("final acceptance refuses the #430 test dependency using the trusted base inventory", {
+		timeout: 30000,
+	}, async () => {
+		const { github, executor, files, logs, start } = world();
+		github.add(labeled(14));
+		executor.tree.set("test/host/sandbox/launcher.test.ts", "base test");
+		executor.behaviors = [{ kind: "pass", usage: 10 }];
+		executor.acceptBehavior = { kind: "pass", usage: 7 };
+		executor.acceptText = JSON.stringify({
+			version: 2,
+			scenarios: [
+				{
+					id: "S1",
+					criteria: ["A1"],
+					checks: ["regression.test.mjs"],
+					judge: null,
+				},
+			],
+			files: [
+				{
+					path: "regression.test.mjs",
+					type: "node:test",
+					content: readFileSync(
+						"test/fixtures/acceptance/430-wrapper-regression.txt",
+						"utf8",
+					),
+				},
+			],
+		});
+		const controller = start();
+		await once(controller);
+		assert.equal(controller.state.runs.get(14)?.attempt, 2);
+		assert.equal(executor.baseChecks.length, 0);
+		assert.equal(
+			executor.launches.some((launch) => launch.stage === "build"),
+			false,
+		);
+		assert.ok(
+			logs.some(
+				(log) =>
+					log.event === "acceptance_malformed" &&
+					log.fields.reason === "heldout_reads_preserved_test",
+			),
+		);
+		const bound = await files.readContract(runOf(14));
+		assert.equal(bound.kind, "found");
+
+		if (bound.kind !== "found") throw new Error("missing contract");
+		assert.equal(
+			(await files.artifacts.read(runOf(14), bound.contract, bound.digest))
+				.kind,
+			"absent",
+		);
+	});
 
 	it("drops exhausted accept output while retaining its usage", async () => {
 		const { github, executor, files, start } = world();

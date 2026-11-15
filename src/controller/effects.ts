@@ -350,10 +350,11 @@ export function accepted(
 	observed?: string | null,
 	family?: FamilyInput,
 ): Extract<RunPhase, { kind: "reporting" }> | null {
-	const bound = run.inputs?.contract;
+	const inputs = run.inputs;
+	const bound = inputs?.contract;
 
-	if (bound === undefined || output === null) return null;
-	const parsed = writeAcceptance(output, bound.contract);
+	if (inputs === null || bound === undefined || output === null) return null;
+	const parsed = writeAcceptance(output, bound.contract, inputs.files);
 
 	if (parsed.kind === "malformed") {
 		input.log("acceptance_malformed", {

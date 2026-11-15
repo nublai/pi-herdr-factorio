@@ -1,0 +1,81 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { test } from 'node:test';
+import ts from 'typescript';
+
+// Inspect the regression itself without executing an existing test file or
+// introducing a second implementation of the production launcher.
+const filename = resolve(process.cwd(), 'test/host/sandbox/launcher.test.ts');
+const source = readFileSync(filename, 'utf8');
+const tree = ts.createSourceFile(filename, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+const cases = [];
+function visit(node) {
+  if (ts.isCallExpression(node)) {
+    const callee = node.expression.getText(tree);
+    if (/^(?:it|test)(?:\.(?:only|skip|todo))?$/.test(callee)) {
+      const callback = node.arguments.find((arg) => ts.isArrowFunction(arg) || ts.isFunctionExpression(arg));
+      if (callback) cases.push({ call: node, body: callback.body.getText(tree) });
+    }
+  }
+  ts.forEachChild(node, visit);
+}
+visit(tree);
+
+// Referenced local fixture helpers are included so a test may factor setup out
+// rather than being forced into a particular inline arrangement.
+const declarations = new Map();
+function declarationsIn(node) {
+  if (ts.isFunctionDeclaration(node) && node.name) {
+    declarations.set(node.name.text, node.getText(tree));
+  }
+  if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) {
+    declarations.set(node.name.text, node.initializer.getText(tree));
+  }
+  ts.forEachChild(node, declarationsIn);
+}
+declarationsIn(tree);
+function expanded(body) {
+  let result = body;
+  const included = new Set();
+  for (let round = 0; round <= declarations.size; round++) {
+    let changed = false;
+    for (const [name, declaration] of declarations) {
+      if (!included.has(name) && new RegExp(`\\b${name}\\b`).test(result)) {
+        included.add(name);
+        result += '\n' + declaration;
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+  return result;
+}
+
+ test('launcher contains a loader regression reaching an isolated real wrapper entry point', () => {
+  const integrations = cases.map(({ body }) => expanded(body)).filter((body) =>
+    /NODE_OPTIONS/.test(body) &&
+    /(?:spawnSync|spawn|execFileSync|execFile)\s*\(/.test(body) &&
+    /(?:pi\.ts|PI_CLI|import\.meta\.main)/.test(body) &&
+    /(?:writeFile|copyFile|cpSync)/.test(body)
+  );
+  assert.ok(integrations.length > 0,
+    'Add a regression that plants NODE_OPTIONS and launches an isolated copy of the real pi wrapper, not merely piChildEnv plus empty Node programs');
+  const body = integrations.join('\n');
+  assert.match(body, /--require/, 'the regression plants a real Node preload');
+  assert.match(body, /(?:mkdtemp|mkdtempSync)/, 'fixtures are isolated');
+  assert.match(body, /(?:finally|afterEach|after\s*\(|\.after\s*\()/, 'fixture cleanup is registered');
+  assert.match(body, /(?:rmSync|rm\s*\()/, 'temporary fixtures are removed');
+  assert.match(body, /(?:status|exitCode|['"]exit['"]|['"]close['"])/,
+    'the regression observes successful fake Pi termination, not just absence of a loader marker');
+  assert.match(body, /assert\./, 'the regression makes assertions');
+  assert.match(body, /(?:process\.pid|process\.argv|appendFile|wrapper[A-Za-z_]*(?:Ran|Marker|Load)|child[A-Za-z_]*(?:Ran|Marker|Load)|(?:ran|marker|load)[A-Za-z_]*(?:Wrapper|Child))/i,
+    'loader evidence must distinguish wrapper execution from fake Pi execution');
+  assert.match(body, /(?:existsSync|readFileSync|readFile|access|statSync|stat\s*\()/,
+    'the regression observes loader evidence rather than assuming filtering worked');
+  assert.match(body, /(?:true|notEqual|notDeepEqual|notStrictEqual|match|includes|length)/,
+    'the unfiltered positive control has observable loader evidence');
+  assert.match(body, /(?:false|deepEqual|deepStrictEqual|equal|strictEqual|doesNotMatch)/,
+    'the filtered fake child has an asserted loader outcome');
+});
+// factory-holdout-915c205f828962d3f74cbad3e079a5de0a07092e31e8e4d8a987d18e3439ab9a
