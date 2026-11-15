@@ -81,6 +81,16 @@ It clones and fetches through the GitHub integration into a temporary directory 
 
 It prints those reasons and atomically records the successful commit in `factory-state/install-exe-dev.commit`. A failure leaves the hold in place. After a stop, failure cleanup stops and disables the service so a half-provisioned checkout cannot crash-loop on reboot; it reports any cleanup failure explicitly. Fix the reported error and rerun the pinned command to recover. The installer does not roll back shared provisioning changes or lift the hold. Never treat preflight alone as proof of provisioning, cgroup limits, stage execution or an end-to-end install.
 
+### Recover an unreadable or mismatched sandbox bundle
+
+The bundle build sets `umask 022`, regardless of the installer's caller umask. Installed bundle files are world-readable, directories are searchable, and the root-owned tree is read-only. The provisioner checks the installed manifest before switching `current`.
+
+If an existing `assets-<digest>` cannot be read or its manifest digest does not match its name, provisioning refuses with `REFUSE sandbox_bundle` and recovery instructions. It leaves that bundle and `current` unchanged.
+
+Keep the hold and stop the controller before recovery. For a permissions-only failure, inspect the reported bundle and restore read and directory-search permissions with `sudo chmod -R a+rX <bundle>`. Run `node host/bundle/manifest.ts <bundle>` as `exedev` and require its output to match the digest in the directory name. Then rerun the pinned installer.
+
+For a digest mismatch, investigate the changed content. Never delete or replace a bundle that `current` references. Switch `current` to a separately verified bundle while the controller is stopped before removing the damaged bundle and rerunning the pinned installer. If no verified bundle is available, stop and ask the coordinator for a recovery plan.
+
 ## Verify
 
 On the VM, as `exedev`:

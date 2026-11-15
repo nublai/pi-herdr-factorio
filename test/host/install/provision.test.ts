@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import {
 	chmodSync,
+	cpSync,
+	mkdirSync,
 	mkdtempSync,
+	readdirSync,
+	readlinkSync,
 	readFileSync,
 	rmSync,
 	statSync,
@@ -195,6 +199,179 @@ describe("platform environment for provisioning", () => {
 		assert.doesNotMatch(unit, /^Environment=GH_(HOST|ENTERPRISE_TOKEN)=/m);
 		assert.match(unit, /^Environment=XDG_RUNTIME_DIR=\/run\/user\/1000$/m);
 	});
+});
+
+describe("sandbox provisioning under a restrictive umask", () => {
+	function fixture() {
+		const dir = mkdtempSync(join(tmpdir(), "factory-provision-bundle-"));
+		const repo = join(dir, "repo");
+		const root = join(dir, "sandbox");
+		const cache = join(dir, "cache", "factory-sandbox");
+		const node = join(dir, "node");
+		mkdirSync(join(repo, "host", "install"), { recursive: true });
+		mkdirSync(cache, { recursive: true });
+		mkdirSync(join(node, "bin"), { recursive: true });
+		cpSync(
+			new URL("../../../host/bundle", import.meta.url),
+			join(repo, "host", "bundle"),
+			{ recursive: true },
+		);
+		cpSync(new URL("../../../skills", import.meta.url), join(repo, "skills"), {
+			recursive: true,
+		});
+		writeFileSync(
+			join(repo, "host", "install", "provision.sh"),
+			script.replace(
+				"SANDBOX_ROOT=/var/lib/factory-sandbox",
+				`SANDBOX_ROOT=${JSON.stringify(root)}`,
+			),
+		);
+		writeFileSync(join(cache, "herdr-0.9.5-linux-x86_64"), "fixture herdr\n");
+		writeFileSync(
+			join(node, "bin", "npm"),
+			"#!/bin/sh\nmkdir -p node_modules/fixture\nprintf dependency >node_modules/fixture/index.js\n",
+			{ mode: 0o755 },
+		);
+
+		const tar = spawnSync(
+			"tar",
+			[
+				"-cJf",
+				join(cache, "node-v26.12.1-linux-x64.tar.xz"),
+				"-C",
+				dir,
+				"node",
+			],
+			{ encoding: "utf8" },
+		);
+
+		assert.equal(tar.status, 0, tar.stderr);
+
+		const run = (mask = "077") =>
+			spawnSync(
+				"bash",
+				[
+					"-c",
+					`set -eu
+umask "$1"
+node() {
+  if [ "$1" = --version ]; then printf 'v26.12.1\\n'; else ${JSON.stringify(process.execPath)} "$@"; fi
+}
+sha256sum() { cat >/dev/null; }
+curl() { echo 'unexpected download' >&2; return 99; }
+sudo() {
+  case "$1" in
+    chown) return 0;;
+    install) shift; command install -d -m 0755 "\${@: -1}";;
+    rm|cp|chmod|mv|ln) command "$@";;
+    *) return 99;;
+  esac
+}
+export -f node sha256sum curl sudo
+bash "$2" sandbox`,
+					"provision-test",
+					mask,
+					join(repo, "host", "install", "provision.sh"),
+				],
+				{
+					encoding: "utf8",
+					env: {
+						...process.env,
+						HOME: dir,
+						XDG_CACHE_HOME: join(dir, "cache"),
+					},
+				},
+			);
+
+		return {
+			dir,
+			root,
+			repo,
+			run,
+			cleanup() {
+				spawnSync("chmod", ["-R", "u+rwX", dir]);
+				rmSync(dir, { recursive: true, force: true });
+			},
+		};
+	}
+
+	for (const mask of ["022", "077"]) {
+		it(`installs world-readable files and searchable directories with a valid digest under umask ${mask}`, () => {
+			const f = fixture();
+
+			try {
+				const result = f.run(mask);
+				assert.equal(result.status, 0, result.stderr);
+
+				const target = readlinkSync(join(f.root, "current"));
+				const bundle = join(f.root, target);
+
+				const verify = spawnSync(
+					process.execPath,
+					[join(f.repo, "host", "bundle", "manifest.ts"), bundle],
+					{ encoding: "utf8" },
+				);
+
+				assert.equal(verify.status, 0, verify.stderr);
+				assert.equal(target, `assets-${verify.stdout.trim()}`);
+
+				function readable(path: string) {
+					const stat = statSync(path);
+					assert.equal(stat.mode & 0o444, 0o444, path);
+					assert.equal(stat.mode & 0o222, 0, path);
+
+					if (stat.isDirectory()) {
+						assert.equal(stat.mode & 0o111, 0o111, path);
+
+						for (const name of readdirSync(path)) readable(join(path, name));
+					}
+				}
+
+				readable(bundle);
+			} finally {
+				f.cleanup();
+			}
+		});
+	}
+
+	for (const failure of ["unreadable", "mismatched"]) {
+		it(`refuses an existing ${failure} bundle with recovery text without changing current`, () => {
+			const f = fixture();
+
+			try {
+				const initial = f.run("022");
+				assert.equal(initial.status, 0, initial.stderr);
+				const target = readlinkSync(join(f.root, "current"));
+				const bundle = join(f.root, target);
+
+				if (failure === "unreadable") chmodSync(bundle, 0);
+				else {
+					const file = join(bundle, "etc", "hosts");
+					chmodSync(file, 0o644);
+					writeFileSync(file, "changed\n");
+					chmodSync(file, 0o444);
+				}
+
+				const result = f.run();
+				assert.equal(result.status, 1, result.stderr);
+				assert.match(result.stderr, /provision: REFUSE sandbox_bundle/);
+				assert.match(
+					result.stderr,
+					failure === "unreadable"
+						? /cannot be read/
+						: /does not match its name/,
+				);
+				assert.match(result.stderr, /fix:.*stop.*controller.*current.*rerun/i);
+				assert.equal(readlinkSync(join(f.root, "current")), target);
+				assert.equal(
+					statSync(bundle).mode & 0o777,
+					failure === "unreadable" ? 0 : 0o555,
+				);
+			} finally {
+				f.cleanup();
+			}
+		});
+	}
 });
 
 describe("provisioning shell fragments (isolated, never the full script)", () => {
