@@ -182,6 +182,31 @@ function decisionsSuite(withAppendedRow: boolean): void {
 	});
 }
 
+it("refuses a checkpoint redirected away from docs/decisions.tsv", {
+	timeout: 30_000,
+}, () => {
+	const root = copyRepo();
+
+	const checkpoint = objectOf(
+		parseJson(
+			readFileSync(join(root, "scripts/decisions-checkpoint.json"), "utf8"),
+		),
+	);
+
+	assert.ok(checkpoint !== null);
+
+	writeFileSync(
+		join(root, "scripts/decisions-checkpoint.json"),
+		JSON.stringify({ ...checkpoint, file: "scripts/empty.tsv" }),
+	);
+	cpSync(join(root, file), join(root, "scripts/empty.tsv"));
+	writeFileSync(join(root, file), "garbage\n");
+
+	assert.deepEqual(check(root), [
+		"scripts/decisions-checkpoint.json: file must be docs/decisions.tsv",
+	]);
+});
+
 describe("decisions guard", () => decisionsSuite(false));
 
 describe("decisions guard after a log.sh-style appended row", () =>

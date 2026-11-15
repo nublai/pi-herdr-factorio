@@ -427,6 +427,8 @@ export const FEEDBACK_CHECKS = [
 	"typecheck",
 	"lint",
 	"format",
+	"layout",
+	"decisions",
 	"candidate_tests",
 ] as const;
 
@@ -590,12 +592,25 @@ function testFacts(log: string): RawFact[] {
 	return [];
 }
 
+function repositoryGuardFacts(log: string): RawFact[] {
+	return logLines(log).flatMap((text): RawFact[] => {
+		const at =
+			/^(?:(?:imports|classification|readers|literals|shell|discovery|navigation|citations): )?([^\s:]+)(?::\d+)?(?::|\s)/.exec(
+				text,
+			);
+
+		return at === null ? [] : [[at[1] ?? "", null]];
+	});
+}
+
 const FACT_READERS: Readonly<
 	Record<FeedbackCheck, (log: string) => RawFact[]>
 > = {
 	typecheck: typecheckFacts,
 	lint: lintFacts,
 	format: formatFacts,
+	layout: repositoryGuardFacts,
+	decisions: repositoryGuardFacts,
 	candidate_tests: testFacts,
 };
 

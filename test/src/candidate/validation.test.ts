@@ -11,12 +11,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { JsonValue } from "../../../src/core/json.ts";
-import {
-	verdictPasses,
-	digestOf,
-	REQUIRED_CI_CHECKS,
-} from "../../../src/core/run.ts";
+import { parseJson, type JsonValue } from "../../../src/core/json.ts";
+import { verdictPasses, digestOf } from "../../../src/core/run.ts";
 import {
 	collectVerdict,
 	collectTrustedReport,
@@ -78,6 +74,44 @@ import {
 import type { Exec } from "../../../src/github/exec.ts";
 import { EXE_DEV_PLATFORM } from "../../../src/trust/platform.ts";
 
+for (const check of ["layout", "decisions"]) {
+	it(`${check} failure reaches repair as changed-file facts only`, {
+		timeout: 30_000,
+	}, () => {
+		const file = check === "layout" ? "src/example.ts" : "docs/decisions.tsv";
+
+		const log =
+			check === "layout"
+				? `classification: ${file} is unclassified\nreaders: scripts/layout-baseline.json is invalid\nclassification: test/acceptance/1/checks/secret.ts is missing\n`
+				: `${file}:12 has 2 cells, expected 6\ntest/acceptance/1/checks/secret.ts:1 hidden\n`;
+
+		const scope = {
+			changedPaths: [file, "scripts/layout-baseline.json"],
+			heldoutDir: "test/acceptance/1",
+		};
+
+		const feedback = checkFeedback({
+			logs: new Map([[check, log]]),
+			failed: [check],
+			...scope,
+		});
+
+		assert.ok(
+			feedback.some((fact) => fact.check === check && fact.file === file),
+		);
+		assert.ok(
+			feedback.every(
+				(fact) =>
+					scope.changedPaths.includes(fact.file) && fact.code === undefined,
+			),
+		);
+		assert.deepEqual(
+			parseCheckFeedback(parseJson(JSON.stringify(feedback)), scope),
+			feedback,
+		);
+	});
+}
+
 const candidateSha = "c".repeat(40);
 const gateSha = "a".repeat(40);
 
@@ -98,6 +132,18 @@ const run: CiRun = {
 	createdAt: "2026-10-31T00:00:00Z",
 };
 
+const GATE_CHECKS = [
+	"baseline_tests",
+	"typecheck",
+	"lint",
+	"format",
+	"layout",
+	"decisions",
+	"main_tests",
+	"candidate_tests",
+	"heldout",
+] as const;
+
 const receipt = {
 	version: 2,
 	gateSha,
@@ -106,8 +152,8 @@ const receipt = {
 	modelCalls: 0,
 	status: "passed",
 	heldoutDigest: digestOf("checks"),
-	requiredChecks: [...REQUIRED_CI_CHECKS],
-	checks: REQUIRED_CI_CHECKS.map((name) => ({ name, exitCode: 0 })),
+	requiredChecks: [...GATE_CHECKS],
+	checks: GATE_CHECKS.map((name) => ({ name, exitCode: 0 })),
 };
 
 const binding = {
@@ -250,7 +296,7 @@ describe("exact workflow reporter with CLI install receipt", () => {
 	const cliReceipt = {
 		...receipt,
 		nonce,
-		requiredChecks: ["install", ...REQUIRED_CI_CHECKS],
+		requiredChecks: ["install", ...GATE_CHECKS],
 		checks: [{ name: "install", exitCode: 0 }, ...receipt.checks],
 		heldoutCounts: { "test/acceptance/42/checks/a.test.ts": 3 },
 	};
@@ -376,7 +422,7 @@ globalThis.fetch = async (url, init) => {
 		[
 			"seven-row legacy fixture",
 			{
-				requiredChecks: [...REQUIRED_CI_CHECKS],
+				requiredChecks: [...GATE_CHECKS],
 				checks: receipt.checks,
 			},
 		],
@@ -649,7 +695,7 @@ async function reportDeadlineFixture(
 		...receipt,
 		nonce,
 		heldoutDigest: heldout.digest,
-		requiredChecks: ["install", ...REQUIRED_CI_CHECKS],
+		requiredChecks: ["install", ...GATE_CHECKS],
 		checks: [{ name: "install", exitCode: 0 }, ...receipt.checks],
 	};
 
@@ -914,7 +960,7 @@ describe("F10-3 owner validator integrated harness", () => {
 });
 
 describe("report evidence uses the fixed CI deadline", () => {
-	it("F10-3 keeps the factory validator result and verdict bytes identical to 484a6ab", async () => {
+	it("F10-3 keeps the factory validator result and verdict bytes stable with repository guards", async () => {
 		const crypto = (await import("node:crypto")).default;
 		const { syncBuiltinESMExports } = await import("node:module");
 		const random = crypto.randomBytes;
@@ -932,11 +978,11 @@ describe("report evidence uses the fixed CI deadline", () => {
 				const result = await f.step(f.start + 70_000);
 				assert.equal(
 					digestOf(JSON.stringify(result)),
-					"d19258f591c957638abc1f96d88c085647086a51b137385559a05aba7ee6e118",
+					"1f4c66e2d18cb3994f086228f62d694cbcdebba51e7f835dad0578ea55ad5ee3",
 				);
 				assert.equal(
 					digestOf(readFileSync(join(f.dir, "verdict.json"))),
-					"fb163235c620c3d826bfe04a36cebff03431a181e6d39c8295d4a025a1e358cd",
+					"edacb2984b87612271f3291c87c4a94ce4ea8af0f11854cbb06076e62a117acb",
 				);
 			});
 		} finally {

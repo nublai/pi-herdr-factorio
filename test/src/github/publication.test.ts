@@ -1517,6 +1517,8 @@ describe("receipt download transport", () => {
 			assert.deepEqual(Object.fromEntries(logs), {
 				typecheck: "bytes of typecheck.log",
 				lint: "bytes of lint.log",
+				layout: "bytes of layout.log",
+				decisions: "bytes of decisions.log",
 				candidate_tests: "bytes of candidate_tests.log",
 			});
 			assert.deepEqual(members, [
@@ -1524,6 +1526,8 @@ describe("receipt download transport", () => {
 				"typecheck.log",
 				"lint.log",
 				"format.log",
+				"layout.log",
+				"decisions.log",
 				"candidate_tests.log",
 			]);
 			members.length = 0;

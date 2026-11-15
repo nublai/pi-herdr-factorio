@@ -3,7 +3,9 @@
   "checks": [
     { "name": "typecheck", "argv": ["node", "/g/tooling/node_modules/typescript/bin/tsc", "--noEmit", "-p", "/w/tsconfig.json"] },
     { "name": "lint", "argv": ["/g/tooling/node_modules/.bin/oxlint", "--disable-nested-config", "--ignore-path", "/dev/null", "--ignore-pattern", "test/acceptance/**", "-c", "/g/lint.json", "src", "extension", "host", "test", ".pi/skills", "docs/models"] },
-    { "name": "format", "argv": ["/g/tooling/node_modules/.bin/biome", "format", "--config-path", "/w/biome.json", "src", "extension", "host", "test", ".pi/skills", "docs/models"] }
+    { "name": "format", "argv": ["/g/tooling/node_modules/.bin/biome", "format", "--config-path", "/w/biome.json", "src", "extension", "host", "test", ".pi/skills", "docs/models"] },
+    { "name": "layout", "argv": ["node", "--experimental-strip-types", "/g/tooling/scripts/check-layout.mjs", "--root", "/w"] },
+    { "name": "decisions", "argv": ["node", "--experimental-strip-types", "/g/tooling/scripts/check-decisions.mjs", "--root", "/w"] }
   ],
   "testGlobs": ["test/src/**/*.test.ts", "test/host/**/*.test.ts", "test/integration/*.test.ts"]
 }

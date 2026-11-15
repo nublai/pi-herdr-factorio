@@ -26,6 +26,7 @@ import {
 	ACCEPTANCE_SUITE_DIR,
 	ACCEPTANCE_SUITE_PREFIX,
 	CONTROL_PLANE_PREFIX,
+	COORDINATOR_ONLY_FILES,
 } from "../../src/trust/protected-paths.ts";
 import { CLEAN_ENV, command } from "./runner.ts";
 
@@ -255,6 +256,13 @@ function overlay(input: {
 	const ignoredChanges: string[] = [];
 	const newTests: string[] = [];
 	const heldout = heldoutOf(source, input.heldoutDir, input.heldoutDigest);
+
+	for (const path of COORDINATOR_ONLY_FILES)
+		if (
+			base.get(path)?.blob !== candidate.get(path)?.blob ||
+			base.get(path)?.mode !== candidate.get(path)?.mode
+		)
+			throw new Error("protected_path_changed");
 
 	for (const [path, entry] of candidate)
 		if (

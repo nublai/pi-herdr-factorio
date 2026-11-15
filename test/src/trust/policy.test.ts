@@ -184,6 +184,24 @@ describe("forbidden paths", () => {
 	});
 });
 
+it("reserves coordinator-only decisions files and their normalized spellings", {
+	timeout: 30_000,
+}, () => {
+	for (const path of [
+		"docs/decisions.tsv",
+		"./docs/decisions.tsv",
+		"DOCS/DECISIONS.TSV",
+		"scripts/decisions-checkpoint.json",
+		"scripts\\decisions-checkpoint.json",
+	])
+		assert.equal(checkChangedPaths({ changedPaths: [path] }).kind, "forbidden");
+
+	assert.equal(
+		checkChangedPaths({ changedPaths: ["docs/decisions.tsv.md"] }).kind,
+		"clean",
+	);
+});
+
 it("reserves the controller-owned repair feedback path and descendants", () => {
 	for (const path of [
 		".factory-feedback-full.json",

@@ -23,6 +23,16 @@
 			"export": "reviewSeats"
 		},
 		"files": {
+			"test/fixtures/candidate/stored-books-69e1494.json": {
+				"owner": "src/candidate",
+				"seats": [
+					"code-review",
+					"security-review",
+					"simplify"
+				],
+				"from": [],
+				"since": "#792"
+			},
 			"host/README.md": {
 				"owner": "host",
 				"seats": [
@@ -4154,9 +4164,18 @@
 			"reader": "test/src/candidate/handoff.test.ts",
 			"tokens": {
 				"new URL(\"../../../src/candidate/codec.ts\", import.meta.url)": 1,
-				"new URL(\"../../../src/candidate/handoff.ts\", import.meta.url)": 1
+				"new URL(\"../../../src/candidate/handoff.ts\", import.meta.url)": 1,
+				"new URL( \"../../fixtures/candidate/stored-books-69e1494.json\", import.meta.url, )": 1
 			},
 			"targets": [
+				{
+					"path": "test/fixtures/candidate/stored-books-69e1494.json",
+					"type": "file",
+					"via": {
+						"from": "reader",
+						"path": "../../fixtures/candidate/stored-books-69e1494.json"
+					}
+				},
 				{
 					"path": "src/candidate/codec.ts",
 					"type": "file",

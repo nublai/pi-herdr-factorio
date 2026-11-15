@@ -1608,6 +1608,7 @@ const SCANNED_ABORTS: ReadonlySet<string> = new Set([
 
 const CANDIDATE_ABORTS: ReadonlySet<string> = new Set([
 	"npmrc_changed",
+	"protected_path_changed",
 	"replacement_deleted",
 	"unauthorized_acceptance",
 	"runtime_patching",
@@ -1637,6 +1638,8 @@ const NORMAL_CHECKS = [
 	"typecheck",
 	"lint",
 	"format",
+	"layout",
+	"decisions",
 	"main_tests",
 	"candidate_tests",
 	"heldout",
@@ -1993,7 +1996,9 @@ function classifyCiFailure(input: ClassifyInput): FailureClass {
 		return infrastructure("runner_error");
 
 	if (
-		NORMAL_CHECKS.some((n) => !required.includes(n)) ||
+		NORMAL_CHECKS.some(
+			(n) => n !== "layout" && n !== "decisions" && !required.includes(n),
+		) ||
 		required.some((n) => checks.filter((c) => c.name === n).length !== 1) ||
 		checks.length !== required.length
 	)
@@ -2333,6 +2338,8 @@ export const VISIBLE_CHECKS = [
 	"typecheck",
 	"lint",
 	"format",
+	"layout",
+	"decisions",
 	"main_tests",
 	"candidate_tests",
 ] as const;

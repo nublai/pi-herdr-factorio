@@ -85,6 +85,11 @@ function checkRows(file, lines) {
 
 export function checkDecisions(root) {
 	const checkpoint = checkpointOf(root);
+
+	if (checkpoint.file !== "docs/decisions.tsv")
+		return [
+			"scripts/decisions-checkpoint.json: file must be docs/decisions.tsv",
+		];
 	let bytes;
 
 	try {
@@ -119,8 +124,16 @@ function main(argv) {
 	let json = false;
 
 	for (let i = 0; i < argv.length; i++) {
-		if (argv[i] === "--root") root = resolve(argv[++i] ?? "");
-		else if (argv[i] === "--json") json = true;
+		if (argv[i] === "--root") {
+			const value = argv[++i];
+
+			if (!value || value.startsWith("--")) {
+				process.stderr.write("--root requires a directory\n");
+				process.exit(2);
+			}
+
+			root = resolve(value);
+		} else if (argv[i] === "--json") json = true;
 		else {
 			process.stderr.write(
 				"usage: node scripts/check-decisions.mjs [--root DIR] [--json]\n",
