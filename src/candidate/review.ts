@@ -155,8 +155,7 @@ function recordsAgree(input: {
 		nonce !== null &&
 		DISPATCH_NONCE.test(nonce) &&
 		fieldOf(ci, "nonce") === nonce &&
-		fieldOf(ci, "externalId") ===
-			`factory-gates:${verdict.ciRunId}:${nonce}` &&
+		fieldOf(ci, "externalId") === `factory-gates:${verdict.ciRunId}:${nonce}` &&
 		required !== null &&
 		required.length === verdict.requiredChecks.length &&
 		required.every((name, i) => name === verdict.requiredChecks[i]) &&

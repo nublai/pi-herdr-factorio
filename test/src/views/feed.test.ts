@@ -977,7 +977,7 @@ test("published token-cap holds stay blocked and orange; off-feed budget stops r
 	});
 });
 
-test("a review_unverifiable hold needs the owner and lists only the unverifiable scenario IDs, never the model's reasons (#735)", async () => {
+test("a review_unverifiable hold needs the owner and lists the unverifiable judgments as plain text (#735)", async () => {
 	await state(async (root) => {
 		const feed = await readOwnerFeed({ stateDir: root, repo, now });
 		const waiting = feed.entries.find((entry) => entry.issue === 1);

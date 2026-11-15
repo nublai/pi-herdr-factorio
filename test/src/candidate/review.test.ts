@@ -1429,7 +1429,11 @@ describe("trusted pipeline evidence for review (#735)", () => {
 			Readonly<Record<string, JsonValue>>,
 			Readonly<Record<string, JsonValue>>,
 		][] = [
-			["gate nonce differs from report nonce", { nonce: "another-dispatch" }, {}],
+			[
+				"gate nonce differs from report nonce",
+				{ nonce: "another-dispatch" },
+				{},
+			],
 			["gate nonce missing", { nonce: null }, {}],
 			["gate nonce empty", { nonce: "" }, {}],
 			[

@@ -2600,7 +2600,7 @@ for (const published of [false, true])
 		assert.ok(restored?.kind === "selected");
 
 		const observation = published
-			? {
+			? ({
 					...readyObservation(restored),
 					pr: {
 						kind: "open",
@@ -2608,7 +2608,7 @@ for (const published of [false, true])
 						head: promotedHead(restored)!,
 						refHead: promotedHead(restored)!,
 					},
-				} as const
+				} as const)
 			: observed(restored.current.intent.baseSha);
 
 		const stable = handoffCandidate(restored, observation);
@@ -2696,7 +2696,7 @@ test("an owner-edited published run whose review is only unverifiable keeps revi
 				{
 					v: 1,
 					runId: pin.runId,
-					repo: "nublai/example",
+					repo,
 					issue: 1,
 					eventId: "1",
 					eventAt: "2026-11-15T00:00:00Z",
@@ -2740,8 +2740,7 @@ test("an owner-edited published run whose review is only unverifiable keeps revi
 	assert.ok(selected(moved.state).work.kind === "held");
 
 	const push = pending(
-		handoffCandidate(restored, ownerObservation(f.start, "f".repeat(40)))
-			.state,
+		handoffCandidate(restored, ownerObservation(f.start, "f".repeat(40))).state,
 		"post_notice",
 	);
 
