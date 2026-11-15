@@ -30,7 +30,19 @@ import {
 	classifyFailure,
 } from "../../../src/candidate/diagnosis.ts";
 import { isGitSha } from "../../../src/config/schema.ts";
+import {
+	blocksReview,
+	candidateReviewPrompt,
+	type JudgmentOutcome,
+	replacementScenarios,
+	scenarioJudgments,
+	SECOND_JUDGE,
+} from "../../../src/candidate/review.ts";
 import { writeAcceptance } from "../../../src/contract/acceptance.ts";
+import {
+	declaresTest,
+	parseSpecifyOutput,
+} from "../../../src/contract/parse.ts";
 import {
 	contractBytes,
 	contractDigestOf,
@@ -39,6 +51,7 @@ import {
 import { objectOf, parseJson } from "../../../src/core/json.ts";
 import { digestOf } from "../../../src/core/run.ts";
 import { isRepoSlug } from "../../../src/trust/platform.ts";
+import { passingVerdict } from "../../helpers.ts";
 
 function gitSha(text: string) {
 	assert.ok(isGitSha(text));
@@ -882,7 +895,7 @@ test("per-file counts reject extra registrations, except named replacements", as
 const PINNED =
 	"waits through transient recovery reads after ready was removed, then finishes needs_info";
 
-const RECOVERY_TESTS = "test/src/controller/recovery.test.ts";
+const RECOVERY_TESTS = "test/src/controller/orchestrator-specify.test.ts";
 
 function recoveryTests(pinned: string, expected: string) {
 	return `import assert from "node:assert/strict"; import {test} from "node:test"; import {onReadyRemoved} from "../../../src/recovery.ts";\ntest(${JSON.stringify(pinned)},()=>assert.equal(onReadyRemoved(true),${JSON.stringify(expected)}));\ntest("releases an idle run when ready is removed",()=>assert.equal(onReadyRemoved(false),"released"));\n`;
@@ -1020,6 +1033,109 @@ test("the gate's replacement list carries an optional exact test name, one entry
 			/invalid_replacements/,
 			JSON.stringify(bad),
 		);
+});
+
+test("#789 end to end: specify names the pinned needs_info test, the build replaces it, the gates pass it and both judges review it", async (t) => {
+	const specified = parseSpecifyOutput(
+		JSON.stringify({
+			kind: "contract",
+			summary:
+				"Release a recovering round-0 build when factory:ready is removed",
+			behavior: ["Removing factory:ready releases a recovering build"],
+			exclusions: ["Closing the issue still releases as before"],
+			acceptance: [
+				{ kind: "new_behavior", text: "A recovering build is released" },
+			],
+			compatibility: [],
+			limits: [],
+			files: ["src/recovery.ts"],
+			evidence: [],
+			replacesTests: [RECOVERY_REPLACEMENT],
+		}),
+		new Set(["src/recovery.ts", RECOVERY_TESTS]),
+	);
+
+	assert.ok(specified.kind === "contract");
+	assert.ok(declaresTest(readFileSync(RECOVERY_TESTS, "utf8"), PINNED));
+
+	const repoSlug = "nublai/nubl-factory-fixture";
+	assert.ok(isRepoSlug(repoSlug));
+
+	const contract: Contract = {
+		version: 2,
+		runId: digestOf("789"),
+		issue: 789,
+		base: { repo: repoSlug, sha: gitSha("a".repeat(40)) },
+		snapshot: {
+			digest: digestOf("snapshot"),
+			source: "unedited",
+			eventId: "1",
+			eventAt: "2026-11-15T00:00:00Z",
+		},
+		link: null,
+		...specified.draft,
+	};
+
+	const dispatched = JSON.stringify(contract.replacesTests);
+	const f = recoveryRepo(t);
+	const candidateSha = releaseOnLabelRemoval(f);
+
+	const gate = await checkCandidate({
+		...gateInput(f, candidateSha),
+		replacements: replacementsOf(dispatched),
+		replacementsDigest: digestOf(dispatched),
+	});
+
+	assert.equal(gate.status, "passed");
+	assert.equal(gate.replacedTests[0]?.test, PINNED);
+
+	const scenarios = replacementScenarios(contract);
+	assert.deepEqual(
+		scenarios.map((s) => s.id),
+		["T1"],
+	);
+
+	const diff = f.git("diff", f.gateSha, candidateSha);
+	assert.ok(diff.includes(JSON.stringify(PINNED)));
+
+	const prompt = candidateReviewPrompt({
+		contract,
+		diff,
+		paths: ["src/recovery.ts", RECOVERY_TESTS],
+		judges: scenarios,
+		guidance: "",
+		verdict: { ...passingVerdict(digestOf(diff)), unjudged: ["T1"] },
+	});
+
+	assert.ok(prompt.kind === "ready");
+	assert.ok(prompt.prompt.includes('"scenario":"T1","criteria":[],"judge":'));
+	assert.ok(
+		prompt.prompt.includes(JSON.stringify(JSON.stringify(PINNED)).slice(1, -1)),
+	);
+
+	const review = (first: JudgmentOutcome, second: JudgmentOutcome) => ({
+		seats: (
+			["code-review", "security-review", "simplify", SECOND_JUDGE] as const
+		).map((seat) => ({
+			seat,
+			findings: [],
+			judgments:
+				seat === "code-review" || seat === SECOND_JUDGE
+					? [
+							{
+								scenario: "T1",
+								outcome: seat === SECOND_JUDGE ? second : first,
+								reason: "Replacement judged against #789",
+							},
+						]
+					: [],
+		})),
+	});
+
+	assert.equal(scenarioJudgments(review("pass", "pass"))[0]?.route, "pass");
+	assert.equal(blocksReview(review("pass", "pass").seats), false);
+	assert.equal(scenarioJudgments(review("pass", "fail"))[0]?.route, "fail");
+	assert.equal(blocksReview(review("pass", "fail").seats), true);
 });
 
 test("a named replacement cannot silently delete a test", async (t) => {
