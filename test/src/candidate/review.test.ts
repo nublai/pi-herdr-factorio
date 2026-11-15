@@ -22,6 +22,7 @@ import {
 	type SeatResult,
 	familyClaimsHold,
 	reviewR8,
+	TRUSTED_TEST_GLOBS,
 	trustedEvidence,
 	unverifiableCode,
 	unverifiableOnly,
@@ -1344,6 +1345,17 @@ describe("trusted pipeline evidence for review (#735)", () => {
 				}) === null,
 			);
 		}
+	});
+
+	it("allows every test glob the trusted gate manifest runs, so a new main glob cannot silently drop the evidence", () => {
+		const manifest = JSON.parse(
+			readFileSync(".github/factory/gates/gates.json", "utf8"),
+		);
+
+		for (const glob of manifest.testGlobs)
+			assert.ok(TRUSTED_TEST_GLOBS.includes(glob), glob);
+
+		assert.equal(manifest.testGlobs.length, TRUSTED_TEST_GLOBS.length);
 	});
 
 	it("binds each trusted gate check, held-out counts and the CI run to the candidate under review", () => {
