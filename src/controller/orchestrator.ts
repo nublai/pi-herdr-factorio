@@ -4133,6 +4133,8 @@ export class Orchestrator {
 						seats: reviewSeats(
 							state.current.ownerPatch?.changedPaths ??
 								state.current.patch.changedPaths,
+							{},
+							result.verdict.unjudged,
 						),
 						assessment: result.assessment,
 					},
@@ -4471,6 +4473,10 @@ export class Orchestrator {
 				codeReviewModel:
 					execution.stage === "review"
 						? config.stages.review.codeReviewModel
+						: null,
+				secondJudgeModel:
+					execution.stage === "review"
+						? config.stages.review.secondJudgeModel
 						: null,
 				budget: config.stages[execution.stage].budget,
 				maxTokens: candidateAllowance(state, execution),

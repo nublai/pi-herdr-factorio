@@ -254,6 +254,12 @@ export type StageRunSettings = {
 	 * runs `model`.
 	 */
 	readonly codeReviewModel?: ModelId | null;
+	/**
+	 * `stages.review.seats.second-judge.model`. Only the review launch sets
+	 * it, and only the second-judge seat runs it; absent or `null`, that
+	 * seat runs no model and records an unconfigured placeholder.
+	 */
+	readonly secondJudgeModel?: ModelId | null;
 };
 
 export type FailedExit = "error" | "malformed" | "crashed" | "aborted";

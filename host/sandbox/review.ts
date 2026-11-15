@@ -13,7 +13,12 @@ import {
 } from "../../src/candidate/feedback.ts";
 import {
 	candidateReviewPrompt,
+	judgePlaceholder,
 	parseSeat,
+	SECOND_JUDGE,
+	SECOND_JUDGE_BOUND,
+	SECOND_JUDGE_MAX_TOKENS,
+	SECOND_JUDGE_UNCONFIGURED,
 	ReviewEvidenceUnavailable,
 	reviewFeedback,
 	type ReviewInput,
@@ -489,7 +494,7 @@ async function candidateReviewInputs(
 		},
 		files: reviewedFiles,
 		scenarios: verdict.unjudged,
-		seats: reviewSeats(patch.receipt.changedPaths, risks),
+		seats: reviewSeats(patch.receipt.changedPaths, risks, verdict.unjudged),
 	};
 
 	const stageDir = join(
@@ -765,8 +770,32 @@ export async function runReview(
 		};
 	};
 
+	const builder = prepared.families?.builder ?? FAMILY_MISSING;
+	const judgeModel = input.settings.secondJudgeModel ?? null;
+
 	for (const seat of prepared.input.seats) {
 		const sessionDir = join(dir, seat);
+
+		if (
+			seat === SECOND_JUDGE &&
+			judgeModel === null &&
+			!existsSync(sessionDir)
+		) {
+			receipts.push(
+				judgePlaceholder({
+					scenarios: prepared.input.scenarios,
+					outcome: "unverifiable",
+					reason: SECOND_JUDGE_UNCONFIGURED,
+					family: FAMILY_MISSING,
+					builder,
+					requested: "none",
+					tokens: 0,
+				}),
+			);
+
+			continue;
+		}
+
 		let record = await readStageReceipt(join(sessionDir, "receipt.json"));
 
 		if (record === null) {
@@ -784,10 +813,18 @@ export async function runReview(
 
 			if (prompt === null) return finish(CRASHED);
 
-			const maxTokens =
+			const remaining =
 				input.settings.maxTokens === null
 					? null
 					: Math.max(0, input.settings.maxTokens + previous - total);
+
+			const maxTokens =
+				seat === SECOND_JUDGE
+					? Math.min(
+							remaining ?? SECOND_JUDGE_MAX_TOKENS,
+							SECOND_JUDGE_MAX_TOKENS,
+						)
+					: remaining;
 
 			const result = await runStage(
 				{
@@ -797,9 +834,11 @@ export async function runReview(
 					settings: {
 						...input.settings,
 						model:
-							seat === "code-review"
-								? (input.settings.codeReviewModel ?? input.settings.model)
-								: input.settings.model,
+							seat === SECOND_JUDGE && judgeModel !== null
+								? judgeModel
+								: seat === "code-review"
+									? (input.settings.codeReviewModel ?? input.settings.model)
+									: input.settings.model,
 						fallback:
 							seat === "security-review" ? input.settings.fallback : null,
 						maxTokens,
@@ -843,6 +882,28 @@ export async function runReview(
 
 		for (const [model, tokens] of Object.entries(record.usage.byModel))
 			byModel[model] = (byModel[model] ?? 0) + tokens;
+
+		if (seat === SECOND_JUDGE && record.outcome.kind === "budget_exhausted") {
+			const models = objectOf(fieldOf(record.record, "models"));
+
+			receipts.push(
+				judgePlaceholder({
+					scenarios: prepared.input.scenarios,
+					outcome: "timeout",
+					reason: SECOND_JUDGE_BOUND,
+					family:
+						parseFamily(fieldOf(record.record, "family")) ?? FAMILY_MISSING,
+					builder,
+					requested:
+						textOf(fieldOf(models, "requested")) ??
+						judgeModel ??
+						input.settings.model,
+					tokens: record.usage.total,
+				}),
+			);
+
+			continue;
+		}
 
 		if (record.outcome.kind !== "passed") return finish(record.outcome);
 

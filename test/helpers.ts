@@ -44,6 +44,7 @@ import type {
 	ReviewExecution,
 } from "../src/candidate/state.ts";
 import { parseCandidateState } from "../src/candidate/codec.ts";
+import { reviewSeats } from "../src/candidate/review.ts";
 import {
 	beginCandidate,
 	candidateGenerations,
@@ -719,11 +720,7 @@ export function issuedReviewFixture(
 	pin: AdmissionPin,
 	patch: PatchReceipt,
 	verdict: Verdict,
-	seats: ReviewExecution["seats"] = [
-		"code-review",
-		"security-review",
-		"simplify",
-	],
+	seats: ReviewExecution["seats"] = reviewSeats([], {}, verdict.unjudged),
 ) {
 	assert.ok(isGitSha(verdict.baseSha));
 
