@@ -110,6 +110,7 @@ export type MalformedReason =
 	| "bad_field"
 	| "unknown_path"
 	| "unknown_test"
+	| "ambiguous_test"
 	| "too_large_to_post";
 
 export type SpecifyOutput =

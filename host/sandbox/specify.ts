@@ -2,9 +2,9 @@ import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { SpecifyOutput } from "../../src/contract/contract.ts";
 import {
-	declaresTest,
 	parseReviewOutput,
 	parseSpecifyOutput,
+	testDeclarations,
 } from "../../src/contract/parse.ts";
 import {
 	NAMED_FILE_READ_BYTES,
@@ -72,7 +72,8 @@ async function keptSession(dir: string): Promise<KeptSession | null> {
 
 /**
  * A parse of specify's text in which every replaced test is one the base
- * checkout declares, by exact name in its listed file; otherwise malformed.
+ * checkout declares exactly once, by literal name in its listed file;
+ * otherwise malformed, `unknown_test` or `ambiguous_test`.
  */
 async function parseDeclared(
 	text: string,
@@ -88,8 +89,16 @@ async function parseDeclared(
 	for (const replaced of parsed.draft.replacesTests ?? []) {
 		const source = await checkout.read(replaced.path, NAMED_FILE_READ_BYTES);
 
-		if (source === null || !declaresTest(source, replaced.test))
-			return { kind: "malformed", reason: "unknown_test" };
+		const count =
+			source === null || !("test" in replaced)
+				? 0
+				: testDeclarations(source, replaced.test);
+
+		if (count !== 1)
+			return {
+				kind: "malformed",
+				reason: count === 0 ? "unknown_test" : "ambiguous_test",
+			};
 	}
 
 	return parsed;

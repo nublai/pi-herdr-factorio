@@ -1,3 +1,5 @@
+import { createRequire } from "node:module";
+import type * as TS from "typescript";
 import type { JsonValue } from "../core/json.ts";
 import type { NonEmpty } from "../core/run.ts";
 import { ACCEPTANCE_SUITE_PREFIX } from "../trust/protected-paths.ts";
@@ -381,17 +383,67 @@ function hasDuplicateKey(text: string): boolean {
 	return false;
 }
 
-/**
- * True when `source` declares a `test` or `it` call, with any modifier,
- * whose first argument is the literal `name`. Specify names a replaced
- * test this way, so a computed or concatenated name never matches.
- */
-export function declaresTest(source: string, name: string): boolean {
-	const literal = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+// Loaded on first use, so the controller and gates that import this module never load the compiler.
+const loadTypescript = (): typeof TS =>
+	createRequire(import.meta.url)("typescript");
 
-	return new RegExp(
-		`\\b(?:it|test)(?:\\.\\w+)?\\s*\\(\\s*(["'\`])${literal}\\1`,
-	).test(source);
+let typescript: typeof TS | null = null;
+
+function isTestCallee(ts: typeof TS, callee: TS.Expression): boolean {
+	const target = ts.isPropertyAccessExpression(callee)
+		? callee.expression
+		: callee;
+
+	return (
+		ts.isIdentifier(target) && (target.text === "test" || target.text === "it")
+	);
+}
+
+/**
+ * How many `test` or `it` calls in `source`, with at most one modifier such
+ * as `.skip`, take `name` as their whole first argument: a string or a
+ * template with no substitution, compared by decoded value. Nested
+ * `describe` blocks count. Comments, string contents, concatenated and
+ * computed names never do. Specify names a replaced test this way; one
+ * declaration names it and more are ambiguous.
+ */
+export function testDeclarations(source: string, name: string): number {
+	const ts = (typescript ??= loadTypescript());
+
+	const file = ts.createSourceFile(
+		"replaced.test.ts",
+		source,
+		ts.ScriptTarget.Latest,
+		false,
+		ts.ScriptKind.TS,
+	);
+
+	let count = 0;
+
+	const visit = (node: TS.Node): void => {
+		if (ts.isCallExpression(node) && isTestCallee(ts, node.expression)) {
+			const first = node.arguments[0];
+
+			if (
+				first !== undefined &&
+				(ts.isStringLiteral(first) ||
+					ts.isNoSubstitutionTemplateLiteral(first)) &&
+				first.text === name
+			)
+				count += 1;
+		}
+
+		ts.forEachChild(node, visit);
+	};
+
+	visit(file);
+
+	return count;
+}
+
+/** True when exactly one `test` or `it` call declares `name`; see `testDeclarations`. */
+export function declaresTest(source: string, name: string): boolean {
+	return testDeclarations(source, name) === 1;
 }
 
 /**

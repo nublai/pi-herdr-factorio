@@ -10476,6 +10476,86 @@ describe("controller-run specify review", () => {
 		}
 	});
 
+	it("counts only a test or it call whose literal first argument is the name, once, in the base file (#807 review)", async () => {
+		const path = "test/src/controller/recovery.test.ts";
+		const pinned = "finishes needs_info";
+		const name = JSON.stringify(pinned);
+
+		const draft = JSON.stringify({
+			kind: "contract",
+			summary: "Release a recovering build when factory:ready is removed",
+			behavior: ["Removing factory:ready releases a recovering build"],
+			exclusions: [],
+			acceptance: [
+				{ kind: "new_behavior", text: "The recovering build is released" },
+			],
+			compatibility: [],
+			limits: [],
+			files: ["server/cli.ts"],
+			evidence: [],
+			replacesTests: [
+				{ path, test: pinned, reason: "#789 releases instead of waiting" },
+			],
+		});
+
+		for (const [variant, source, kind] of [
+			[
+				"comment",
+				`// it(${name}, () => {});\nit("other", () => {});`,
+				"failed",
+			],
+			[
+				"string",
+				`const example = 'it("${pinned}", () => {});';\nit("other", () => {});`,
+				"failed",
+			],
+			["concatenation", `it(${name} + " suffix", () => {});`, "failed"],
+			[
+				"duplicate",
+				`describe("a", () => it(${name}, () => {}));\ndescribe("b", () => it(${name}, () => {}));`,
+				"failed",
+			],
+			[
+				"nested",
+				`describe("a", () => { describe("b", () => { test.skip(\`${pinned}\`, () => {}); }); });`,
+				"passed",
+			],
+		] as const) {
+			const texts = kind === "passed" ? [draft, CLEAN_REVIEW] : [draft];
+			const h = setup(texts);
+
+			try {
+				mkdirSync(join(h.dir, "test/src/controller"), { recursive: true });
+				writeFileSync(
+					join(h.dir, path),
+					`import { describe, it, test } from "node:test";\n${source}\n`,
+				);
+
+				const specify = h.run.specify;
+				assert.ok(specify);
+
+				const result = await specifyModule.runSpecify(
+					{
+						...h.run,
+						specify: { ...specify, files: [...specify.files, path] },
+					},
+					h.dir,
+					h.create,
+				);
+
+				assert.equal(result.kind, kind, variant);
+				assert.equal(h.calls.length, texts.length, variant);
+				assert.equal(
+					existsSync(join(h.dir, "output.txt")),
+					kind === "passed",
+					variant,
+				);
+			} finally {
+				h.close();
+			}
+		}
+	});
+
 	it("does not review questions or malformed drafts", async () => {
 		for (const text of [QUESTIONS, "not JSON"]) {
 			const h = setup([text]);

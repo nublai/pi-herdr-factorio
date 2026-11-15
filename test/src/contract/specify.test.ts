@@ -34,6 +34,7 @@ import {
 } from "../../../src/contract/contract.ts";
 import {
 	declaresTest,
+	testDeclarations,
 	parseSpecifyOutput,
 } from "../../../src/contract/parse.ts";
 import {
@@ -268,6 +269,43 @@ describe("specify output: contract schema", () => {
 			"single .quoted. name",
 		])
 			assert.equal(declaresTest(source, name), false, name);
+	});
+
+	it("counts only test or it calls whose whole literal first argument is the name, never comments, strings or computed names (#807 review)", () => {
+		const source = [
+			'// it("in a comment", () => {});',
+			'/* test("in a block comment", () => {}); */',
+			`const example = 'it("in a string", () => {});';`,
+			'it("prefix" + " suffix", () => {});',
+			"const label = `computed`;",
+			"it(label, () => {});",
+			"test(`sub ${label}`, () => {});",
+			'describe("a", () => { describe("b", () => { it.only("nested", () => {}); }); });',
+			'it("\\u0041 escaped", () => {});',
+			'describe("c", () => it("twice", () => {}));',
+			'describe("d", () => test("twice", () => {}));',
+			'expect("not a test call");',
+		].join("\n");
+
+		for (const [name, count] of [
+			["in a comment", 0],
+			["in a block comment", 0],
+			["in a string", 0],
+			["prefix", 0],
+			["prefix suffix", 0],
+			["computed", 0],
+			["label", 0],
+			["sub computed", 0],
+			["not a test call", 0],
+			["a", 0],
+			["nested", 1],
+			["A escaped", 1],
+			["twice", 2],
+		] as const)
+			assert.equal(testDeclarations(source, name), count, name);
+
+		assert.equal(declaresTest(source, "nested"), true);
+		assert.equal(declaresTest(source, "twice"), false);
 	});
 
 	it("tells specify how to find pinned tests and to leave additive changes without any", () => {
