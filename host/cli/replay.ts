@@ -294,6 +294,11 @@ const EXACT_NODE_RECIPE = {
 	candidate: "d4fd4c26c704c5e413b803f11b5c99213a1d106b757fbc5418032c710e1a82a0",
 } as const;
 
+const READABLE_BUNDLE_RECIPE = {
+	previous: EXACT_NODE_RECIPE.candidate,
+	candidate: "471dad8b44b83ca8254bc95b8b58524f44c7cf35a6080b76d6395db124e77f85",
+} as const;
+
 function refuse(code: string): never {
 	throw new Error(code);
 }
@@ -429,12 +434,19 @@ export async function checkReplayBundles(input: {
 		recipes[0]?.digest === EXACT_NODE_RECIPE.previous &&
 		recipes[1]?.digest === EXACT_NODE_RECIPE.candidate;
 
+	const readableBundle =
+		recipes[0]?.path === "host/install/provision.sh" &&
+		recipes[1]?.path === "host/install/provision.sh" &&
+		recipes[0]?.digest === READABLE_BUNDLE_RECIPE.previous &&
+		recipes[1]?.digest === READABLE_BUNDLE_RECIPE.candidate;
+
 	if (
 		recipe.code !== 0 ||
 		(recipe.stdout.trim() !== "" &&
 			input.previousAssets === input.candidateAssets &&
 			!relocation &&
-			!exactNode)
+			!exactNode &&
+			!readableBundle)
 	)
 		refuse("replay_bundle_recipe_mismatch");
 

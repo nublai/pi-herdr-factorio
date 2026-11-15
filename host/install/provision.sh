@@ -142,6 +142,7 @@ node_tar="$cache/node-v$NODE_VERSION-linux-x64.tar.xz"
 fetch "https://nodejs.org/dist/v$NODE_VERSION/node-v$NODE_VERSION-linux-x64.tar.xz" \
   "$NODE_SHA256" "$node_tar"
 
+umask 022
 build=$(mktemp -d)
 trap 'chmod -R u+w "$build" 2>/dev/null; rm -rf "$build"' EXIT
 b="$build/bundle"
@@ -209,10 +210,17 @@ if [ ! -d "$dest" ]; then
   sudo mv -T "$dest.tmp" "$dest"
 fi
 
-installed=$(node "$repo/host/bundle/manifest.ts" "$dest")
-if [ "$installed" != "$digest" ]; then
-  echo "provision: $dest does not match its name (got $installed)" >&2
+refuse_bundle() {
+  printf 'provision: REFUSE sandbox_bundle: %s\n' "$1" >&2
+  printf 'fix: Keep the hold and stop the controller. Inspect %s; repair its permissions or remove it only after current no longer points to it, then rerun the pinned installer. Never delete or replace a bundle referenced by current.\n' "$dest" >&2
   exit 1
+}
+
+if ! installed=$(node "$repo/host/bundle/manifest.ts" "$dest"); then
+  refuse_bundle "$dest cannot be read"
+fi
+if [ "$installed" != "$digest" ]; then
+  refuse_bundle "$dest does not match its name (got $installed)"
 fi
 
 if [ "$(readlink "$SANDBOX_ROOT/current" 2>/dev/null)" != "assets-$digest" ]; then

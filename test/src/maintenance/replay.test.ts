@@ -1717,10 +1717,10 @@ describe("L05 installed bundle pins", () => {
 		return { root, assets };
 	}
 
-	it("pins the live provisioning recipe to the reviewed exact-Node recipe", async () => {
+	it("pins the live provisioning recipe to the reviewed readable-bundle recipe", async () => {
 		assert.equal(
 			digestOf(await readFile("host/install/provision.sh", "utf8")),
-			"d4fd4c26c704c5e413b803f11b5c99213a1d106b757fbc5418032c710e1a82a0",
+			"471dad8b44b83ca8254bc95b8b58524f44c7cf35a6080b76d6395db124e77f85",
 		);
 	});
 
@@ -1840,7 +1840,22 @@ describe("L05 installed bundle pins", () => {
 				}),
 				"replay_bundle_recipe_mismatch",
 			);
-			const pinnedRecipe = await readFile("host/install/provision.sh", "utf8");
+
+			const pinnedRecipe = newRecipe.replace(
+				"  mise use -g node@26 >/dev/null\n  mise reshim\n",
+				`  mise use -g "node@$NODE_VERSION" >/dev/null
+  mise reshim
+  if [ "$(node --version)" != "v$NODE_VERSION" ]; then
+    echo "provision: node $(node --version) does not match required $NODE_VERSION" >&2
+    exit 1
+  fi
+`,
+			);
+
+			assert.equal(
+				digestOf(pinnedRecipe),
+				"d4fd4c26c704c5e413b803f11b5c99213a1d106b757fbc5418032c710e1a82a0",
+			);
 			await put("host/install/provision.sh", pinnedRecipe);
 			const pinnedSha = commit();
 			assert.equal(
@@ -1877,6 +1892,43 @@ describe("L05 installed bundle pins", () => {
 				}),
 				"replay_bundle_recipe_mismatch",
 			);
+
+			const readableRecipe = await readFile(
+				"host/install/provision.sh",
+				"utf8",
+			);
+
+			await put("host/install/provision.sh", readableRecipe);
+			const readableSha = commit();
+			assert.equal(
+				await refusal(root, assets, execute, {
+					previousSha: pinnedSha,
+					candidateSha: readableSha,
+				}),
+				"accepted",
+			);
+			await put(
+				"host/install/provision.sh",
+				`${readableRecipe}\nprintf changed\n`,
+			);
+			const readableChanged = commit();
+
+			for (const [previous, candidate] of [
+				[pinnedSha, readableChanged],
+				[pinnedChanged, readableSha],
+				[readableSha, pinnedSha],
+				[candidateSha, readableSha],
+				[previousSha, readableSha],
+			]) {
+				assert.equal(
+					await refusal(root, assets, execute, {
+						previousSha: previous,
+						candidateSha: candidate,
+					}),
+					"replay_bundle_recipe_mismatch",
+				);
+			}
+
 			await put("host/install/provision.sh", newRecipe);
 			await put(
 				"host/bundle/assets/stage-init.ts",
