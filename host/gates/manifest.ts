@@ -27,6 +27,7 @@ export type Dependency = {
 };
 
 type GateManifest = {
+	readonly testGlobs: readonly string[];
 	readonly checks: readonly { name: string; argv: readonly string[] }[];
 	readonly tests: readonly string[];
 };
@@ -260,5 +261,5 @@ export function manifestOf(tree: string): GateManifest {
 	)
 		throw new Error("missing_checks");
 
-	return { checks, tests };
+	return { checks, tests, testGlobs };
 }
