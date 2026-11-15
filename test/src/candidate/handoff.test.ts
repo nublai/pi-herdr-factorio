@@ -2313,6 +2313,148 @@ test("a review-driven repair binds its blocking review receipt, and a non-blocki
 	}
 });
 
+function judgedReceipt(
+	e: ReviewExecution,
+	judgments: ReviewReceipt["seats"][number]["judgments"],
+	findings: ReviewReceipt["seats"][number]["findings"] = [],
+): ReviewReceipt {
+	const r = receipt(e);
+
+	return {
+		...r,
+		blocking: true,
+		seats: r.seats.map((seat, i) =>
+			i === 0 ? { ...seat, judgments, findings } : seat,
+		),
+	};
+}
+
+const unverifiableS3 = {
+	scenario: "S3",
+	outcome: "unverifiable",
+	reason: "No trusted npm run check result is visible to review.",
+} as const;
+
+test("a review blocked only by unverifiable judgments holds for the owner without a repair round (#735)", () => {
+	const active = reviewing(validated(select()));
+	const review = judgedReceipt(active.execution, [unverifiableS3]);
+
+	const held = selected(
+		handoffCandidate(active.state, {
+			kind: "review_settled",
+			execution: active.execution,
+			tokens: 7,
+			result: {
+				kind: "passed",
+				review,
+				patch: { kind: "found", receipt: patch, patch: "patch" },
+			},
+		}).state,
+	);
+
+	assert.ok(held.work.kind === "held");
+	assert.equal(held.work.reason, "review_unverifiable");
+	assert.ok(held.current.review);
+	assert.equal(
+		reviewReceiptDigest(held.current.review),
+		reviewReceiptDigest(review),
+	);
+	assert.equal(held.current.certification, null);
+	assert.equal(candidateProjection(held).status, "blocked");
+	assert.equal(candidateProjection(held).stage, "review");
+	assert.equal(
+		digestOf(
+			JSON.stringify(parseCandidateState(JSON.parse(JSON.stringify(held)))),
+		),
+		digestOf(JSON.stringify(held)),
+	);
+
+	const later = handoffCandidate(held, observed());
+	assert.equal(later.effect, null);
+	assert.equal(selected(later.state).work.kind, "held");
+	assert.equal(
+		selected(later.state).accounts.filter((a) => a.execution.stage === "build")
+			.length,
+		0,
+	);
+});
+
+test("findings or failed judgments beside an unverifiable one still start a repair round (#735)", () => {
+	const active = reviewing(validated(select()));
+
+	const finding = {
+		id: "F1",
+		severity: "blocking",
+		category: "bug",
+		path: "src/example.ts",
+		startLine: 1,
+		endLine: 1,
+		claim: "The guard is missing.",
+		evidence: "Line 1 returns early.",
+	} as const;
+
+	for (const review of [
+		judgedReceipt(active.execution, [unverifiableS3], [finding]),
+		judgedReceipt(active.execution, [
+			unverifiableS3,
+			{ scenario: "S4", outcome: "fail", reason: "S4 rejects valid input." },
+		]),
+		judgedReceipt(active.execution, [
+			{ ...unverifiableS3, outcome: "inconclusive" },
+		]),
+		judgedReceipt(active.execution, [], [finding]),
+	]) {
+		const due = selected(
+			handoffCandidate(active.state, {
+				kind: "review_settled",
+				execution: active.execution,
+				tokens: 7,
+				result: {
+					kind: "passed",
+					review,
+					patch: { kind: "found", receipt: patch, patch: "patch" },
+				},
+			}).state,
+		);
+
+		assert.equal(due.work.kind, "repair_due", JSON.stringify(review.seats[0]));
+	}
+});
+
+test("a published run whose fresh review is only unverifiable withdraws readiness and holds without repair (#735)", () => {
+	const previous = waiting();
+
+	const refreshed = handoffCandidate(previous, {
+		...readyObservation(previous),
+		main: observed("b".repeat(40)).main,
+	}).state;
+
+	const active = reviewing(validated(refreshed));
+
+	const held = selected(
+		handoffCandidate(active.state, {
+			kind: "review_settled",
+			execution: active.execution,
+			tokens: 7,
+			result: {
+				kind: "passed",
+				review: judgedReceipt(active.execution, [unverifiableS3]),
+				patch: { kind: "found", receipt: patch, patch: "patch" },
+			},
+		}).state,
+	);
+
+	assert.equal(held.published?.number, 5);
+	assert.ok(held.work.kind === "held");
+	assert.equal(held.work.reason, "review_unverifiable");
+	assert.ok(held.published?.readiness.kind === "not_ready");
+	assert.equal(held.published.readiness.reason, "review_unverifiable");
+	assert.equal(
+		held.accounts.filter((a) => a.execution.stage === "build").length,
+		0,
+	);
+});
+
 test("a persisted repair without its assessment cause does not parse", () => {
 	const issued = selected(
 		handoffCandidate(validated(select(), false), observed()).state,

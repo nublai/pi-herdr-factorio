@@ -22,12 +22,15 @@ import {
 	type SeatResult,
 	familyClaimsHold,
 	reviewR8,
+	trustedEvidence,
+	unverifiableOnly,
 } from "../../../src/candidate/review.ts";
 import {
 	certifyR8,
 	crossFamily,
 	type FamilyInput,
 	familyFromJournal,
+	FAMILY_MISSING,
 	familyLabel,
 	familyOf,
 	parseFamily,
@@ -49,7 +52,11 @@ import {
 	reviewReceiptDigest,
 	type RepairCause,
 } from "../../../src/candidate/state.ts";
-import { digestOf } from "../../../src/core/run.ts";
+import {
+	digestOf,
+	REQUIRED_CI_CHECKS,
+	type Verdict,
+} from "../../../src/core/run.ts";
 import {
 	mkdtempSync,
 	cpSync,
@@ -79,7 +86,13 @@ import {
 import { writeAcceptance } from "../../../src/contract/acceptance.ts";
 import { isGitSha } from "../../../src/config/schema.ts";
 import { isRepoSlug } from "../../../src/trust/platform.ts";
-import { objectOf, parseJson, textOf } from "../../../src/core/json.ts";
+import {
+	arrayOf,
+	objectOf,
+	parseJson,
+	textOf,
+	type JsonValue,
+} from "../../../src/core/json.ts";
 import { EXE_DEV_PLATFORM } from "../../../src/trust/platform.ts";
 
 async function checkReviewTree(mode: string) {
@@ -1157,6 +1170,471 @@ for (const mode of [
 ])
 	it(`prepares review from the certified base (${mode}) while preserving the repair base`, () =>
 		checkReviewTree(mode));
+
+function gateReceiptText(
+	verdict: Verdict,
+	change: Readonly<Record<string, JsonValue>> = {},
+): string {
+	return JSON.stringify({
+		version: 2,
+		requiredChecks: verdict.requiredChecks,
+		tamperSignals: [],
+		heldoutDigest: verdict.heldoutDigest,
+		heldoutCounts: {
+			"test/acceptance/1/checks/a.test.ts": 3,
+			"test/acceptance/1/checks/b.test.ts": 2,
+		},
+		heldoutFailures: [],
+		gateSha: verdict.gateSha,
+		candidateSha: verdict.candidateSha,
+		nonce: "nonce",
+		runner: "docker",
+		status: "passed",
+		reason: null,
+		checks: verdict.requiredChecks.map((name, i) => ({
+			name,
+			exitCode: 0,
+			durationMs: 1000 + i,
+			signal: null,
+		})),
+		ignoredChanges: [],
+		replacedTests: [],
+		replacementsDigest: digestOf("[]"),
+		dependencies: { added: [], removed: [], changed: [] },
+		newDependency: false,
+		installScripts: [],
+		baselineCounts: {},
+		candidateCounts: {},
+		wallMs: 5000,
+		modelCalls: 0,
+		...change,
+	});
+}
+
+function reportText(
+	verdict: Verdict,
+	change: Readonly<Record<string, JsonValue>> = {},
+): string {
+	return JSON.stringify({
+		candidateSha: verdict.candidateSha,
+		gateSha: verdict.gateSha,
+		ciRunId: verdict.ciRunId,
+		reportId: 77,
+		nonce: "nonce",
+		heldoutDigest: verdict.heldoutDigest,
+		externalId: `factory-gates:${verdict.ciRunId}:nonce`,
+		...change,
+	});
+}
+
+function evidenceBlock(prompt: string): JsonValue | undefined {
+	const block =
+		/<trusted-pipeline-evidence>\n([^\n]+)\n<\/trusted-pipeline-evidence>/.exec(
+			prompt,
+		);
+
+	assert.ok(block, "trusted-pipeline evidence block");
+
+	return parseJson(block[1] ?? "");
+}
+
+describe("trusted pipeline evidence for review (#735)", () => {
+	const verdict = passingVerdict(patch("one"));
+
+	const binding = {
+		candidateSha: verdict.candidateSha,
+		ciRunId: verdict.ciRunId,
+		patchDigest: verdict.patchDigest,
+		acceptanceDigest: verdict.acceptanceDigest,
+	};
+
+	it("binds each trusted gate check, held-out counts and the CI run to the candidate under review", () => {
+		const gateReceipt = gateReceiptText(verdict);
+		const report = reportText(verdict);
+		const evidence = trustedEvidence({ binding, verdict, gateReceipt, report });
+
+		assert.ok(evidence);
+		assert.equal(evidence.source, "trusted-pipeline");
+		assert.equal(evidence.candidateSha, verdict.candidateSha);
+		assert.equal(evidence.gateSha, verdict.gateSha);
+		assert.equal(evidence.patchDigest, verdict.patchDigest);
+		assert.equal(evidence.heldoutDigest, verdict.heldoutDigest);
+		assert.equal(evidence.gateReceiptDigest, digestOf(gateReceipt));
+		assert.equal(evidence.reportDigest, digestOf(report));
+		assert.deepEqual(evidence.ci, {
+			runId: verdict.ciRunId,
+			conclusion: "success",
+			reportId: 77,
+		});
+		assert.deepEqual(evidence.heldout, { files: 2, tests: 5 });
+		assert.deepEqual(
+			evidence.checks.map((c) => c.name),
+			verdict.requiredChecks,
+		);
+		assert.ok(evidence.checks.every((c) => c.exitCode === 0));
+		assert.deepEqual(
+			evidence.checks.map((c) => c.durationMs),
+			verdict.requiredChecks.map((_, i) => 1000 + i),
+		);
+	});
+
+	it("refuses evidence whose SHA, run or digest does not match, so dependent judgments stay unverifiable", () => {
+		const other = "d".repeat(40);
+
+		const cases: readonly [string, Parameters<typeof trustedEvidence>[0]][] = [
+			[
+				"gate candidate",
+				{
+					binding,
+					verdict,
+					gateReceipt: gateReceiptText(verdict, { candidateSha: other }),
+					report: reportText(verdict),
+				},
+			],
+			[
+				"gate sha",
+				{
+					binding,
+					verdict,
+					gateReceipt: gateReceiptText(verdict, { gateSha: other }),
+					report: reportText(verdict),
+				},
+			],
+			[
+				"held-out digest",
+				{
+					binding,
+					verdict,
+					gateReceipt: gateReceiptText(verdict, {
+						heldoutDigest: digestOf("other"),
+					}),
+					report: reportText(verdict),
+				},
+			],
+			[
+				"report candidate",
+				{
+					binding,
+					verdict,
+					gateReceipt: gateReceiptText(verdict),
+					report: reportText(verdict, { candidateSha: other }),
+				},
+			],
+			[
+				"report run",
+				{
+					binding,
+					verdict,
+					gateReceipt: gateReceiptText(verdict),
+					report: reportText(verdict, { ciRunId: 999 }),
+				},
+			],
+			[
+				"candidate under review",
+				{
+					binding: { ...binding, candidateSha: other },
+					verdict,
+					gateReceipt: gateReceiptText(verdict),
+					report: reportText(verdict),
+				},
+			],
+			[
+				"patch under review",
+				{
+					binding: { ...binding, patchDigest: patch("two") },
+					verdict,
+					gateReceipt: gateReceiptText(verdict),
+					report: reportText(verdict),
+				},
+			],
+			[
+				"missing report",
+				{
+					binding,
+					verdict,
+					gateReceipt: gateReceiptText(verdict),
+					report: null,
+				},
+			],
+			[
+				"missing gate receipt",
+				{ binding, verdict, gateReceipt: null, report: reportText(verdict) },
+			],
+			[
+				"model calls",
+				{
+					binding,
+					verdict,
+					gateReceipt: gateReceiptText(verdict, { modelCalls: 1 }),
+					report: reportText(verdict),
+				},
+			],
+			[
+				"failed gate",
+				{
+					binding,
+					verdict,
+					gateReceipt: gateReceiptText(verdict, { status: "failed" }),
+					report: reportText(verdict),
+				},
+			],
+			[
+				"check contradicting the verdict",
+				{
+					binding,
+					verdict,
+					gateReceipt: gateReceiptText(verdict, {
+						checks: verdict.requiredChecks.map((name) => ({
+							name,
+							exitCode: name === "lint" ? 1 : 0,
+							durationMs: 1,
+						})),
+					}),
+					report: reportText(verdict),
+				},
+			],
+			[
+				"missing check",
+				{
+					binding,
+					verdict,
+					gateReceipt: gateReceiptText(verdict, {
+						checks: verdict.requiredChecks
+							.slice(1)
+							.map((name) => ({ name, exitCode: 0, durationMs: 1 })),
+					}),
+					report: reportText(verdict),
+				},
+			],
+			[
+				"verdict that did not pass",
+				{
+					binding,
+					verdict: { ...verdict, pass: false },
+					gateReceipt: gateReceiptText(verdict),
+					report: reportText(verdict),
+				},
+			],
+		];
+
+		for (const [name, input] of cases)
+			assert.equal(trustedEvidence(input), null, name);
+	});
+
+	it("labels the trusted evidence in the review prompt, and states when it is unavailable", async () => {
+		const f = await preparedReviewFixture();
+
+		try {
+			const args = {
+				contract: f.contract,
+				diff: "+export const value = 1;",
+				paths: ["src/a.ts"],
+				judges: [],
+				guidance: "",
+				verdict: f.prepared.verdict,
+			};
+
+			const evidence = trustedEvidence({
+				binding,
+				verdict,
+				gateReceipt: gateReceiptText(verdict),
+				report: reportText(verdict),
+			});
+
+			const present = candidateReviewPrompt({ ...args, evidence });
+			assert.ok(present.kind === "ready");
+			assert.match(
+				present.prompt,
+				/Trusted-pipeline evidence[^\n]*never builder output, builder-run tests or model text[^\n]*\n<trusted-pipeline-evidence>/,
+			);
+			const shown = objectOf(evidenceBlock(present.prompt));
+			assert.equal(shown?.candidateSha, verdict.candidateSha);
+			assert.equal(shown?.source, "trusted-pipeline");
+
+			const absent = candidateReviewPrompt({ ...args, evidence: null });
+			assert.ok(absent.kind === "ready");
+			assert.equal(evidenceBlock(absent.prompt), null);
+			assert.match(
+				absent.prompt,
+				/Trusted-pipeline evidence is unavailable[^\n]*judge it unverifiable/,
+			);
+		} finally {
+			f.close();
+		}
+	});
+
+	it("review preparation supplies stored evidence for the matching candidate and omits a mismatched one", async () => {
+		const matching = await preparedReviewFixture(1, false, false, (v) => ({
+			"receipt.json": gateReceiptText(v),
+			"report.json": reportText(v),
+		}));
+
+		try {
+			const shown = objectOf(evidenceBlock(matching.prepared.input.prompt));
+			assert.ok(shown);
+			assert.equal(shown.candidateSha, matching.prepared.verdict.candidateSha);
+			assert.equal(shown.ciRunId, matching.prepared.verdict.ciRunId);
+			assert.equal(
+				arrayOf(shown.checks)?.length,
+				matching.prepared.verdict.requiredChecks.length,
+			);
+			assert.ok(
+				Buffer.byteLength(JSON.stringify(shown)) < 4096,
+				"bounded evidence",
+			);
+			assert.doesNotMatch(
+				matching.prepared.input.prompt,
+				/acceptance\/1\/checks/,
+			);
+		} finally {
+			matching.close();
+		}
+
+		const mismatched = await preparedReviewFixture(1, false, false, (v) => ({
+			"receipt.json": gateReceiptText(v),
+			"report.json": reportText(v, { candidateSha: "d".repeat(40) }),
+		}));
+
+		try {
+			assert.equal(evidenceBlock(mismatched.prepared.input.prompt), null);
+		} finally {
+			mismatched.close();
+		}
+
+		const legacy = await preparedReviewFixture();
+
+		try {
+			assert.equal(evidenceBlock(legacy.prepared.input.prompt), null);
+		} finally {
+			legacy.close();
+		}
+	});
+
+	it("pilot shape: judge-only S3 'trusted npm run check passes' is judged against full trusted evidence", () => {
+		const repoSlug = "nublai/nubl-factory-fixture";
+		const baseSha = verdict.originalBase;
+		assert.ok(isRepoSlug(repoSlug) && isGitSha(baseSha));
+
+		const contract = {
+			version: 2,
+			runId: digestOf("run"),
+			issue: 399,
+			base: { repo: repoSlug, sha: baseSha },
+			snapshot: {
+				digest: digestOf("snapshot"),
+				source: "unedited",
+				eventId: "1",
+				eventAt: "2026-11-14T00:00:00Z",
+			},
+			link: null,
+			summary: "Keep the repository check green",
+			behavior: ["Keep the repository check green"],
+			exclusions: [],
+			acceptance: [
+				{
+					id: "A3",
+					kind: "new_behavior",
+					text: "trusted npm run check passes",
+				},
+			],
+			compatibility: [],
+			limits: [],
+			files: ["src/a.ts"],
+			evidence: [],
+		} satisfies Contract;
+
+		const evidence = trustedEvidence({
+			binding,
+			verdict,
+			gateReceipt: gateReceiptText(verdict),
+			report: reportText(verdict),
+		});
+
+		assert.ok(evidence);
+
+		const result = candidateReviewPrompt({
+			contract,
+			diff: "+export const value = 1;",
+			paths: ["src/a.ts"],
+			judges: [
+				{
+					id: "S3",
+					criteria: ["A3"],
+					judge: "trusted npm run check passes",
+				},
+			],
+			guidance: "",
+			verdict,
+			evidence,
+		});
+
+		assert.ok(result.kind === "ready");
+		assert.match(
+			result.prompt,
+			/"scenario":"S3"[^\n]*trusted npm run check passes/,
+		);
+		const shown = objectOf(evidenceBlock(result.prompt));
+		const checks = arrayOf(shown?.checks) ?? [];
+
+		assert.deepEqual(
+			checks.map((c) => textOf(objectOf(c)?.name)),
+			[...REQUIRED_CI_CHECKS],
+		);
+		assert.ok(checks.every((c) => objectOf(c)?.exitCode === 0));
+		assert.equal(objectOf(shown?.ci)?.conclusion, "success");
+
+		const input: ReviewInput = {
+			binding: {
+				runId: digestOf("run"),
+				round: 0,
+				candidateSha: verdict.candidateSha,
+				patchDigest: verdict.patchDigest,
+				contractDigest: digestOf("contract"),
+				acceptanceDigest: verdict.acceptanceDigest,
+				ciRunId: verdict.ciRunId,
+				originalBase: verdict.originalBase,
+				baseSha: verdict.baseSha,
+			},
+			seats: ["code-review", "security-review", "simplify"],
+			files: new Map([["src/a.ts", 1]]),
+			scenarios: ["S3"],
+			prompt: result.prompt,
+		};
+
+		assert.match(seatPrompt(input, "code-review"), /\["S3"\]/);
+
+		const settle = (outcome: "pass" | "unverifiable") =>
+			reviewCandidate(
+				input,
+				verdict,
+				input.seats.map((seat) => ({
+					seat,
+					findings: [],
+					judgments:
+						seat === "code-review"
+							? [{ scenario: "S3", outcome, reason: "Trusted gates say so." }]
+							: [],
+					requested: "openai/gpt-6.1-sol",
+					observed: null,
+					label: "",
+					fallback: false,
+					tokens: 1,
+				})),
+				{ builder: FAMILY_MISSING, accept: FAMILY_MISSING },
+			);
+
+		const passed = settle("pass");
+		assert.equal(passed.blocking, false);
+		assert.deepEqual(unverifiableOnly(passed), []);
+
+		const blocked = settle("unverifiable");
+		assert.equal(blocked.blocking, true);
+		assert.deepEqual(
+			unverifiableOnly(blocked).map((j) => j.scenario),
+			["S3"],
+		);
+	});
+});
 
 describe("F10-2 feedback review", () => {
 	it("fingerprints ignore lines, digits, claim case and whitespace but bind seat, category and path", () => {

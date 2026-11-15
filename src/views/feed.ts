@@ -17,7 +17,12 @@ import {
 	renderLimitation,
 } from "../candidate/handoff.ts";
 import { fileArtifacts, readStoredContract } from "../contract/artifacts.ts";
-import { familyClaimsHold, reviewR8 } from "../candidate/review.ts";
+import {
+	familyClaimsHold,
+	ownerJudgments,
+	type OwnerJudgment,
+	reviewR8,
+} from "../candidate/review.ts";
 import { frozenRowOf, parseRunStart, isKnownCap } from "../ledger/schema.ts";
 import { terminalFailureOf } from "../ledger/terminal.ts";
 import { objectOf, fieldOf, countOf, textOf, parseJson } from "../core/json.ts";
@@ -46,6 +51,7 @@ export type FeedEntry = AttentionRun & {
 	ci: "Passed" | "Failed" | "Pending";
 	failure: { stage: string; class: string; reason: string } | null;
 	notProven: readonly string[];
+	unverifiable: readonly OwnerJudgment[];
 	steps: readonly FeedStep[];
 };
 
@@ -492,6 +498,12 @@ async function detail(
 		ci: verdict === null ? "Pending" : verdict.pass ? "Passed" : "Failed",
 		failure,
 		notProven: notProvenEntries,
+		unverifiable:
+			book?.kind === "selected" &&
+			entry.reason === "review_unverifiable" &&
+			book.current.review !== undefined
+				? ownerJudgments(book.current.review)
+				: [],
 		steps: await stepReceipts(root, entry, host),
 	};
 }

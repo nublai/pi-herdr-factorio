@@ -440,6 +440,9 @@ export async function preparedReviewFixture(
 	attempt: 1 | 2 = 1,
 	large = false,
 	controller = false,
+	validationFiles: (
+		verdict: Verdict,
+	) => Readonly<Record<string, string>> = () => ({}),
 ) {
 	const root = mkdtempSync(join(tmpdir(), "factory-prepared-review-"));
 
@@ -640,6 +643,9 @@ export async function preparedReviewFixture(
 		JSON.stringify({ modelCalls: 0, candidateSha: verdict.candidateSha }),
 		{ mode: 0o600 },
 	);
+
+	for (const [name, text] of Object.entries(validationFiles(verdict)))
+		writeFileSync(join(validation, name), text, { mode: 0o600 });
 
 	const archive = execFileSync(
 		"tar",

@@ -37,6 +37,7 @@
 			"ci": "Pending",
 			"failure": null,
 			"notProven": [],
+			"unverifiable": [],
 			"steps": [
 				{
 					"stage": "build",

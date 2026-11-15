@@ -267,6 +267,8 @@ const holdLabels = {
 	head_lag: "the PR head has not caught up",
 	checks_incomplete: "waiting for required checks",
 	review_failed: "the review did not pass",
+	review_unverifiable:
+		"review could not verify some judgments from trusted evidence; the owner must decide",
 	review_input_too_large: "the review input is too large",
 	summary_too_large: "the PR summary is too large",
 	pr_identity: "the PR identity could not be verified",
@@ -288,6 +290,41 @@ const holdLabels = {
 } satisfies Record<HandoffReason, string>;
 
 describe("held marker text", () => {
+	it("lists unverifiable judgments on a review_unverifiable hold as inert text within the cap (#735)", () => {
+		const value = marker({ status: "blocked", stage: "review" });
+
+		const judgments = [
+			{ scenario: "S3", reason: "No trusted npm run check result is visible." },
+			{ scenario: "S4", reason: "@owner see #12 <b>now</b>" },
+		];
+
+		const body = formatMarker(value, "review_unverifiable", 0, judgments);
+		assert.match(body, /\(review_unverifiable\)/);
+		assert.match(body, /no repair runs:\n- S3: No trusted npm run check/);
+		assert.match(body, /\n- S4: /);
+		assert.doesNotMatch(body, /@owner|#12|<b>/);
+		assert.equal(parseMarker(body).kind, "marker");
+		assert.equal(
+			formatMarker(value, "review_unverifiable", 0, judgments),
+			body,
+		);
+
+		assert.doesNotMatch(
+			formatMarker(value, "review_failed", 0, judgments),
+			/S3/,
+		);
+
+		const many = Array.from({ length: 10 }, (_, i) => ({
+			scenario: `S${i + 1}`,
+			reason: "<&>".repeat(53),
+		}));
+
+		const capped = formatMarker(value, "review_unverifiable", 0, many);
+		assert.ok(Buffer.byteLength(capped, "utf8") <= MARKER_MAX_BYTES);
+		assert.match(capped, /- \d+ more are listed in the owner feed\.\n$/);
+		assert.equal(parseMarker(capped).kind, "marker");
+	});
+
 	it("uses stable neutral text when a candidate hold reason is unavailable", () => {
 		const value = marker({
 			v: 3,

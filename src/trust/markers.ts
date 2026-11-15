@@ -1,5 +1,7 @@
 import type { CommentEdit, IssueComment } from "../github/adapter.ts";
 import type { HandoffReason } from "../candidate/state.ts";
+import type { OwnerJudgment } from "../candidate/review.ts";
+import { inert } from "../contract/render.ts";
 import { type ControllerIdentity, EXE_DEV_PLATFORM } from "./platform.ts";
 import { type Digest, isDigest, runIdOf } from "../core/run.ts";
 import { isStage, type Stage } from "../core/stages.ts";
@@ -253,6 +255,8 @@ const HOLD_TEXT: Readonly<Record<HandoffReason, string>> = {
 	head_lag: "the PR head has not caught up",
 	checks_incomplete: "waiting for required checks",
 	review_failed: "the review did not pass",
+	review_unverifiable:
+		"review could not verify some judgments from trusted evidence; the owner must decide",
 	review_input_too_large: "the review input is too large",
 	summary_too_large: "the PR summary is too large",
 	pr_identity: "the PR identity could not be verified",
@@ -273,11 +277,44 @@ const HOLD_TEXT: Readonly<Record<HandoffReason, string>> = {
 	withdrawn: "authorization was withdrawn",
 };
 
-/** The full comment body: the marker line, then one line a person can read. */
+function withOwnerJudgments(
+	body: string,
+	judgments: readonly OwnerJudgment[],
+): string {
+	if (judgments.length === 0) return body;
+
+	const more = (n: number) =>
+		n === 0 ? "" : `- ${n} more are listed in the owner feed.\n`;
+
+	let text = `${body}Review could not verify these judgments from trusted evidence, so no repair runs:\n`;
+	let shown = 0;
+
+	for (const j of judgments) {
+		const line = `- ${j.scenario}: ${inert(j.reason)}\n`;
+
+		if (
+			Buffer.byteLength(text + line + more(judgments.length), "utf8") >
+			MARKER_MAX_BYTES
+		)
+			break;
+		text += line;
+		shown++;
+	}
+
+	const full = text + more(judgments.length - shown);
+
+	return Buffer.byteLength(full, "utf8") <= MARKER_MAX_BYTES ? full : body;
+}
+
+/**
+ * The full comment body: the marker line, then one line a person can read.
+ * A run held as `review_unverifiable` lists its unverifiable judgments below.
+ */
 export function formatMarker(
 	marker: Marker,
 	holdReason?: HandoffReason,
 	displayRound = marker.round,
+	judgments: readonly OwnerJudgment[] = [],
 ): string {
 	let statusText = STATUS_TEXT[marker.status];
 
@@ -294,7 +331,9 @@ export function formatMarker(
 		throw new Error("a marker exceeds the size cap");
 	}
 
-	return body;
+	return marker.status === "blocked" && holdReason === "review_unverifiable"
+		? withOwnerJudgments(body, judgments)
+		: body;
 }
 
 function parseJsonText(text: string): JsonValue | undefined {

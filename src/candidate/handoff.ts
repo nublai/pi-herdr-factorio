@@ -15,6 +15,7 @@ import {
 	type ReviewReceipt,
 	type ReviewInputRefusal,
 	type ReviewSeat,
+	unverifiableOnly,
 } from "./review.ts";
 import type {
 	ReadAssessment,
@@ -2490,10 +2491,12 @@ export function handoffCandidate(
 					current: { ...updated.current, review: event.result.review },
 				};
 				const fingerprints = findingFingerprints(event.result.review);
+				const ownerOnly = unverifiableOnly(event.result.review).length > 0;
 
 				if (
 					state.current.intent.round > 0 &&
 					event.result.review.blocking &&
+					!ownerOnly &&
 					state.history.some(
 						(g) =>
 							g.intent.round < state.current.intent.round &&
@@ -2533,15 +2536,19 @@ export function handoffCandidate(
 							? state.published === null
 								? hold(updated, "evidence_unavailable", now)
 								: stopRound(updated, "evidence_unavailable", now)
-							: failOrRepair(
-									updated,
-									{
-										kind: "review",
-										assessment: passed,
-										review: reviewReceiptDigest(review),
-									},
-									now,
-								);
+							: ownerOnly
+								? state.published === null
+									? hold(updated, "review_unverifiable", now)
+									: stopRound(updated, "review_unverifiable", now)
+								: failOrRepair(
+										updated,
+										{
+											kind: "review",
+											assessment: passed,
+											review: reviewReceiptDigest(review),
+										},
+										now,
+									);
 				}
 
 				break;

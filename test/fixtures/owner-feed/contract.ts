@@ -85,6 +85,7 @@ const ENTRY = {
 	ci: "string",
 	failure: "object|null",
 	notProven: "array",
+	unverifiable: "array",
 	steps: "array",
 } satisfies FieldTypes;
 

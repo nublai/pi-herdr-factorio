@@ -146,6 +146,7 @@ An entry of type `FeedEntry` in `src/views/feed.ts` has these fields.
 | `ci` | string | `Passed`, `Failed` or `Pending`. |
 | `failure` | object or null | `{stage, class, reason}` from the ledger. |
 | `notProven` | array of string | Fixed sentences about what checks and review did not prove. |
+| `unverifiable` | array | `{scenario, reason}` for each judgment review could not verify, when the run is held with reason `review_unverifiable`. Otherwise empty. See [Unverifiable judgments](#unverifiable-judgments). |
 | `steps` | array | One `FeedStep` per model stage that left a receipt. |
 
 A `FeedStep` has these members.
@@ -174,6 +175,12 @@ The controller records the questions comment reference from the authenticated PO
 The feed checks that receipt's private paths and bindings against `questions.json`, then constructs `https://github.com/<repo>/issues/<issue>#issuecomment-<id>`. It never uses a URL from issue text, comment text or a model reply. Reading the feed still makes no GitHub call. Old runs without this receipt, or runs whose reference could not be saved, have `questionsUrl: null`. This read-only change does not backfill historical comments or block clarification reporting when link evidence is unavailable.
 
 Shep's bridge must retain `questionsUrl` and use it as the tap target for an entry waiting for an answer. Fall back to `issueUrl` when it is null. Other entries keep the existing `prUrl` then `issueUrl` target. `version` stays 1.
+
+### Unverifiable judgments
+
+When review blocks only on `unverifiable` judgments, the run starts no repair and waits for the owner with reason `review_unverifiable`, kind `blocked` and group `needs_you` ([Factory CLI](factory-cli.md#unverifiable-review-routing)). `unverifiable` lists those judgments, at most 10. `scenario` is a scenario ID of the form `S<n>`. `reason` is the reviewer's sentence, a model's text, with control and bidirectional characters replaced by spaces and cut to 160 code points. Every other entry has `unverifiable: []`.
+
+This is an added v1 field and an added `reason` value. A v1 reader that ignores it keeps working and shows the new reason as plain text. Shep's bridge needs no change; to show the list, it can read `unverifiable` and render it as plain text.
 
 ### Attention kinds and groups
 
@@ -254,7 +261,7 @@ The CLI has no hold command. A phone action that changes the hold, or does anyth
 
 ## Text fields
 
-`title` carries free text from outside the factory, bounded by `plainTitle`. `intakeRef` also comes from the issue body, but accepts only the strict ASCII identifier described above. No issue body or model-written prose appears in the feed.
+`title` carries free text from outside the factory, bounded by `plainTitle`. `intakeRef` also comes from the issue body, but accepts only the strict ASCII identifier described above. No issue body appears in the feed. The only model-written prose is `unverifiable[].reason`, bounded as the table says.
 
 | Field | Where the text comes from | Bound today |
 | --- | --- | --- |
@@ -262,7 +269,8 @@ The CLI has no hold command. A phone action that changes the hold, or does anyth
 | `entries[].intakeRef` | The saved admission snapshot body. | 8 to 64 ASCII letters, digits or hyphens, or null. |
 | `entries[].reason` | The controller. | A closed vocabulary. The `HandoffReason` values that `wireReason` checks (`src/candidate/codec.ts:653`), `candidate_book_unavailable`, `feedback_overflow`, `working_generation`, `claim_unverified:<why>[:<failure>]` and `feedback_unavailable:<reason>[:<failure>]`. Each part of the last two comes from a fixed list in `unverifiedHolds` and `feedbackHolds` in `src/views/attention.ts`. |
 | `entries[].failure` | The ledger row or terminal record. | `stage` and `class` are fixed lists. `reason` must match `^[a-z][a-z0-9_]{0,63}$` (`src/ledger/schema.ts:456`, `src/ledger/schema.ts:636`). |
-| `entries[].notProven` | Fixed sentences from `renderLimitation` (`src/candidate/handoff.ts:2710`), and one fallback sentence in `src/views/feed.ts`. | Criterion and scenario IDs appear only when they match `A<n>` or `S<n>`. A judgment outcome appears only as a value of `JUDGMENT_OUTCOMES` (`src/candidate/review.ts:74`). Criterion text, scenario text and review reasons never appear. |
+| `entries[].unverifiable[]` | The stored review receipt of the held generation. `reason` is written by the review model. | `scenario` matches `S<n>`, otherwise `S?`. `reason` comes from `ownerJudgments` in `src/candidate/review.ts`: control characters (code points below 32 and 127 to 159) and bidirectional marks become a space, then the first 160 code points are kept. It does not escape HTML or strip Markdown. At most 10 entries. |
+| `entries[].notProven` | Fixed sentences from `renderLimitation` (`src/candidate/handoff.ts:2717`), and one fallback sentence in `src/views/feed.ts`. | Criterion and scenario IDs appear only when they match `A<n>` or `S<n>`. A judgment outcome appears only as a value of `JUDGMENT_OUTCOMES` (`src/candidate/review.ts:226`). Criterion text, scenario text and review reasons never appear. |
 | `gaps[]` | The controller. | Fixed codes (`unrecognized_claim`, `state_unavailable`), or a code with an issue number or a 12-character run prefix (`invalid_claim:<12 characters>`, `ambiguous_issue:<n>`, `candidate_book_unavailable:<12 characters>`, `invalid_link:<12 characters>`, `duplicate_intake_marker:<12 characters>`). |
 | `unreadable[].reason` | The controller. | One constant sentence in `src/views/feed.ts`. |
 | `entries[].steps[].stage` | A stage receipt the controller wrote. | A model stage name matching its directory. |

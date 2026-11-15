@@ -37,6 +37,7 @@
 			"ci": "Passed",
 			"failure": null,
 			"notProven": ["The saved checks and review cannot be verified here."],
+			"unverifiable": [],
 			"steps": []
 		}
 	],
