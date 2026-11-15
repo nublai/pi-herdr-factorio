@@ -2358,6 +2358,195 @@ describe("runStage settlement on a queue update", () => {
 });
 
 describe("private build executor", () => {
+	for (const scenario of [
+		"clean",
+		"revised",
+		"still-unrun",
+		"new-and-unrun",
+		"replaced",
+	] as const)
+		it(`build settlement gives one same-session revision for unrun tests: ${scenario}`, {
+			timeout: 30_000,
+		}, async (t) => {
+			const dir = mkdtempSync(join(tmpdir(), "factory-build-draft-"));
+			t.after(() => rmSync(dir, { recursive: true, force: true }));
+			const stateDir = join(dir, "state");
+			const root = join(dir, "bundle");
+			const staging = join(root, "staging");
+			mkdirSync(staging, { recursive: true });
+			writeFileSync(join(staging, "marker"), "bundle");
+			const hash = await manifestDigest(staging);
+			assert.ok(hash);
+			fs.renameSync(staging, join(root, `assets-${hash}`));
+			symlinkSync(`assets-${hash}`, join(root, "current"));
+			const base = join(stateDir, "pristine", RUN);
+			const workspace = join(dir, "workspace");
+
+			mkdirSync(join(stateDir, "stages", RUN), { recursive: true });
+
+			for (const path of [base, workspace]) {
+				mkdirSync(join(path, "test"), { recursive: true });
+				writeFileSync(join(path, "test/old.test.ts"), "base");
+				writeFileSync(
+					join(path, "package.json"),
+					'{"scripts":{"test":"node --test"}}',
+				);
+			}
+
+			const repo = "owner/repo",
+				sha = "a".repeat(40);
+
+			assert.ok(isRepoSlug(repo) && isGitSha(sha));
+
+			const contract: Contract = {
+				version: 2,
+				runId: digest(RUN),
+				issue: 1,
+				base: { repo, sha },
+				snapshot: {
+					digest: digestOf("snapshot"),
+					source: "unedited",
+					eventId: "1",
+					eventAt: "2026-11-15T00:00:00Z",
+				},
+				link: null,
+				summary: "Add a regression",
+				behavior: ["Add a regression"],
+				exclusions: [],
+				acceptance: [
+					{ id: "A1", kind: "new_behavior", text: "Regression is covered" },
+				],
+				compatibility: [],
+				limits: [],
+				files: [],
+				evidence: [],
+				replacesTests:
+					scenario === "replaced"
+						? [
+								{
+									path: "test/old.test.ts",
+									test: "old",
+									reason: "New behavior",
+								},
+							]
+						: [],
+			};
+
+			const bytes = contractBytes(contract),
+				contractDigest = contractDigestOf(bytes);
+
+			assert.equal(
+				await fileRunFiles(stateDir).writeContract({
+					contract,
+					bytes,
+					digest: contractDigest,
+				}),
+				true,
+			);
+			let prompts = 0;
+
+			const h = harness([
+				(command, pi) => {
+					if (command.type === "prompt") {
+						prompts++;
+						writeFileSync(join(workspace, "value.ts"), "new");
+
+						if (scenario !== "clean")
+							writeFileSync(join(workspace, "test/old.test.ts"), "changed");
+
+						if (
+							scenario === "new-and-unrun" ||
+							(scenario === "revised" && prompts === 2)
+						) {
+							writeFileSync(join(workspace, "test/new.test.ts"), "new test");
+
+							if (scenario === "revised")
+								writeFileSync(join(workspace, "test/old.test.ts"), "base");
+						}
+					}
+
+					if (command.type === "get_last_assistant_text")
+						pi.emit({
+							type: "response",
+							id: command.id ?? "",
+							command: "get_last_assistant_text",
+							success: true,
+							data: { text: "done" },
+						});
+					replayer([
+						started("x"),
+						{ type: "agent_start" },
+						{ type: "turn_start" },
+						assistant({ tokens: 12 }),
+						{ type: "agent_settled", aborted: false },
+					])(command, pi);
+				},
+			]);
+
+			const executor = executorModule.sandboxExecutor({
+				platform: EXE_DEV_PLATFORM,
+				stateDir,
+				root,
+				arch: "x64",
+				usernsLimit: async () => "15000",
+				xdgRuntimeDir: "/run/user/1000",
+				log: () => {},
+				exec: async (command) => ({
+					code: 0,
+					stdout: command === "bwrap" ? "bubblewrap 0.9.0\n" : "",
+					stderr: "",
+				}),
+				host: () => h.host,
+			});
+
+			assert.equal(await executor.preflight(), true);
+
+			const binding = {
+				runId: digest(RUN),
+				baseSha: sha,
+				contractDigest,
+				acceptanceDigest: digestOf("suite"),
+			};
+
+			const launch = await executor.launch({
+				...input({ stage: "build" }),
+				workspace,
+				tools: ["read", "write"],
+				skills: [],
+				build: { binding, command: "npm test", allowNoChange: false },
+			});
+
+			assert.equal(launch.kind, "started");
+
+			if (launch.kind !== "started") return;
+			assert.equal((await launch.done).kind, "passed");
+
+			const revisions = h.pis[0]!.received.filter(
+				(c) => c.type === "prompt",
+			).slice(1);
+
+			assert.equal(
+				revisions.length,
+				scenario === "clean" || scenario === "replaced" ? 0 : 1,
+			);
+
+			if (revisions.length > 0) {
+				assert.match(String(revisions[0]!.message), /test\/old\.test\.ts/);
+				assert.match(String(revisions[0]!.message), /base bytes/);
+				assert.match(String(revisions[0]!.message), /new test file/);
+			}
+
+			assert.equal(h.pis.length, 1);
+			assert.equal(h.receipts[0]!.usage.total, prompts * 12);
+			const collected = readPatch(stateDir, binding);
+			assert.equal(collected.kind, "found");
+
+			if (collected.kind === "found")
+				assert.equal(
+					collected.receipt.changedPaths.includes("test/old.test.ts"),
+					scenario !== "clean" && scenario !== "revised",
+				);
+		});
 	it("loads the bundled Herdr extension exactly when build delegation is granted", () => {
 		const ordinary = piCommand(model("openai/gpt-6.1-sol"), false);
 		const delegated = piCommand(model("openai/gpt-6.1-sol"), true);

@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import {
 	type DraftFeedback,
+	type UnrunTestFeedback,
 	draftNeedsRevision,
 } from "../../src/candidate/diagnosis.ts";
 import type { ModelId } from "../../src/config/schema.ts";
@@ -102,7 +103,7 @@ export type StageRunInput = {
 	readonly draftCheck?: (
 		text: string,
 		context: DraftCheckContext,
-	) => Promise<DraftFeedback | null>;
+	) => Promise<DraftFeedback | UnrunTestFeedback | null>;
 	readonly settings: StageRunSettings;
 	readonly remainingRunTokens: number;
 	readonly signal: AbortSignal;
@@ -396,7 +397,9 @@ async function runSession(
 	let checkingDraft = false;
 	let readingDraft = false;
 	const draftAbort = new AbortController();
-	let pendingDraft: Promise<DraftFeedback | null> | null = null;
+
+	let pendingDraft: Promise<DraftFeedback | UnrunTestFeedback | null> | null =
+		null;
 
 	const readChild = (sessionFile: string | null): Promise<void> => {
 		pendingReads += 1;
@@ -525,9 +528,9 @@ async function runSession(
 			const last = tracker.lastAssistant;
 
 			if (
-				input.stage !== "accept" ||
+				(input.stage !== "accept" && input.stage !== "build") ||
 				input.draftCheck === undefined ||
-				ledger.draftRuns >= DRAFT_MAX_RUNS ||
+				ledger.draftRuns >= (input.stage === "build" ? 1 : DRAFT_MAX_RUNS) ||
 				settledOutcome(last).outcome.kind !== "passed"
 			) {
 				end("settled");
@@ -543,7 +546,10 @@ async function runSession(
 
 			const wall = stage.deadline - host.now();
 
-			if (tokens < DRAFT_RESERVE_TOKENS || wall < DRAFT_RESERVE_MS) {
+			if (
+				input.stage === "accept" &&
+				(tokens < DRAFT_RESERVE_TOKENS || wall < DRAFT_RESERVE_MS)
+			) {
 				ledger.draftSkips.push(
 					tokens < DRAFT_RESERVE_TOKENS ? "tokens" : "wall",
 				);
@@ -553,18 +559,21 @@ async function runSession(
 			}
 
 			readingDraft = true;
-			let draft: string | null = null;
+			let draft: string | null = input.stage === "build" ? "" : null;
 
-			const reply = new Promise<void>((done) => {
-				textReply = (value) => {
-					draft = value;
-					done();
-				};
-			});
+			if (input.stage === "accept") {
+				const reply = new Promise<void>((done) => {
+					textReply = (value) => {
+						draft = value;
+						done();
+					};
+				});
 
-			sendCommand(pi, { id: OUTPUT_ID, type: "get_last_assistant_text" });
-			await waitFor(reply, Math.min(OUTPUT_WAIT_MS, wall));
-			textReply = null;
+				sendCommand(pi, { id: OUTPUT_ID, type: "get_last_assistant_text" });
+				await waitFor(reply, Math.min(OUTPUT_WAIT_MS, wall));
+				textReply = null;
+			}
+
 			readingDraft = false;
 
 			if (finished) return;
@@ -575,18 +584,18 @@ async function runSession(
 				return;
 			}
 
-			finalText = draft;
+			if (input.stage === "accept") finalText = draft;
 			checkingDraft = true;
 			const run = ledger.draftRuns === 0 ? 1 : 2;
-			let feedback: DraftFeedback | null;
+			let feedback: DraftFeedback | UnrunTestFeedback | null;
 
 			try {
 				pendingDraft = input.draftCheck(draft, {
 					signal: draftAbort.signal,
-					deadline: Math.min(
-						host.now() + 60000,
-						stage.deadline - DRAFT_RESERVE_MS,
-					),
+					deadline:
+						input.stage === "build"
+							? stage.deadline
+							: Math.min(host.now() + 60000, stage.deadline - DRAFT_RESERVE_MS),
 					run,
 				});
 				feedback = await pendingDraft;
@@ -606,7 +615,10 @@ async function runSession(
 
 			ledger.draftRuns++;
 
-			if (!draftNeedsRevision(feedback)) {
+			if (
+				feedback.verdict !== "unrun_test_edits" &&
+				!draftNeedsRevision(feedback)
+			) {
 				end("settled");
 
 				return;
@@ -619,10 +631,13 @@ async function runSession(
 			sendCommand(pi, {
 				id,
 				type: "prompt",
-				message: draftFeedbackPrompt(
-					{ ...feedback, run },
-					randomBytes(16).toString("hex"),
-				),
+				message:
+					feedback.verdict === "unrun_test_edits"
+						? feedback.message
+						: draftFeedbackPrompt(
+								{ ...feedback, run },
+								randomBytes(16).toString("hex"),
+							),
 			});
 		};
 

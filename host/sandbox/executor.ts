@@ -23,10 +23,12 @@ import {
 	readRepairBuildResult,
 	roundKey,
 	storePatch,
+	workspaceTestEdits,
 	type PatchRead,
 	type VisibleTests,
 } from "../../src/candidate/build.ts";
 import { parseReviewReceipt } from "../../src/candidate/codec.ts";
+import { unrunTestFeedback } from "../../src/candidate/diagnosis.ts";
 import {
 	builderDispositions,
 	builderFindingDispositions,
@@ -1189,6 +1191,10 @@ export function sandboxExecutor(config: SandboxExecutorConfig): StageExecutor {
 								},
 					);
 
+					const contract = await fileRunFiles(config.stateDir).readContract(
+						runId,
+					);
+
 					rmSync(workspace, { recursive: true, force: true });
 					await prepareRepairTree(
 						join(config.stateDir, "pristine", runId),
@@ -1196,6 +1202,7 @@ export function sandboxExecutor(config: SandboxExecutorConfig): StageExecutor {
 						previous.patch,
 						previous.receipt.changedPaths,
 						feedback,
+						contract.kind === "found" ? contract.contract.replacesTests : [],
 					);
 
 					if (owner?.full != null)
@@ -1452,7 +1459,28 @@ export function sandboxExecutor(config: SandboxExecutorConfig): StageExecutor {
 							input: input.acceptDraft,
 							fetch: config.fetchTarball,
 						})
-					: undefined;
+					: input.stage === "build" && input.build !== undefined
+						? async () => {
+								const contract = await fileRunFiles(
+									config.stateDir,
+								).readContract(input.runId);
+
+								if (
+									contract.kind !== "found" ||
+									contract.digest !== input.build?.binding.contractDigest
+								)
+									return null;
+
+								return unrunTestFeedback(
+									workspaceTestEdits(
+										join(config.stateDir, "pristine", input.runId),
+										input.workspace,
+										contract.contract.replacesTests ?? [],
+										(input.round ?? 0) > 0,
+									).unrunTestEdits,
+								);
+							}
+						: undefined;
 
 			const done = runStage(
 				{
