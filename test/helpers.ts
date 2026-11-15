@@ -447,6 +447,7 @@ export async function preparedReviewFixture(
 	validationFiles: (
 		verdict: Verdict,
 	) => Readonly<Record<string, string>> = () => ({}),
+	replacesTests: Contract["replacesTests"] = undefined,
 ) {
 	const root = mkdtempSync(join(tmpdir(), "factory-prepared-review-"));
 
@@ -480,7 +481,7 @@ export async function preparedReviewFixture(
 
 	const issue = fakeIssue(1);
 
-	const contract: Contract = {
+	const unreplaced: Contract = {
 		version: 2,
 		runId,
 		issue: 1,
@@ -503,6 +504,9 @@ export async function preparedReviewFixture(
 		files: ["src/a.ts"],
 		evidence: [],
 	};
+
+	const contract: Contract =
+		replacesTests === undefined ? unreplaced : { ...unreplaced, replacesTests };
 
 	const bytes = contractBytes(contract),
 		digest = contractDigestOf(bytes);
@@ -570,7 +574,7 @@ export async function preparedReviewFixture(
 		baseSha,
 		gateSha: baseSha,
 		acceptanceDigest: suite.receipt.acceptanceDigest,
-		unjudged: ["S1"],
+		unjudged: ["S1", ...(replacesTests ?? []).map((_, i) => `T${i + 1}`)],
 	};
 
 	let { book, execution } = issuedReviewFixture(
