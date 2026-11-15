@@ -1,7 +1,8 @@
 import { randomBytes } from "node:crypto";
+import { createRequire } from "node:module";
 import { posix } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import ts from "typescript";
+import type * as TS from "typescript";
 import type { RetryFeedback } from "../candidate/diagnosis.ts";
 import { type GitSha, type Guidance, isGitSha } from "../config/schema.ts";
 import {
@@ -360,8 +361,16 @@ export function isAcceptancePath(path: string): boolean {
 	);
 }
 
+const loadTypescript = (): typeof TS =>
+	createRequire(import.meta.url)("typescript");
+
+let typescript: typeof TS | null = null;
+
 function literalTestReads(content: string, check: string): readonly string[] {
 	if (Buffer.byteLength(content) > FILE_MAX_BYTES) return [];
+
+	typescript ??= loadTypescript();
+	const ts = typescript;
 
 	const scanner = ts.createScanner(
 		ts.ScriptTarget.Latest,
@@ -395,7 +404,7 @@ function literalTestReads(content: string, check: string): readonly string[] {
 			nesting--;
 	}
 
-	let source: ts.SourceFile;
+	let source: TS.SourceFile;
 
 	try {
 		source = ts.createSourceFile(
@@ -410,8 +419,8 @@ function literalTestReads(content: string, check: string): readonly string[] {
 		throw error;
 	}
 
-	const nodes: ts.Node[] = [];
-	const pending: ts.Node[] = [source];
+	const nodes: TS.Node[] = [];
+	const pending: TS.Node[] = [source];
 
 	while (pending.length > 0) {
 		const node = pending.pop();
@@ -424,12 +433,12 @@ function literalTestReads(content: string, check: string): readonly string[] {
 	}
 
 	const imports = new Map<string, string>();
-	const bindings = new Map<string, ts.Expression>();
+	const bindings = new Map<string, TS.Expression>();
 	const declared = new Set<string>();
 	const ambiguous = new Set<string>();
 
-	const declare = (name: ts.BindingName) => {
-		const names: ts.BindingName[] = [name];
+	const declare = (name: TS.BindingName) => {
+		const names: TS.BindingName[] = [name];
 
 		while (names.length > 0) {
 			const current = names.pop();
@@ -497,7 +506,7 @@ function literalTestReads(content: string, check: string): readonly string[] {
 					bindings.set(declaration.name.text, declaration.initializer);
 	}
 
-	const symbol = (node: ts.Expression, depth = 0): string | null => {
+	const symbol = (node: TS.Expression, depth = 0): string | null => {
 		if (depth > 20) return null;
 
 		if (ts.isIdentifier(node))
@@ -512,7 +521,7 @@ function literalTestReads(content: string, check: string): readonly string[] {
 		return null;
 	};
 
-	const meta = (node: ts.Expression | undefined, member: string): boolean =>
+	const meta = (node: TS.Expression | undefined, member: string): boolean =>
 		node !== undefined &&
 		ts.isPropertyAccessExpression(node) &&
 		node.name.text === member &&
@@ -534,7 +543,7 @@ function literalTestReads(content: string, check: string): readonly string[] {
 	let remainingExpressions = 4096;
 
 	const expression = (
-		node: ts.Expression | undefined,
+		node: TS.Expression | undefined,
 		depth = 0,
 	): string | null => {
 		if (node === undefined || depth > 20 || remainingExpressions-- <= 0)

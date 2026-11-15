@@ -210,6 +210,32 @@ const MUST_REJECT_JUDGES = [
 ];
 
 describe("held-out test-path dependencies", () => {
+	it("imports acceptance without loading the TypeScript compiler", {
+		timeout: 30000,
+	}, () => {
+		const module = new URL(
+			"../../../src/contract/acceptance.ts",
+			import.meta.url,
+		).href;
+
+		execFileSync(
+			process.execPath,
+			[
+				"--experimental-strip-types",
+				"--input-type=module",
+				"-e",
+				`
+			import { createRequire } from 'node:module';
+			const require = createRequire(import.meta.url);
+			const compiler = require.resolve('typescript');
+			await import(${JSON.stringify(module)});
+			if (require.cache[compiler] !== undefined) throw new Error('acceptance import loaded compiler');
+		`,
+			],
+			{ timeout: 10000, encoding: "utf8" },
+		);
+	});
+
 	const existing = new Set([
 		"test/host/sandbox/launcher.test.ts",
 		"src/version.ts",
