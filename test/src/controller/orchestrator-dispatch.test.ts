@@ -12,6 +12,7 @@ import { digestOf, runIdOf } from "../../../src/core/run.ts";
 import {
 	FakeGitHub,
 	fakeIssue,
+	networkError,
 	labelEvent,
 	TRUSTED_RUN_CAP,
 } from "../../fake-ticket-adapter.ts";
@@ -275,6 +276,35 @@ describe("Orchestrator switches and per-tick reads", () => {
 		assert.equal(store.records.size, 0);
 	});
 
+	for (const [local, reason] of [
+		["unavailable", "state_unavailable"],
+		["disabled", "locally_disabled"],
+	] as const) {
+		it(`recovers from admission-time ${reason} without an issue update`, async () => {
+			const { github, store, start } = world();
+			const issue = github.add(labeled(14));
+			const updatedAt = issue.updatedAt;
+
+			github.now = updatedAt;
+			let reads = 0;
+
+			store.localSwitch = async () => (++reads === 2 ? local : "enabled");
+
+			const controller = start();
+			const first = await controller.tick();
+
+			assert.deepEqual(first.refused, [{ issue: 14, reasons: [reason] }]);
+			assert.deepEqual(first.runs, []);
+			assert.equal(store.records.size, 0);
+
+			const second = await controller.tick();
+
+			assert.equal(issue.updatedAt, updatedAt);
+			assert.deepEqual(runIssues(second), [14]);
+			assert.equal(store.records.size, 1);
+		});
+	}
+
 	it("still reconciles when the workflow cannot load", async () => {
 		const { github, start } = world();
 		const issue = github.add(labeled(14));
@@ -426,6 +456,45 @@ describe("Orchestrator restart recovery", () => {
 		assert.deepEqual(statuses(github, 14), ["1:claimed", "2:blocked"]);
 		assert.ok(events(logs).includes("claim_adopted"));
 		assert.equal(executor.launches.length, 2);
+	});
+
+	it("releases a blocked restart with a stale ready list entry when the direct GET is unlabeled", async () => {
+		const { github, executor, wire, start } = world();
+
+		github.add(labeled(14));
+		github.add(labeled(15));
+		await start().tick();
+		github.add(labeled(16));
+		let directReads = 0;
+		wire.intercept = async (command, args) => {
+			if (!args.includes(`repos/${repo}/issues/14`))
+				return github.exec(command, args);
+
+			directReads++;
+			const issue = github.issues.get(14);
+
+			assert.ok(issue);
+			const labels = issue.labels;
+
+			issue.labels = [];
+
+			try {
+				return await github.exec(command, args);
+			} finally {
+				issue.labels = labels;
+			}
+		};
+
+		const report = await start().tick();
+
+		assert.ok(directReads > 0);
+		assert.deepEqual(runIssues(report), [15, 16]);
+		assert.equal(statuses(github, 14).at(-1)?.endsWith(":released"), true);
+		assert.equal(
+			executor.launches.filter((launch) => launch.runId === runOf(14)).length,
+			1,
+		);
+		assert.ok(executor.launches.some((launch) => launch.runId === runOf(16)));
 	});
 
 	it("records a missing workspace, replays the stage and invents nothing", async () => {
@@ -971,6 +1040,37 @@ describe("Orchestrator retries and stalls", () => {
 			statuses(github, 14).at(-1)?.endsWith(":budget_exhausted"),
 			true,
 		);
+	});
+
+	it("defers a due retry when its direct issue GET fails", async () => {
+		const { github, clock, executor, wire, start } = world();
+
+		github.add(labeled(14));
+		executor.behaviors = [{ kind: "fail", usage: 0 }];
+		const controller = start();
+
+		await controller.tick();
+		const queued = await controller.tick();
+
+		assert.equal(queued.runs[0]?.status, "retrying");
+		clock.t += 10_000;
+		let directReads = 0;
+		wire.intercept = async (command, args) => {
+			if (args.includes(`repos/${repo}/issues/14`)) {
+				directReads++;
+
+				return networkError();
+			}
+
+			return github.exec(command, args);
+		};
+
+		const report = await controller.tick();
+
+		assert.ok(directReads > 0);
+		assert.deepEqual(runIssues(report), [14]);
+		assert.equal(executor.launches.length, 1);
+		assert.ok(report.runs[0]?.unverified);
 	});
 
 	it("releases a queued retry whose issue closed instead of launching it", async () => {
