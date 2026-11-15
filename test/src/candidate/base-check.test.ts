@@ -149,9 +149,13 @@ test("v2 criteria are strict objects and suite kinds are derived with exclusive 
 			"malformed",
 		);
 
-	const parsed = writeAcceptance(JSON.stringify(suite), {
-		acceptance: [...criteria],
-	});
+	const parsed = writeAcceptance(
+		JSON.stringify(suite),
+		{
+			acceptance: [...criteria],
+		},
+		new Set(),
+	);
 
 	assert.equal(parsed.kind, "suite");
 
@@ -174,9 +178,13 @@ test("v2 criteria are strict objects and suite kinds are derived with exclusive 
 		],
 	])
 		assert.equal(
-			writeAcceptance(JSON.stringify({ ...suite, scenarios }), {
-				acceptance: [...criteria],
-			}).kind,
+			writeAcceptance(
+				JSON.stringify({ ...suite, scenarios }),
+				{
+					acceptance: [...criteria],
+				},
+				new Set(),
+			).kind,
 			"malformed",
 		);
 });
@@ -424,6 +432,7 @@ export async function baseFixture(
 			],
 		}),
 		contract,
+		new Set(),
 	);
 
 	assert.ok(parsed.kind === "suite");
@@ -865,6 +874,7 @@ async function controllerWorld(
 			],
 		}),
 		contract,
+		new Set(),
 	);
 
 	assert.ok(parsed.kind === "suite");
@@ -1900,6 +1910,7 @@ async function replay(
 			})),
 		}),
 		contract,
+		new Set(),
 	);
 
 	assert.ok(parsed.kind === "suite", JSON.stringify(parsed));

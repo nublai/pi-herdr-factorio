@@ -567,6 +567,12 @@ describe("Orchestrator base qualification", () => {
 		);
 		assert.equal(first.acceptDraft.contract.runId, runOf(14));
 		assert.equal(first.acceptDraft.issue, 14);
+		assert.ok(executor.tree.size > 0);
+		const inventory = first.acceptDraft.files;
+		assert.ok(
+			[...executor.tree.keys()].every((path) => inventory.has(path)),
+			"draft validation receives the trusted checkout inventory",
+		);
 		assert.equal(
 			first.acceptDraft.baseSha,
 			first.acceptDraft.contract.base.sha,

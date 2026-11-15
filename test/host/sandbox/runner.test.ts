@@ -6081,7 +6081,7 @@ describe("pinned zero-token accept replay", () => {
 
 		const unchanged = contractDigestOf(contractBytes(contract));
 		const suiteText = JSON.stringify(pin.suite);
-		const suite = writeAcceptance(suiteText, contract);
+		const suite = writeAcceptance(suiteText, contract, new Set());
 		assert.ok(suite.kind === "suite");
 		const upstream = await startEchoFixture(t, 0);
 		const expectedBodies: string[] = [];
@@ -6404,7 +6404,10 @@ describe("pinned zero-token accept replay", () => {
 			assert.equal(error, null);
 			assert.equal(result.kind, "passed");
 			assert.equal(h.outputs[0], suiteText);
-			assert.equal(writeAcceptance(h.outputs[0] ?? "", contract).kind, "suite");
+			assert.equal(
+				writeAcceptance(h.outputs[0] ?? "", contract, new Set()).kind,
+				"suite",
+			);
 			assert.equal(result.receipt.guardStop, null);
 			assert.equal(bodies.length, pin.expectedRequests[variant]);
 			assert.equal(result.receipt.efficiency?.modelRequests, bodies.length);
