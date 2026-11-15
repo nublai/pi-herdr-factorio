@@ -1,5 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { posix } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import ts from "typescript";
 import type { RetryFeedback } from "../candidate/diagnosis.ts";
 import { type GitSha, type Guidance, isGitSha } from "../config/schema.ts";
 import {
@@ -132,7 +134,7 @@ export type AcceptanceOutput =
 	  };
 
 export function heldoutPathRefusalSentence(path: string): string {
-	return `The new_behavior check reads ${path}, an existing base test that is not in contract.replacesTests. The trusted gate preserves its base bytes. Inspect a candidate-added test or non-test source instead, or use only a contract-authorized replacement; do not weaken criterion coverage.`;
+	return `The new_behavior check reads ${path}, an existing base test that is not in contract.replacesTests. The trusted gate preserves its base bytes. Check candidate behavior through its source or public entry point, a candidate-added test, or a test file already named in contract.replacesTests; do not weaken criterion coverage.`;
 }
 
 export const JUDGE_REFUSAL_SENTENCES: Readonly<
@@ -359,283 +361,306 @@ export function isAcceptancePath(path: string): boolean {
 }
 
 function literalTestReads(content: string, check: string): readonly string[] {
-	const tokens = (
-		content.match(
-			/\/\*[\s\S]*?\*\/|\/\/[^\n]*|\/(?:\\.|[^/\\\n])+\/[a-z]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|[A-Za-z_$][\w$]*|[^\s]/g,
-		) ?? []
-	).filter((token) => !token.startsWith("/"));
+	if (Buffer.byteLength(content) > FILE_MAX_BYTES) return [];
 
-	const literal = (token: string | undefined): string | null =>
-		token !== undefined &&
-		/^["'`]/.test(token) &&
-		!token.includes("\\") &&
-		!token.includes("${")
-			? token.slice(1, -1)
-			: null;
+	const scanner = ts.createScanner(
+		ts.ScriptTarget.Latest,
+		true,
+		ts.LanguageVariant.Standard,
+		content,
+	);
 
-	const readers = new Set<string>();
-	const fsObjects = new Set<string>();
-	const promises = new Set<string>();
-	const pathFunctions = new Map<string, "join" | "resolve">();
-	const pathObjects = new Set<string>();
-	const reads: string[] = [];
+	let nesting = 0;
 
-	const textImport = (module: string, after: number) => {
-		const tail = tokens.slice(after, after + 12);
+	for (
+		let token = scanner.scan();
+		token !== ts.SyntaxKind.EndOfFileToken;
+		token = scanner.scan()
+	) {
+		if (
+			[
+				ts.SyntaxKind.OpenParenToken,
+				ts.SyntaxKind.OpenBraceToken,
+				ts.SyntaxKind.OpenBracketToken,
+			].includes(token)
+		) {
+			if (++nesting > 128) return [];
+		} else if (
+			[
+				ts.SyntaxKind.CloseParenToken,
+				ts.SyntaxKind.CloseBraceToken,
+				ts.SyntaxKind.CloseBracketToken,
+			].includes(token)
+		)
+			nesting--;
+	}
 
-		const attributes =
-			tail[0] === "with" && tail[1] === "{"
-				? tail.slice(2, 5)
-				: tail[0] === "," &&
-						tail[1] === "{" &&
-						(tail[2] === "with" || literal(tail[2]) === "with") &&
-						tail[3] === ":" &&
-						tail[4] === "{"
-					? tail.slice(5, 8)
-					: [];
+	let source: ts.SourceFile;
 
-		const text =
-			(attributes[0] === "type" || literal(attributes[0]) === "type") &&
-			attributes[1] === ":" &&
-			literal(attributes[2]) === "text";
-
-		if (!module.endsWith("?raw") && !text) return;
-		const path = module.replace(/\?raw$/, "");
-
-		reads.push(
-			module.startsWith(".")
-				? posix.join(
-						ACCEPTANCE_SUITE_DIR,
-						"_",
-						ACCEPTANCE_OUTPUT_DIR,
-						posix.dirname(check),
-						path,
-					)
-				: path,
+	try {
+		source = ts.createSourceFile(
+			check,
+			content,
+			ts.ScriptTarget.Latest,
+			false,
+			ts.ScriptKind.TS,
 		);
+	} catch (error) {
+		if (error instanceof RangeError) return [];
+		throw error;
+	}
+
+	const nodes: ts.Node[] = [];
+	const pending: ts.Node[] = [source];
+
+	while (pending.length > 0) {
+		const node = pending.pop();
+
+		if (node === undefined || nodes.length >= 32768) return [];
+		nodes.push(node);
+		ts.forEachChild(node, (child) => {
+			pending.push(child);
+		});
+	}
+
+	const imports = new Map<string, string>();
+	const bindings = new Map<string, ts.Expression>();
+	const declared = new Set<string>();
+	const ambiguous = new Set<string>();
+
+	const declare = (name: ts.BindingName) => {
+		const names: ts.BindingName[] = [name];
+
+		while (names.length > 0) {
+			const current = names.pop();
+
+			if (current === undefined) break;
+
+			if (ts.isIdentifier(current)) {
+				if (declared.has(current.text)) ambiguous.add(current.text);
+				declared.add(current.text);
+			} else {
+				for (const element of current.elements)
+					if (ts.isBindingElement(element)) names.push(element.name);
+			}
+		}
 	};
 
-	for (let i = 0; i < tokens.length; i++) {
-		if (tokens[i] !== "import") continue;
-
-		if (tokens[i + 1] === "(") {
-			const module = literal(tokens[i + 2]);
-
-			if (module !== null && [",", ")"].includes(tokens[i + 3] ?? ""))
-				textImport(module, i + 3);
-			continue;
-		}
-
-		let end = i + 1;
-
-		while (
-			end < tokens.length &&
-			end < i + 60 &&
-			tokens[end] !== ";" &&
-			tokens[end] !== "from" &&
-			tokens[end] !== "import"
-		)
-			end++;
-		const module = literal(tokens[tokens[end] === "from" ? end + 1 : i + 1]);
-
-		if (module === null) continue;
-
-		textImport(module, tokens[end] === "from" ? end + 2 : i + 2);
-
+	for (const node of nodes) {
 		if (
-			![
-				"fs",
-				"node:fs",
-				"fs/promises",
-				"node:fs/promises",
-				"path",
-				"node:path",
-			].includes(module)
-		)
-			continue;
-		const isPath = module.endsWith("path");
-		const isPromises = module.endsWith("/promises");
-		const objects = isPath ? pathObjects : isPromises ? promises : fsObjects;
-		const first = tokens[i + 1];
+			ts.isImportDeclaration(node) &&
+			ts.isStringLiteral(node.moduleSpecifier)
+		) {
+			const module = node.moduleSpecifier.text.replace(/^node:/, "");
+			const clause = node.importClause;
 
-		if (first !== undefined && /^[A-Za-z_$]/.test(first)) objects.add(first);
+			if (clause?.name !== undefined) {
+				declare(clause.name);
 
-		for (let j = i + 1; j < end; j++) {
-			const name = tokens[j];
-			const local = tokens[j + 1] === "as" ? tokens[j + 2] : name;
-
-			if (local === undefined) continue;
-
-			if (name === "*" && tokens[j + 1] === "as") objects.add(local);
-
-			if (isPath && (name === "join" || name === "resolve"))
-				pathFunctions.set(local, name);
-
-			if (
-				!isPath &&
-				(name === "readFile" || (!isPromises && name === "readFileSync"))
-			)
-				readers.add(local);
-
-			if (!isPath && !isPromises && name === "promises") promises.add(local);
-		}
-	}
-
-	const bindings = new Map<string, number>();
-	const duplicates = new Set<string>();
-
-	for (let i = 0; i < tokens.length; i++) {
-		if (tokens[i] !== "const" || tokens[i + 2] !== "=") continue;
-		const name = tokens[i + 1];
-
-		if (name === undefined) continue;
-
-		if (bindings.has(name)) duplicates.add(name);
-		bindings.set(name, i + 3);
-	}
-
-	const parentheses: number[] = [];
-
-	for (let i = 0; i < tokens.length; i++) {
-		const token = tokens[i] ?? "";
-		const next = tokens[i + 1] ?? "";
-
-		if (token === "(") parentheses.push(i);
-
-		if (token === ")") {
-			const open = parentheses.pop();
-
-			if (
-				open !== undefined &&
-				(next === "{" || (next === "=" && tokens[i + 2] === ">"))
-			) {
-				for (let j = open + 1; j < i; j++) duplicates.add(tokens[j] ?? "");
-			}
-		}
-
-		if (next === "=" && tokens[i + 2] === ">") duplicates.add(token);
-
-		if (["let", "var", "function", "class"].includes(token))
-			duplicates.add(next);
-
-		if (
-			token === "const" &&
-			(readers.has(next) ||
-				fsObjects.has(next) ||
-				promises.has(next) ||
-				pathFunctions.has(next) ||
-				pathObjects.has(next))
-		)
-			duplicates.add(next);
-	}
-
-	for (const name of duplicates) {
-		readers.delete(name);
-		fsObjects.delete(name);
-		promises.delete(name);
-		pathFunctions.delete(name);
-		pathObjects.delete(name);
-	}
-
-	const cwd = "/__factory_base__";
-	let remainingExpressions = 4096;
-
-	const expression = (
-		start: number,
-		depth = 0,
-	): { value: string; end: number } | null => {
-		if (depth > 20 || remainingExpressions-- <= 0) return null;
-		const token = tokens[start];
-		const text = literal(token);
-
-		if (text !== null)
-			return text.startsWith("/") || text.length >= 512
-				? null
-				: { value: text, end: start + 1 };
-
-		if (tokens.slice(start, start + 5).join("") === "process.cwd()")
-			return { value: cwd, end: start + 5 };
-
-		if (token === undefined) return null;
-		const bound = bindings.get(token);
-
-		if (bound !== undefined && !duplicates.has(token)) {
-			const result = expression(bound, depth + 1);
-
-			return result !== null && [",", ";"].includes(tokens[result.end] ?? ";")
-				? { value: result.value, end: start + 1 }
-				: null;
-		}
-
-		let method = pathFunctions.get(token);
-		let open = start + 1;
-
-		if (pathObjects.has(token) && tokens[start + 1] === ".") {
-			const member = tokens[start + 2];
-
-			if (member === "join" || member === "resolve") method = member;
-			open = start + 3;
-		}
-
-		if (method === undefined || tokens[open] !== "(") return null;
-		const parts: string[] = [];
-		let cursor = open + 1;
-
-		while (parts.length < 30) {
-			const part = expression(cursor, depth + 1);
-
-			if (part === null) return null;
-			parts.push(part.value);
-			cursor = part.end;
-
-			if (tokens[cursor] === ")") {
-				const value =
-					method === "resolve"
-						? posix.resolve(cwd, ...parts)
-						: posix.join(...parts);
-
-				return value.length < 512 ? { value, end: cursor + 1 } : null;
+				if (!clause.isTypeOnly) imports.set(clause.name.text, module);
 			}
 
-			if (tokens[cursor] !== ",") return null;
-			cursor++;
+			const named = clause?.namedBindings;
+
+			if (named !== undefined && ts.isNamespaceImport(named)) {
+				declare(named.name);
+
+				if (!clause?.isTypeOnly) imports.set(named.name.text, module);
+			} else if (named !== undefined) {
+				for (const element of named.elements) {
+					declare(element.name);
+
+					if (!clause?.isTypeOnly && !element.isTypeOnly)
+						imports.set(
+							element.name.text,
+							`${module}.${(element.propertyName ?? element.name).text}`,
+						);
+				}
+			}
+		} else if (ts.isVariableDeclaration(node)) declare(node.name);
+		else if (ts.isParameter(node)) declare(node.name);
+		else if (
+			(ts.isFunctionDeclaration(node) ||
+				ts.isFunctionExpression(node) ||
+				ts.isClassDeclaration(node) ||
+				ts.isClassExpression(node)) &&
+			node.name !== undefined
+		)
+			declare(node.name);
+
+		if (ts.isVariableDeclarationList(node) && node.flags & ts.NodeFlags.Const)
+			for (const declaration of node.declarations)
+				if (
+					ts.isIdentifier(declaration.name) &&
+					declaration.initializer !== undefined
+				)
+					bindings.set(declaration.name.text, declaration.initializer);
+	}
+
+	const symbol = (node: ts.Expression, depth = 0): string | null => {
+		if (depth > 20) return null;
+
+		if (ts.isIdentifier(node))
+			return ambiguous.has(node.text) ? null : (imports.get(node.text) ?? null);
+
+		if (ts.isPropertyAccessExpression(node)) {
+			const object = symbol(node.expression, depth + 1);
+
+			return object === null ? null : `${object}.${node.name.text}`;
 		}
 
 		return null;
 	};
 
-	for (let i = 0; i < tokens.length; i++) {
-		const token = tokens[i] ?? "";
-		let open = readers.has(token) && tokens[i - 1] !== "." ? i + 1 : -1;
+	const meta = (node: ts.Expression | undefined, member: string): boolean =>
+		node !== undefined &&
+		ts.isPropertyAccessExpression(node) &&
+		node.name.text === member &&
+		ts.isMetaProperty(node.expression) &&
+		node.expression.keywordToken === ts.SyntaxKind.ImportKeyword &&
+		node.expression.name.text === "meta";
 
-		if (
-			(fsObjects.has(token) || promises.has(token)) &&
-			tokens[i + 1] === "."
-		) {
-			const member = tokens[i + 2];
+	const cwd = "/__factory_base__";
 
-			if (
-				member === "readFile" ||
-				(fsObjects.has(token) && member === "readFileSync")
-			)
-				open = i + 3;
+	const checkFile = posix.join(
+		cwd,
+		ACCEPTANCE_SUITE_DIR,
+		"_",
+		ACCEPTANCE_OUTPUT_DIR,
+		check,
+	);
 
-			if (
-				fsObjects.has(token) &&
-				tokens.slice(i + 2, i + 5).join("") === "promises.readFile"
-			)
-				open = i + 5;
+	const checkDir = posix.dirname(checkFile);
+	let remainingExpressions = 4096;
+
+	const expression = (
+		node: ts.Expression | undefined,
+		depth = 0,
+	): string | null => {
+		if (node === undefined || depth > 20 || remainingExpressions-- <= 0)
+			return null;
+
+		if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node))
+			return node.text.length < 512 ? node.text : null;
+
+		if (ts.isParenthesizedExpression(node))
+			return expression(node.expression, depth + 1);
+
+		if (meta(node, "dirname")) return checkDir;
+
+		if (ts.isIdentifier(node)) {
+			if (ambiguous.has(node.text)) return null;
+
+			if (node.text === "__dirname" && !declared.has(node.text))
+				return checkDir;
+			const bound = bindings.get(node.text);
+
+			return bound === undefined ? null : expression(bound, depth + 1);
 		}
 
-		if (open < 0 || tokens[open] !== "(") continue;
-		const path = expression(open + 1);
+		if (
+			ts.isNewExpression(node) &&
+			ts.isIdentifier(node.expression) &&
+			node.expression.text === "URL" &&
+			!declared.has("URL") &&
+			node.arguments?.length === 2 &&
+			meta(node.arguments[1], "url")
+		) {
+			const path = expression(node.arguments[0], depth + 1);
 
-		if (path !== null && [",", ")"].includes(tokens[path.end] ?? "")) {
-			const value = posix.normalize(path.value);
+			if (path === null) return null;
 
-			reads.push(
-				value.startsWith(`${cwd}/`) ? value.slice(cwd.length + 1) : value,
-			);
+			try {
+				return fileURLToPath(new URL(path, pathToFileURL(checkFile)));
+			} catch {
+				return null;
+			}
+		}
+
+		if (!ts.isCallExpression(node)) return null;
+
+		if (
+			node.arguments.length === 0 &&
+			ts.isPropertyAccessExpression(node.expression) &&
+			ts.isIdentifier(node.expression.expression) &&
+			node.expression.expression.text === "process" &&
+			!declared.has("process") &&
+			node.expression.name.text === "cwd"
+		)
+			return cwd;
+		const method = symbol(node.expression);
+
+		if (method === "url.fileURLToPath" && node.arguments.length === 1)
+			return expression(node.arguments[0], depth + 1);
+
+		if (
+			(method !== "path.join" && method !== "path.resolve") ||
+			node.arguments.length > 30
+		)
+			return null;
+		const parts: string[] = [];
+
+		for (const argument of node.arguments) {
+			const part = expression(argument, depth + 1);
+
+			if (part === null) return null;
+			parts.push(part);
+		}
+
+		const value =
+			method === "path.resolve"
+				? posix.resolve(cwd, ...parts)
+				: posix.join(...parts);
+
+		return value.length < 512 ? value : null;
+	};
+
+	const reads: string[] = [];
+
+	const add = (value: string, relativeImport = false) => {
+		const path =
+			relativeImport && value.startsWith(".")
+				? posix.resolve(checkDir, value)
+				: posix.normalize(value);
+
+		reads.push(path.startsWith(`${cwd}/`) ? path.slice(cwd.length + 1) : path);
+	};
+
+	for (const node of nodes) {
+		if (
+			ts.isImportDeclaration(node) &&
+			ts.isStringLiteral(node.moduleSpecifier)
+		) {
+			const module = node.moduleSpecifier.text;
+
+			if (
+				module.endsWith("?raw") ||
+				node.attributes?.elements.some(
+					(entry) =>
+						entry.name.text === "type" &&
+						ts.isStringLiteral(entry.value) &&
+						entry.value.text === "text",
+				)
+			)
+				add(module.replace(/\?raw$/, ""), true);
+		} else if (ts.isCallExpression(node)) {
+			const dynamicImport =
+				node.expression.kind === ts.SyntaxKind.ImportKeyword;
+
+			if (
+				dynamicImport ||
+				[
+					"fs.readFile",
+					"fs.readFileSync",
+					"fs.promises.readFile",
+					"fs/promises.readFile",
+				].includes(symbol(node.expression) ?? "")
+			) {
+				const path = expression(node.arguments[0]);
+
+				if (path !== null)
+					add(dynamicImport ? path.replace(/\?raw$/, "") : path, dynamicImport);
+			}
 		}
 	}
 
@@ -645,7 +670,7 @@ function literalTestReads(content: string, check: string): readonly string[] {
 export function writeAcceptance(
 	text: string,
 	contract: Pick<Contract, "acceptance" | "replacesTests">,
-	existingFiles: ReadonlySet<string> = new Set(),
+	existingFiles: ReadonlySet<string>,
 ): AcceptanceOutput {
 	const parsed = parseAcceptance(text, contract);
 
@@ -659,6 +684,7 @@ export function writeAcceptance(
 				for (const path of literalTestReads(file.content, file.path)) {
 					if (
 						path.startsWith("test/") &&
+						/\.(?:test|cases)\.[cm]?[jt]s$/.test(path) &&
 						existingFiles.has(path) &&
 						!(contract.replacesTests ?? []).some((entry) => entry.path === path)
 					)
