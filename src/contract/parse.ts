@@ -16,6 +16,7 @@ import {
 	MAX_FILES,
 	MAX_LIST,
 	MAX_QUESTIONS,
+	MAX_REPLACED_TESTS,
 	OUTPUT_MAX_BYTES,
 	type Question,
 	type SpecifyOutput,
@@ -207,31 +208,36 @@ function contractOf(
 
 	const replacements = fieldOf(value, "replacesTests");
 
-	const replacesTests = listOf(replacements, 0, MAX_FILES).map((item) => {
-		const entry = only(objectOf(item) ?? reject("bad_field"), [
-			"path",
-			"reason",
-		]);
+	const replacesTests = listOf(replacements, 0, MAX_REPLACED_TESTS).map(
+		(item) => {
+			const entry = only(objectOf(item) ?? reject("bad_field"), [
+				"path",
+				"test",
+				"reason",
+			]);
 
-		const path = lineOf(fieldOf(entry, "path")) ?? reject("bad_field");
-		const reason = lineOf(fieldOf(entry, "reason")) ?? reject("bad_field");
+			const path = lineOf(fieldOf(entry, "path")) ?? reject("bad_field");
+			const test = lineOf(fieldOf(entry, "test")) ?? reject("bad_field");
+			const reason = lineOf(fieldOf(entry, "reason")) ?? reject("bad_field");
 
-		if (
-			!isRepoPath(path) ||
-			!path.startsWith("test/") ||
-			path.startsWith(ACCEPTANCE_SUITE_PREFIX) ||
-			!/\.(?:test|cases)\.[cm]?[jt]s$/.test(path)
-		)
-			reject("bad_field");
+			if (
+				!isRepoPath(path) ||
+				!path.startsWith("test/") ||
+				path.startsWith(ACCEPTANCE_SUITE_PREFIX) ||
+				!/\.(?:test|cases)\.[cm]?[jt]s$/.test(path)
+			)
+				reject("bad_field");
 
-		if (!files.has(path)) reject("unknown_path");
+			if (!files.has(path)) reject("unknown_path");
 
-		return { path, reason };
-	});
+			return { path, test, reason };
+		},
+	);
 
 	if (
-		new Set(replacesTests.map((entry) => entry.path)).size !==
-		replacesTests.length
+		new Set(
+			replacesTests.map((entry) => JSON.stringify([entry.path, entry.test])),
+		).size !== replacesTests.length
 	)
 		reject("bad_field");
 
@@ -373,6 +379,19 @@ function hasDuplicateKey(text: string): boolean {
 	}
 
 	return false;
+}
+
+/**
+ * True when `source` declares a `test` or `it` call, with any modifier,
+ * whose first argument is the literal `name`. Specify names a replaced
+ * test this way, so a computed or concatenated name never matches.
+ */
+export function declaresTest(source: string, name: string): boolean {
+	const literal = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+	return new RegExp(
+		`\\b(?:it|test)(?:\\.\\w+)?\\s*\\(\\s*(["'\`])${literal}\\1`,
+	).test(source);
 }
 
 /**

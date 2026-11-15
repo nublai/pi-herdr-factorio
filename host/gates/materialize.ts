@@ -185,15 +185,28 @@ export async function exportTree(
 	}
 }
 
+/**
+ * A gate replacement: a contract's `ReplacedTest`, or a dispatch from before
+ * contracts named the test, which has no `test`. The gate replaces whole
+ * files; the test name is bound by the digest and judged in review.
+ */
+export type GateReplacement = Omit<ReplacedTest, "test"> & {
+	readonly test?: string;
+};
+
+function lineOf(value: string): boolean {
+	return value.trim() !== "" && value.length <= 500 && !hasControl(value);
+}
+
 export function replacementDigest(
-	replacements: readonly ReplacedTest[],
+	replacements: readonly GateReplacement[],
 ): string {
 	return createHash("sha256")
 		.update(JSON.stringify(replacements))
 		.digest("hex");
 }
 
-export function replacementsOf(text: string): readonly ReplacedTest[] {
+export function replacementsOf(text: string): readonly GateReplacement[] {
 	const list = arrayOf(parseJson(text));
 
 	if (list === null || list.length > 50)
@@ -204,23 +217,28 @@ export function replacementsOf(text: string): readonly ReplacedTest[] {
 		const obj = objectOf(item);
 		const path = textOf(fieldOf(obj, "path")) ?? "";
 		const reason = textOf(fieldOf(obj, "reason")) ?? "";
+		const named = fieldOf(obj, "test");
+		const test = named === undefined ? undefined : textOf(named);
+		const key = JSON.stringify([path, test ?? null]);
 
 		if (
 			obj === null ||
-			Object.keys(obj).some((k) => k !== "path" && k !== "reason") ||
+			Object.keys(obj).some(
+				(k) => k !== "path" && k !== "test" && k !== "reason",
+			) ||
+			test === null ||
+			(test !== undefined && !lineOf(test)) ||
 			!safePath(path) ||
 			!path.startsWith("test/") ||
 			path.startsWith(ACCEPTANCE_SUITE_PREFIX) ||
 			!/\.(?:test|cases)\.[cm]?[jt]s$/.test(path) ||
-			!reason.trim() ||
-			reason.length > 500 ||
-			hasControl(reason) ||
-			seen.has(path)
+			!lineOf(reason) ||
+			seen.has(key)
 		)
 			throw new Error("invalid_replacements");
-		seen.add(path);
+		seen.add(key);
 
-		return { path, reason };
+		return test === undefined ? { path, reason } : { path, test, reason };
 	});
 }
 
@@ -229,8 +247,8 @@ type Inventory = ReadonlyMap<string, { mode: string; blob: string }>;
 function checkReplacements(
 	base: Inventory,
 	candidate: Inventory,
-	list: readonly ReplacedTest[],
-): readonly ReplacedTest[] {
+	list: readonly GateReplacement[],
+): readonly GateReplacement[] {
 	const replacements = replacementsOf(JSON.stringify(list));
 
 	for (const item of replacements) {
@@ -247,7 +265,7 @@ function overlay(input: {
 	readonly candidate: Inventory;
 	readonly candidateDir: string;
 	readonly dest: string;
-	readonly replacements: readonly ReplacedTest[];
+	readonly replacements: readonly GateReplacement[];
 	readonly heldoutDir?: string;
 	readonly heldoutDigest?: string;
 }) {
@@ -354,7 +372,7 @@ export async function materializeCandidate(input: {
 	readonly gateSha: string;
 	readonly candidateSha: string;
 	readonly dest: string;
-	readonly replacements: readonly ReplacedTest[];
+	readonly replacements: readonly GateReplacement[];
 	readonly heldoutDir?: string;
 	readonly heldoutDigest?: string;
 }) {
@@ -415,7 +433,7 @@ export function materializeFromDirectories(input: {
 	readonly gateTree: string;
 	readonly candidateTree: string;
 	readonly dest: string;
-	readonly replacements: readonly ReplacedTest[];
+	readonly replacements: readonly GateReplacement[];
 	readonly heldoutDir?: string;
 	readonly heldoutDigest?: string;
 }) {

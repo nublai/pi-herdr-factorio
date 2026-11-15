@@ -516,7 +516,11 @@ describe("private acceptance artifacts", () => {
 		const changed: Contract = {
 			...contract,
 			replacesTests: [
-				{ path: "test/old.test.ts", reason: "Ticket changes this behavior" },
+				{
+					path: "test/old.test.ts",
+					test: "old behavior",
+					reason: "Ticket changes this behavior",
+				},
 			],
 		};
 

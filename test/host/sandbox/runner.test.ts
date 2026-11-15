@@ -3112,7 +3112,11 @@ describe("private build executor", () => {
 						replacements,
 					) => {
 						assert.deepEqual(replacements, [
-							{ path: "test/old.test.ts", reason: "Changed behavior" },
+							{
+								path: "test/old.test.ts",
+								test: "old behavior",
+								reason: "Changed behavior",
+							},
 						]);
 						tests++;
 
@@ -3150,7 +3154,11 @@ describe("private build executor", () => {
 					files: [],
 					evidence: [],
 					replacesTests: [
-						{ path: "test/old.test.ts", reason: "Changed behavior" },
+						{
+							path: "test/old.test.ts",
+							test: "old behavior",
+							reason: "Changed behavior",
+						},
 					],
 				};
 
