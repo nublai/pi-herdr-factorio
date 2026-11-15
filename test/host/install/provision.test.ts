@@ -236,6 +236,7 @@ describe("sandbox provisioning under a restrictive umask", () => {
 		const tar = spawnSync(
 			"tar",
 			[
+				"--mode=go+rX",
 				"-cJf",
 				join(cache, "node-v26.12.1-linux-x64.tar.xz"),
 				"-C",
