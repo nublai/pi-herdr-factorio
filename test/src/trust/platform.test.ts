@@ -481,7 +481,7 @@ describe("platform selection", () => {
 			historicalRepositories: {
 				"nublai/pi-herdr-factorio": ["giuseppecrj/pi-herdr-factorio"],
 			},
-			anthropicStages: ["accept", "code-review", "second-judge"],
+			anthropicStages: ["accept", "code-review"],
 		});
 		assert.deepEqual(resolved("exmach:example.net", ABSENT), EXMACH);
 		assert.deepEqual(
@@ -1306,7 +1306,7 @@ describe("Anthropic positions", () => {
 			assert.deepEqual(errorOf(workflowText(lines), EXMACH), {
 				kind: "workflow_validation_error",
 				field,
-				message: `${field} provider anthropic is allowed only for stages.accept.model, stages.review.seats.code-review.model, and stages.review.seats.second-judge.model on the exmach platform`,
+				message: `${field} provider anthropic is allowed only for stages.accept.model and stages.review.seats.code-review.model on the exmach platform`,
 			});
 		}
 

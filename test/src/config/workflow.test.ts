@@ -43,6 +43,7 @@ import type { Exec, ExecResult } from "../../../src/github/exec.ts";
 import {
 	EXE_DEV_PLATFORM,
 	isRepoSlug,
+	parsePlatformProfile,
 	type RepoSlug,
 } from "../../../src/trust/platform.ts";
 import { noPlatformFile } from "../../helpers.ts";
@@ -936,6 +937,49 @@ describe("parseWorkflow", () => {
 			assert.equal(error.field, field, yaml);
 			assert.match(error.message, message, yaml);
 		}
+	});
+
+	it("allows an Anthropic second judge on exe.dev only; exmach keeps the seat OpenAI-only (#805 S1)", () => {
+		const exmach = parsePlatformProfile({
+			selector: "exmach:example.net",
+			file: { kind: "absent" },
+		});
+
+		assert.ok(exmach.ok);
+
+		const text = frontMatter(
+			"stages:\n  review:\n    model: openai/gpt-6.1-sol\n    seats:\n      second-judge:\n        model: anthropic/claude-sonnet-5-5",
+		);
+
+		assert.equal(parse(text).kind, "valid");
+
+		const refused = parseWorkflow({
+			platform: exmach.profile,
+			text,
+			repo,
+			env,
+		});
+
+		assert.ok(
+			refused.kind === "invalid" &&
+				refused.error.kind === "workflow_validation_error",
+		);
+		assert.equal(refused.error.field, "stages.review.seats.second-judge.model");
+		assert.equal(
+			refused.error.message,
+			"stages.review.seats.second-judge.model provider anthropic is allowed only for stages.accept.model and stages.review.seats.code-review.model on the exmach platform",
+		);
+
+		const codeReview = parseWorkflow({
+			platform: exmach.profile,
+			text: frontMatter(
+				"stages:\n  review:\n    seats:\n      code-review:\n        model: anthropic/claude-sonnet-5-5",
+			),
+			repo,
+			env,
+		});
+
+		assert.equal(codeReview.kind, "valid");
 	});
 
 	it("leaves the second judge unconfigured when its key is absent, so judge-only scenarios fail closed", () => {

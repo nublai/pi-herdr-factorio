@@ -56,7 +56,7 @@ Every entry point uses the same resolver, `resolvePlatform`, with the environmen
 | `botEmail` | `267204973+exe-dev-github-integration[bot]@users.noreply.github.com` | `353429311+nubl-agent[bot]@users.noreply.github.com`, or the file's identity |
 | `ghHost` | `github.int.exe.xyz` | `factorio.int.<domain>`, or the file's one-label `ghHost` |
 | `repositories` | `nublai/pi-herdr-factorio` | the same, or the file's list |
-| `anthropicStages` | `accept`, `code-review` | `accept`, `code-review` |
+| `anthropicStages` | `accept`, `code-review`, `second-judge` | `accept`, `code-review` |
 
 ## Historical repository alias
 
