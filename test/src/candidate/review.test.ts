@@ -2052,6 +2052,29 @@ describe("candidate review", () => {
 			);
 	});
 
+	it("keeps whole characters and the cut marker when repair feedback carries a cut astral reason", () => {
+		const text = JSON.stringify({
+			seat: "code-review",
+			findings: [],
+			judgments: [
+				{
+					scenario: "S4",
+					outcome: "fail",
+					reason: `a${"\u{1F600}".repeat(700)}`,
+				},
+			],
+		});
+
+		const parsed = parseSeat(text, "code-review", files, ["S4"]);
+		assert.ok(parsed);
+
+		const claim = String(reviewFeedback({ seats: [parsed] })[0]?.claim ?? "");
+
+		assert.equal([...claim].length, 600);
+		assert.match(claim, /… \[cut by controller at 600 characters\]$/);
+		assert.equal(/[\uD800-\uDBFF]$/.test(claim), false);
+	});
+
 	it("cuts a 900-character judge reason without losing the pass or scenario", () => {
 		const text = JSON.stringify({
 			seat: SECOND_JUDGE,

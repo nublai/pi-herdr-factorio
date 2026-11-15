@@ -1290,7 +1290,7 @@ function rankedFindings(receipt: {
 				path: f.path,
 				startLine: f.startLine,
 				endLine: f.endLine,
-				claim: f.claim.slice(0, 600),
+				claim: [...f.claim].slice(0, 600).join(""),
 				rank: rank[f.category],
 			})),
 	);
@@ -1311,7 +1311,9 @@ export function priorFindings(receipt: {
 		.map(({ rank: _rank, ...item }) => item);
 }
 
-export function reviewFeedback(receipt: ReviewReceipt) {
+export function reviewFeedback(receipt: {
+	readonly seats: readonly SeatResult[];
+}) {
 	const findings = rankedFindings(receipt);
 
 	const judgments = receipt.seats.flatMap((seat) =>
@@ -1321,7 +1323,7 @@ export function reviewFeedback(receipt: ReviewReceipt) {
 				seat: seat.seat,
 				category: "criterion",
 				scenario: j.scenario,
-				claim: j.reason.slice(0, 600),
+				claim: [...j.reason].slice(0, 600).join(""),
 				rank: 1,
 			})),
 	);
