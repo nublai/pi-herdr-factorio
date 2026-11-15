@@ -18,7 +18,7 @@ The program runs the poteto-mode playbook `playbooks/autopilot-stack.md`. No cur
 
 Use the **Factory CLI control procedure** from `docs/plans/active/factory-v1.md` as the control skill, through `.pi/skills/verify-factory/`. This backend has no visual surface except `MV8`'s Factory tab and pushes in Shep. Live lanes save redacted logs, JSON snapshots and issue or PR URLs in place of screenshots. `MV2` makes the control skill reach the exmach VM. Until exmach E2 exists, every live lane that needs the exmach VM is `BLOCKED`, never passed by a substitute.
 
-The Kyoko root session coordinates integration between Factorio, exmach and Shep (decision C1 in nublai/root `.pi/plan/integration.md`). This program works only in this repository. It files no issues and posts no comments in giuseppecrj/exmach or giuseppecrj/shep. Each reply to the owner that needs something from those projects ends with a **For other projects** heading, and the Kyoko session relays it.
+The nubl root session coordinates integration between Factorio, exmach and Shep (decision C1 in nublai/root `.pi/plan/integration.md`). This program works only in this repository. It files no issues and posts no comments in giuseppecrj/exmach or giuseppecrj/shep. Each reply to the owner that needs something from those projects ends with a **For other projects** heading, and the nubl root session relays it.
 
 Treat every new path, symbol, command and log field below as a proposed contract, not an existing capability. At the planning base `4306505` none of them exist.
 
@@ -397,7 +397,7 @@ Each live lane runs at the PR head through the Factory CLI control procedure.
 
 **You see.**
 
-- [ ] `owner-feed.md` answers all five questions with evidence, ready for the Kyoko session to relay.
+- [ ] `owner-feed.md` answers all five questions with evidence, ready for the nubl root session to relay.
 
 **Verify, unit.** Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked.
 
@@ -488,7 +488,7 @@ Each live lane runs at the PR head through the Factory CLI control procedure.
 
 ## Prove the Factory tab and pushes end to end (MV8)
 
-**Depends on.** Parked on 2026-11-10 (the phone path no longer waits on exmach, because the Shep bridge on ms-a2 pushes straight to Apple). MV5 and MV6 landed, plus work in other projects that the Kyoko session tracks. These are the `apns` integration attached as `vm:factorio` in E2 (giuseppecrj/exmach#94), giuseppecrj/exmach#88 (edge push v2 with routing fields and a collapse key), giuseppecrj/shep#107 (the bridge's edge sender), the Shep bridge on the `factorio` VM (giuseppecrj/exmach#90 or a manual install), and giuseppecrj/shep#140 (the Factory tab). The attach alone delivers no push, so `MV8` waits for #88 and shep#107, not just E2. The edge allows 30 pushes per hour per VM with a burst of 5.
+**Depends on.** Parked on 2026-11-10 (the phone path no longer waits on exmach, because the Shep bridge on ms-a2 pushes straight to Apple). MV5 and MV6 landed, plus work in other projects that the nubl root session tracks. These are the `apns` integration attached as `vm:factorio` in E2 (giuseppecrj/exmach#94), giuseppecrj/exmach#88 (edge push v2 with routing fields and a collapse key), giuseppecrj/shep#107 (the bridge's edge sender), the Shep bridge on the `factorio` VM (giuseppecrj/exmach#90 or a manual install), and giuseppecrj/shep#140 (the Factory tab). The attach alone delivers no push, so `MV8` waits for #88 and shep#107, not just E2. The edge allows 30 pushes per hour per VM with a burst of 5.
 
 **Files.**
 
@@ -582,7 +582,7 @@ These questions stay unproven.
 - **Spend.** `MV5` and `MV7` run full tickets at about 540,000 reserved tokens each. Check the program cap with the owner before they launch.
 - **Out of scope.** #717 rewrites F13's credential section in `docs/plans/active/factory-v1.md` in its own docs PR before F13 starts. #718 becomes its own plan after `MV5` and giuseppecrj/exmach#83.
 - **Shep's open questions (MV6).** Shep asked five feed questions on #719. Shep's Factory tab waits on `MV6`'s answers in `owner-feed.md`.
-- **Phone path in other projects (MV8).** `MV8` depends on the `apns` attach in E2, exmach#88, shep#107, a bridge on the VM and shep#140. exmach schedules #88 after Shep's runtimes seam, so `MV8` lands well after the cutover. The Kyoko session tracks them.
+- **Phone path in other projects (MV8).** `MV8` depends on the `apns` attach in E2, exmach#88, shep#107, a bridge on the VM and shep#140. exmach schedules #88 after Shep's runtimes seam, so `MV8` lands well after the cutover. The nubl root session tracks them.
 - **Provisional GitHub host (MV1, MV2).** `factorio.int.exmach.net` is confirmed only until E1 and E2 land. A change needs only a `ghHost` override in `/etc/factory/platform.json` and the `factorio` line in `targets.env`.
 
 ## Appendix D. Links and reading list
