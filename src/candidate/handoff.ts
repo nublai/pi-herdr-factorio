@@ -669,7 +669,9 @@ export function stopRound(
 		const why =
 			reason === "main_moving" || reason === "owner_head_behind"
 				? "owner_head_behind"
-				: "owner_head_failed";
+				: reason === "review_unverifiable"
+					? "review_unverifiable"
+					: "owner_head_failed";
 
 		return headNotice(
 			state,
@@ -1709,6 +1711,9 @@ function observed(
 			"owner_head_failed",
 			"owner_head_behind",
 			"refresh_limit",
+			...(state.current.intent.origin.kind === "owner"
+				? ["review_unverifiable"]
+				: []),
 		].includes(work.reason) &&
 		event.pr.kind === "open" &&
 		event.pr.refHead === state.published?.ownerHead

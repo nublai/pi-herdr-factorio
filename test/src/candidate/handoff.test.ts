@@ -55,7 +55,11 @@ import {
 import { classifyFeedback } from "../../../src/candidate/feedback.ts";
 import { storeFeedbackBatch } from "../../../host/controller/candidate-port.ts";
 import { type FamilyInput, familyLabel } from "../../../src/core/models.ts";
-import { type ReviewReceipt, reviewR8 } from "../../../src/candidate/review.ts";
+import {
+	ownerJudgments,
+	type ReviewReceipt,
+	reviewR8,
+} from "../../../src/candidate/review.ts";
 import {
 	dispatchNonce,
 	type TrustedReport,
@@ -70,7 +74,7 @@ import { controllerCandidatePort } from "../../../host/controller/candidate-port
 import { sandboxExecutor } from "../../../host/sandbox/executor.ts";
 import type { Log } from "../../../src/controller/orchestrator.ts";
 import { fileAdmissionStore } from "../../../src/trust/admission.ts";
-import { CONTROLLER_LOGIN } from "../../../src/trust/markers.ts";
+import { CONTROLLER_LOGIN, formatMarker } from "../../../src/trust/markers.ts";
 import {
 	candidateLifecycleFixture,
 	verdictAssessment,
@@ -2453,6 +2457,125 @@ test("a published run whose fresh review is only unverifiable withdraws readines
 		held.accounts.filter((a) => a.execution.stage === "build").length,
 		0,
 	);
+});
+
+test("an owner-edited published run whose review is only unverifiable keeps review_unverifiable and its judgments through notice and reload (#793)", {
+	timeout: 30_000,
+}, () => {
+	const f = ownerSelected();
+
+	const issued = handoffCandidate(
+		validated(f.state),
+		ownerObservation(f.start),
+	).state;
+
+	const launch = pending(issued, "launch_review");
+
+	const running = handoffCandidate(issued, {
+		kind: "effect_completed",
+		completion: { kind: "launch_review", request: launch, started: true },
+	}).state;
+
+	const stopped = handoffCandidate(running, {
+		kind: "review_settled",
+		execution: launch.execution,
+		tokens: 20,
+		result: {
+			kind: "passed",
+			review: judgedReceipt(launch.execution, [unverifiableS3]),
+			patch: { kind: "found", receipt: f.receipt, patch: "owner patch" },
+		},
+	}).state;
+
+	const notice = pending(stopped, "post_notice");
+	assert.equal(notice.notice.kind, "owner_head_failed");
+	assert.equal(notice.detail, "review_unverifiable");
+	assert.equal(notice.withdraw, "review_unverifiable");
+	assert.ok(notice.notice.key.includes(f.receipt.head));
+	assert.ok(notice.then.kind === "held");
+	assert.equal(notice.then.reason, "review_unverifiable");
+
+	const held = selected(
+		handoffCandidate(stopped, {
+			kind: "effect_completed",
+			completion: { kind: "post_notice", request: notice },
+		}).state,
+	);
+
+	const restored = parseCandidateState(JSON.parse(JSON.stringify(held)));
+	assert.ok(restored?.kind === "selected");
+
+	for (const state of [held, restored]) {
+		assert.ok(state.work.kind === "held");
+		assert.equal(state.work.reason, "review_unverifiable");
+		assert.ok(state.published?.readiness.kind === "not_ready");
+		assert.equal(state.published.readiness.reason, "review_unverifiable");
+		assert.equal(state.current.certification, null);
+		assert.equal(
+			state.accounts.filter((a) => a.execution.stage === "build").length,
+			f.start.accounts.filter((a) => a.execution.stage === "build").length,
+		);
+
+		const judgments = ownerJudgments(state.current.review!);
+		assert.deepEqual(
+			judgments.map((j) => j.scenario),
+			["S3"],
+		);
+		assert.match(
+			formatMarker(
+				{
+					v: 1,
+					runId: pin.runId,
+					repo: "nublai/example",
+					issue: 1,
+					eventId: "1",
+					eventAt: "2026-11-15T00:00:00Z",
+					snapshotDigest: digestOf("snapshot"),
+					workflowSha: pin.workflowSha,
+					workflowDigest: pin.workflowDigest,
+					stage: "review",
+					status: "blocked",
+					attempt: 1,
+					seq: 1,
+					branch: null,
+					pr: 5,
+					usage: 0,
+					cursor: null,
+				},
+				state.work.reason,
+				0,
+				judgments,
+			),
+			/\(review_unverifiable\)[\s\S]*\n- S3: No trusted npm run check/,
+		);
+	}
+
+	const head = handoffCandidate(
+		restored,
+		ownerObservation(f.start, f.receipt.head),
+	);
+
+	assert.equal(head.effect, null);
+	assert.equal(selected(head.state).work.kind, "held");
+
+	const main = "e".repeat(40);
+	assert.ok(isGitSha(main));
+
+	const moved = handoffCandidate(restored, {
+		...ownerObservation(f.start, f.receipt.head),
+		main,
+	});
+
+	assert.equal(moved.effect, null, "no refresh or build on owner commits");
+	assert.ok(selected(moved.state).work.kind === "held");
+
+	const push = pending(
+		handoffCandidate(restored, ownerObservation(f.start, "f".repeat(40)))
+			.state,
+		"post_notice",
+	);
+
+	assert.equal(push.notice.kind, "owner_head");
 });
 
 test("a persisted repair without its assessment cause does not parse", () => {
