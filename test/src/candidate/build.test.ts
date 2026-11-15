@@ -906,3 +906,91 @@ for (const feedback of [false, true])
 				/lint, format or typecheck entry[^\n]*npm run lint, npm run format:check or npm run typecheck[^\n]*to see the details[^\n]*base copies of \.oxlintrc\.json, tsconfig\.json and biome\.json[^\n]*never change them to make a check pass/,
 			);
 	});
+
+for (const path of ["test/new.ts", "tests/new.test.ts", "src/new.test.ts"])
+	for (const replacement of [false, true])
+		test(`test-input metadata detects added ${path}, replacement=${replacement}`, async (t) => {
+			const f = fixture(t);
+
+			for (const root of [f.base, f.workspace]) {
+				writeFileSync(
+					join(root, "package.json"),
+					JSON.stringify({ scripts: { test: "node --test" } }),
+				);
+				mkdirSync(join(root, "test"), { recursive: true });
+				writeFileSync(join(root, "test/existing.ts"), "base\n");
+			}
+
+			if (replacement)
+				writeFileSync(join(f.workspace, "test/existing.ts"), "replacement\n");
+			mkdirSync(join(f.workspace, path.slice(0, path.lastIndexOf("/"))), {
+				recursive: true,
+			});
+			writeFileSync(join(f.workspace, path), "added\n");
+			const patch = await collectPatch(f);
+			assert.equal(patch.kind, "collected");
+
+			if (patch.kind !== "collected") return;
+			assert.equal(patch.testInputsChanged, true);
+
+			const plan = trustedVisiblePlan(
+				f.base,
+				f.workspace,
+				"npm test",
+				replacement ? [{ path: "test/existing.ts" }] : [],
+			);
+
+			assert.equal(plan.testInputsChanged, true);
+			assert.equal(readFileSync(join(f.workspace, path), "utf8"), "added\n");
+		});
+
+for (const change of ["bytes", "mode", "deleted", "unchanged", "authorized"])
+	test(`test-input metadata preserves ${change} baseline handling`, async (t) => {
+		const f = fixture(t);
+
+		for (const root of [f.base, f.workspace]) {
+			writeFileSync(
+				join(root, "package.json"),
+				JSON.stringify({ scripts: { test: "node --test" } }),
+			);
+			mkdirSync(join(root, "test"));
+			writeFileSync(join(root, "test/existing.ts"), "base\n", {
+				mode: 0o644,
+			});
+		}
+
+		const path = join(f.workspace, "test/existing.ts");
+
+		if (change === "bytes" || change === "authorized")
+			writeFileSync(path, "changed\n");
+
+		if (change === "mode") chmodSync(path, 0o755);
+
+		if (change === "deleted") rmSync(path);
+		writeFileSync(join(f.workspace, "value"), "non-test\n");
+		const patch = await collectPatch(f);
+		assert.equal(patch.kind, "collected");
+
+		if (patch.kind !== "collected") return;
+		assert.equal(patch.testInputsChanged, change !== "unchanged");
+
+		const plan = trustedVisiblePlan(
+			f.base,
+			f.workspace,
+			"npm test",
+			change === "authorized" ? [{ path: "test/existing.ts" }] : [],
+		);
+
+		assert.equal(
+			plan.testInputsChanged,
+			change !== "unchanged" && change !== "authorized",
+		);
+		assert.equal(
+			readFileSync(path, "utf8"),
+			change === "authorized" ? "changed\n" : "base\n",
+		);
+		assert.equal(
+			trustedVisiblePlan(f.base, f.base, "npm test").testInputsChanged,
+			false,
+		);
+	});

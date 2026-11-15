@@ -457,12 +457,7 @@ export async function collectPatch(input: {
 			scriptsChanged:
 				JSON.stringify(scriptsOf(base)) !==
 				JSON.stringify(scriptsOf(candidate)),
-			testInputsChanged: [...base].some(
-				([path, entry]) =>
-					isTestInput(path) &&
-					(candidate.get(path)?.mode !== entry.mode ||
-						!candidate.get(path)?.data.equals(entry.data)),
-			),
+			testInputsChanged: changedPaths.some(isTestInput),
 			patchDigest: digestOf(result.stdout),
 			changedPaths,
 			policy,
@@ -591,7 +586,12 @@ export function trustedVisiblePlan(
 	const entries = tree(base),
 		candidate = tree(workspace);
 
-	let testInputsChanged = false;
+	let testInputsChanged = [...candidate.keys()].some(
+		(path) =>
+			isTestInput(path) &&
+			!entries.has(path) &&
+			!replacesTests.some((entry) => entry.path === path),
+	);
 
 	const baseManifest = objectOf(
 		parseJson(entries.get("package.json")?.data.toString() ?? ""),
