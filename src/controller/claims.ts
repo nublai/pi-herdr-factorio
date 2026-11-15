@@ -126,7 +126,7 @@ export interface RunFiles {
 		readonly digest: QuestionsDigest;
 		readonly commentId: string;
 	}): Promise<boolean>;
-	/** Records the blocked marker comment that lists a held generation's unverifiable judgments, replacing any earlier one. */
+	/** Records the review detail comment that lists a held generation's unverifiable judgments, replacing any earlier one. */
 	writeUnverifiableComment(input: {
 		readonly runId: Digest;
 		readonly repo: RepoSlug;

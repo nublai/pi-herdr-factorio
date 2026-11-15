@@ -546,19 +546,20 @@ export type OwnerJudgment = {
 export const OWNER_JUDGMENTS_MAX = 10;
 export const OWNER_REASON_MAX = 160;
 
-function plainReason(text: string): string {
-	return [...text]
-		.map((char) => {
-			const code = char.codePointAt(0) ?? 0;
+function plainChars(text: string): string[] {
+	return [...text].map((char) => {
+		const code = char.codePointAt(0) ?? 0;
 
-			return code < 32 ||
-				(code >= 127 && code <= 159) ||
-				/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(char)
-				? " "
-				: char;
-		})
-		.slice(0, OWNER_REASON_MAX)
-		.join("");
+		return code < 32 ||
+			(code >= 127 && code <= 159) ||
+			/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(char)
+			? " "
+			: char;
+	});
+}
+
+function ownerScenario(scenario: string): string {
+	return /^S[1-9][0-9]{0,2}$/.test(scenario) ? scenario : "S?";
 }
 
 /**
@@ -572,9 +573,23 @@ export function ownerJudgments(review: {
 	return unverifiableOnly(review)
 		.slice(0, OWNER_JUDGMENTS_MAX)
 		.map((j) => ({
-			scenario: /^S[1-9][0-9]{0,2}$/.test(j.scenario) ? j.scenario : "S?",
-			reason: plainReason(j.reason),
+			scenario: ownerScenario(j.scenario),
+			reason: plainChars(j.reason).slice(0, OWNER_REASON_MAX).join(""),
 		}));
+}
+
+/**
+ * Every unverifiable judgment routed to the owner, with the reviewer's full
+ * reason as plain text: the same scenario and character rules as
+ * `ownerJudgments`, without its count or length limit.
+ */
+export function unverifiableJudgments(review: {
+	readonly seats: readonly SeatResult[];
+}): readonly OwnerJudgment[] {
+	return unverifiableOnly(review).map((j) => ({
+		scenario: ownerScenario(j.scenario),
+		reason: plainChars(j.reason).join(""),
+	}));
 }
 
 export const UNVERIFIABLE_CODES = [

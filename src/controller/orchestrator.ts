@@ -27,6 +27,7 @@ import {
 	ReviewEvidenceUnavailable,
 	type ReviewInputRefusal,
 	reviewSeats,
+	unverifiableJudgments,
 } from "../candidate/review.ts";
 import {
 	type CandidateEffect,
@@ -99,6 +100,7 @@ import {
 	type RunStatus,
 	currentMarker,
 	formatMarker,
+	formatUnverifiableDetail,
 	isControllerComment,
 	isTerminal,
 	latestFor,
@@ -168,6 +170,7 @@ import {
 	accepted,
 	postKeyed,
 	postQuestions,
+	postUnverifiableDetail,
 	specified,
 } from "./effects.ts";
 import {
@@ -479,6 +482,8 @@ export class Orchestrator {
 	readonly #recoveredTests = new Map<Digest, Digest>();
 	/** Background visible tests being stopped; each keeps a slot until its scope is cleaned up. */
 	readonly #stopping = new Set<Promise<void>>();
+	/** The key of the review detail comment confirmed on each held run's issue. */
+	readonly #unverifiableDetails = new Map<Digest, string>();
 	#enabled = false;
 	#last: ReportInput | null = null;
 
@@ -5538,6 +5543,9 @@ export class Orchestrator {
 				);
 		}
 
+		if (status === "blocked" && holdReason === "review_unverifiable")
+			await this.#publishUnverifiableDetail(run);
+
 		if (changed) {
 			const post = await this.#writer.postComment(
 				run.issue,
@@ -5551,25 +5559,6 @@ export class Orchestrator {
 
 			if (post.kind === "posted") {
 				this.state.totals.markersPosted++;
-
-				if (
-					marker.status === "blocked" &&
-					holdReason === "review_unverifiable" &&
-					judgments.length > 0 &&
-					run.handoff?.kind === "selected" &&
-					!(await this.#input.files.writeUnverifiableComment({
-						runId: run.runId,
-						repo: this.#input.repo,
-						issue: run.issue,
-						generation: refOf(run.handoff.current.intent),
-						commentId: post.id,
-					}))
-				)
-					this.#input.log("unverifiable_reference_unavailable", {
-						issue: run.issue,
-						runId: run.runId,
-					});
-
 				this.#landed(run, marker);
 			} else {
 				run.inflight = { marker, outcome: post.kind, tick: this.#ticks };
@@ -5581,6 +5570,37 @@ export class Orchestrator {
 				});
 			}
 		}
+	}
+
+	/** Posts the held generation's review detail comment unless it is already confirmed. */
+	async #publishUnverifiableDetail(run: ActiveRun): Promise<void> {
+		if (
+			run.handoff?.kind !== "selected" ||
+			run.handoff.current.review === undefined
+		)
+			return;
+
+		const generation = refOf(run.handoff.current.intent);
+
+		const detail = formatUnverifiableDetail({
+			runId: run.runId,
+			generation,
+			judgments: unverifiableJudgments(run.handoff.current.review),
+		});
+
+		if (
+			detail !== null &&
+			this.#unverifiableDetails.get(run.runId) !== detail.key &&
+			(await postUnverifiableDetail(
+				this.#input,
+				this.#adapter,
+				this.#writer,
+				run,
+				generation,
+				detail,
+			))
+		)
+			this.#unverifiableDetails.set(run.runId, detail.key);
 	}
 
 	#landed(run: ActiveRun, marker: Marker): void {

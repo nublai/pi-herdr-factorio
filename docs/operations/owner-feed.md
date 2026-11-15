@@ -149,7 +149,7 @@ An entry of type `FeedEntry` in `src/views/feed.ts` has these fields.
 | `unverifiable` | array | `{scenario}` for each judgment review could not verify, when the run is held with reason `review_unverifiable`. Otherwise empty. See [Unverifiable judgments](#unverifiable-judgments). |
 | `unverifiableCode` | string or null | Why review could not verify: `evidence_missing`, `needs_execution` or `other`, when the run is held with reason `review_unverifiable`. Otherwise null. |
 | `unverifiableCount` | number | How many judgments review could not verify, when the run is held with reason `review_unverifiable`. Otherwise 0. |
-| `unverifiableUrl` | string or null | The blocked marker comment that gives the reviewer's reasons, when the run is held with reason `review_unverifiable` and the controller recorded the comment. Otherwise null. |
+| `unverifiableUrl` | string or null | The review detail comment that gives the reviewer's full reasons, when the run is held with reason `review_unverifiable` and the controller recorded the comment. Otherwise null. |
 | `steps` | array | One `FeedStep` per model stage that left a receipt. |
 
 A `FeedStep` has these members.
@@ -181,16 +181,16 @@ Shep's bridge must retain `questionsUrl` and use it as the tap target for an ent
 
 ### Unverifiable judgments
 
-When review blocks only on `unverifiable` judgments, the run starts no repair and waits for the owner with reason `review_unverifiable`, kind `blocked` and group `needs_you` ([Factory CLI](factory-cli.md#unverifiable-review-routing)). The feed carries no model-written text for this hold. The reviewer's reasons appear only in the run's blocked marker comment on the issue, made inert for GitHub, cut to 160 characters and kept within the 4 KiB marker cap. The entry carries four controller fields instead.
+When review blocks only on `unverifiable` judgments, the run starts no repair and waits for the owner with reason `review_unverifiable`, kind `blocked` and group `needs_you` ([Factory CLI](factory-cli.md#unverifiable-review-routing)). The feed carries no model-written text for this hold. The full reasons stay in the review on GitHub. The controller posts a review detail comment on the issue that lists every unverifiable judgment with the reviewer's full reason, made inert for GitHub. A reason is cut only beyond 2,000 characters, with a `(truncated: <n> more characters)` note. The comment stays within 60 KiB, under GitHub's comment limit, and a closing line counts any judgments that do not fit. The blocked marker comment keeps its short list: at most 10 reasons, each cut to 160 characters, within the 4 KiB marker cap. The entry carries four controller fields instead.
 
 - `unverifiable` lists those judgments, at most 10. Each item carries only `scenario`, a scenario ID of the form `S<n>`.
 - `unverifiableCount` is the number of unverifiable judgments in the held review, which can exceed the 10 listed.
 - `unverifiableCode` is one reason code for the whole hold.
-- `unverifiableUrl` links to the blocked marker comment with the reasons.
+- `unverifiableUrl` links to the review detail comment with the full reasons.
 
 Every other entry has `unverifiable: []`, `unverifiableCode: null`, `unverifiableCount: 0` and `unverifiableUrl: null`.
 
-**Reason code.** The controller emits exactly these three values. It derives them while reading the feed from stored records and never parses model text. When more than one applies, the first in this order wins.
+**Reason code.** The controller emits exactly these three values and never emits model-written prose. It derives them while reading the feed from stored records. For `needs_execution` it deterministically classifies the digest-bound judge text, which a model wrote, into this controller-defined closed set. No part of that text reaches the feed. When more than one applies, the first in this order wins.
 
 | Code | When |
 | --- | --- |
@@ -200,7 +200,7 @@ Every other entry has `unverifiable: []`, `unverifiableCode: null`, `unverifiabl
 
 A later v1 may add a code. Show an unknown code as plain text, the same as an unknown `reason`.
 
-**Comment link.** The controller records the blocked marker comment's ID from the authenticated POST response, as it does for the questions comment. The private `contracts/<runId>/unverifiable-comment.json` receipt holds only the run, repository, issue, held generation (round, number and digest) and comment ID. The controller replaces it each time it posts such a marker. The feed checks the receipt's private path and that each binding matches the entry and the held generation, then constructs `https://github.com/<repo>/issues/<issue>#issuecomment-<id>`. It never uses a URL from issue text, comment text or a model reply, and it never guesses one. A lost or unknown POST response, a failed receipt write or a receipt for another generation gives `unverifiableUrl: null`. Fall back to `issueUrl`.
+**Comment link.** The review detail comment ends with a key over the run, the held generation and the listed judgments. Before posting, the controller looks for that key among its own comments on the issue, so a restart or a later tick never posts the same detail twice. The controller records the detail comment's ID from the authenticated POST response, as it does for the questions comment. The private `contracts/<runId>/unverifiable-comment.json` receipt holds only the run, repository, issue, held generation (round, number and digest) and comment ID. The controller replaces it each time it posts a detail comment. The feed checks the receipt's private path and that each binding matches the entry and the held generation, then constructs `https://github.com/<repo>/issues/<issue>#issuecomment-<id>`. It never uses a URL from issue text, comment text or a model reply, and it never guesses one. A detail found by its key is not linked, because its ID did not come from a POST response. A lost or unknown POST response or a failed receipt write records nothing new, so the link stays null or keeps an earlier detail comment of the same generation. A receipt for another generation gives `unverifiableUrl: null`. Fall back to `issueUrl`.
 
 These are added v1 fields and an added `reason` value. A v1 reader that ignores them keeps working and shows the new reason as plain text. Shep's bridge needs no change. To show the hold, it can render the code, the count and the scenario IDs as plain text, and open `unverifiableUrl`, or `issueUrl` when it is null, for the reasons.
 
@@ -336,7 +336,7 @@ An unavailable read, per [Detect an unavailable feed](#detect-an-unavailable-fee
 | `budget.json` | `budget_exhausted`. |
 | `failed.json` | A failure with `failure.stage`, `class` and `reason`. |
 | `working.json` | A running build with a step, a valid intake ID and a title that holds HTML and Markdown. |
-| `review_unverifiable.json` | A published PR held as `review_unverifiable`, kind `blocked`, with two scenario IDs, `unverifiableCode: "evidence_missing"`, `unverifiableCount: 2` and the marker comment URL from a synthetic controller receipt. The reviewer's reasons in its state never appear. |
+| `review_unverifiable.json` | A published PR held as `review_unverifiable`, kind `blocked`, with two scenario IDs, `unverifiableCode: "evidence_missing"`, `unverifiableCount: 2` and the review detail comment URL from a synthetic controller receipt. The reviewer's reasons in its state never appear. |
 
 There is no `spec_review` capture. `test/fixtures/owner-feed/feed-v1.json` is the older multi-run golden. Each capture holds one run, so a client sees one kind at a time.
 

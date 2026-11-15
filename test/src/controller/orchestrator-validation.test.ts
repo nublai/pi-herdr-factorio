@@ -187,6 +187,9 @@ describe("controller-only validate", () => {
 	async function reviewingRun(
 		outcome?: JudgmentOutcome,
 		setup?: (f: ReturnType<typeof world>) => void,
+		judged: readonly { scenario: string; reason: string }[] = [
+			{ scenario: "S2", reason: "no live evidence" },
+		],
 	) {
 		const f = await waitingRun(setup);
 		const contract = await f.files.readContract(runOf(14));
@@ -208,7 +211,7 @@ describe("controller-only validate", () => {
 			originalBase: MAIN_SHA,
 			baseSha: MAIN_SHA,
 			gateSha: MAIN_SHA,
-			unjudged: outcome === undefined ? [] : ["S2"],
+			unjudged: outcome === undefined ? [] : judged.map((j) => j.scenario),
 		};
 
 		const seats = ["code-review", "security-review", "simplify"].map(
@@ -217,7 +220,7 @@ describe("controller-only validate", () => {
 				findings: [],
 				judgments:
 					seat === "code-review" && outcome !== undefined
-						? [{ scenario: "S2", outcome, reason: "no live evidence" }]
+						? judged.map((j) => ({ ...j, outcome }))
 						: [],
 				requested: "openai/gpt-6.1-sol",
 				observed: null,
@@ -814,8 +817,14 @@ describe("controller-only validate", () => {
 				);
 				assert.ok(book.accounts.every((a) => a.execution.stage !== "build"));
 
-				const posted = (f.github.issues.get(14)?.comments ?? []).at(-1);
-				const marker = posted?.body;
+				const comments = f.github.issues.get(14)?.comments ?? [];
+				const marker = comments.at(-1)?.body;
+
+				const detail = comments.find((c) =>
+					c.body.includes("<!-- factory-unverifiable "),
+				);
+
+				assert.match(detail?.body ?? "", /\n- S2: no live evidence\n/);
 				assert.match(marker ?? "", /"status":"blocked"/);
 				assert.match(marker ?? "", /\(review_unverifiable\)/);
 				assert.match(marker ?? "", /\n- S2: no live evidence\n/);
@@ -840,7 +849,7 @@ describe("controller-only validate", () => {
 						generation: book.current.intent.generation,
 						digest: book.current.intent.digest,
 					},
-					commentId: String(posted?.id),
+					commentId: String(detail?.id),
 				});
 
 				const launches = f.executor.launches.length;
@@ -858,6 +867,64 @@ describe("controller-only validate", () => {
 				JSON.stringify(book.work),
 			);
 		});
+
+	it("publishes every unverifiable judgment with its full reason in one detail comment, links it and never posts it twice (#795)", async () => {
+		const judged = Array.from({ length: 12 }, (_, i) => ({
+			scenario: `S${i + 2}`,
+			reason: `${"The reviewer saw no trusted run output for this scenario ".repeat(4)}detail ${i + 2} ends here`,
+		}));
+
+		assert.ok(judged.every((j) => j.reason.length > 160));
+		const f = await reviewingRun("unverifiable", undefined, judged);
+		f.executor.behaviors = [{ kind: "pass", usage: 11 }];
+		await once(f.controller);
+		await f.controller.tick();
+		const book = f.files.claims.get(runOf(14))?.handoff;
+		assert.ok(book?.kind === "selected");
+		assert.ok(book.work.kind === "held", JSON.stringify(book.work));
+		assert.equal(book.work.reason, "review_unverifiable");
+
+		const details = () =>
+			(f.github.issues.get(14)?.comments ?? []).filter((c) =>
+				c.body.includes("<!-- factory-unverifiable "),
+			);
+
+		assert.equal(details().length, 1);
+		const [detail] = details();
+		assert.ok(detail !== undefined);
+
+		for (const j of judged)
+			assert.ok(
+				detail.body.includes(`\n- ${j.scenario}: ${j.reason}\n`),
+				j.scenario,
+			);
+
+		const marker = (f.github.issues.get(14)?.comments ?? []).at(-1);
+		assert.match(marker?.body ?? "", /\(review_unverifiable\)/);
+		assert.ok(!(marker?.body ?? "").includes("detail 2 ends here"));
+		assert.ok(!(marker?.body ?? "").includes("S13:"));
+
+		const receipt = () =>
+			readFileSync(
+				join(
+					f.files.artifactRoot,
+					"contracts",
+					runOf(14),
+					"unverifiable-comment.json",
+				),
+				"utf8",
+			);
+
+		const linked = receipt();
+		assert.equal(JSON.parse(linked).commentId, String(detail.id));
+		assert.notEqual(String(detail.id), String(marker?.id));
+
+		await f.controller.tick();
+		await f.start().tick();
+		await f.start().tick();
+		assert.equal(details().length, 1);
+		assert.equal(receipt(), linked);
+	});
 
 	for (const reason of ["evidence_unavailable"])
 		it(`holds a candidate effect's input refusal (${reason}) without crashing the tick`, async () => {
