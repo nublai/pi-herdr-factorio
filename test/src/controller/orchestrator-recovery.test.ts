@@ -941,6 +941,67 @@ describe("Orchestrator persisted claim slots", () => {
 });
 
 describe("Orchestrator claims recorded before their first marker", () => {
+	for (const eligibility of ["closed", "unlabeled", "ready", "failed"]) {
+		it(`verifies a listed unmarked recovery before claimed: ${eligibility}`, async () => {
+			const { github, clock, files, executor, wire, start } = world();
+			const issue = github.add(labeled(14));
+
+			github.posts = ["lost"];
+			await start().tick();
+			assert.equal(files.claims.get(runOf(14))?.seq, null);
+			const stale = { ...issue };
+
+			if (eligibility === "closed") issue.state = "closed";
+
+			if (eligibility === "unlabeled") issue.labels = [];
+			let reads = 0;
+			let beforeClaimed = false;
+
+			wire.intercept = async (command, args) => {
+				const path = args.find((arg) => arg.startsWith("repos/")) ?? "";
+
+				if (path.includes("/issues?")) {
+					github.issues.set(14, stale);
+
+					try {
+						return await github.exec(command, args);
+					} finally {
+						github.issues.set(14, issue);
+					}
+				}
+
+				if (!args.includes("--method") && path.endsWith("/issues/14")) {
+					reads++;
+					beforeClaimed = statuses(github, 14).length === 0;
+
+					if (eligibility === "failed") return networkError();
+				}
+
+				return github.exec(command, args);
+			};
+
+			clock.t += 30_000;
+			await start().tick();
+
+			assert.equal(reads, 1);
+			assert.equal(beforeClaimed, true);
+
+			if (eligibility === "closed" || eligibility === "unlabeled") {
+				assert.deepEqual(statuses(github, 14), ["1:released"]);
+				assert.equal(executor.launches.length, 0);
+			} else if (eligibility === "failed") {
+				assert.deepEqual(statuses(github, 14), []);
+				assert.equal(executor.launches.length, 0);
+				wire.intercept = null;
+				clock.t += 30_000;
+				await start().tick();
+				assert.equal(statuses(github, 14)[0], "1:claimed");
+			} else {
+				assert.equal(statuses(github, 14)[0], "1:claimed");
+			}
+		});
+	}
+
 	it("recovers one the candidate list omits from the issue read, with its own slot, before fresh admissions", async () => {
 		const { github, clock, files, wire, start } = world();
 

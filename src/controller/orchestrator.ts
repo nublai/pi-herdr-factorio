@@ -3263,6 +3263,17 @@ export class Orchestrator {
 
 		this.state.runs.set(issue, run);
 		this.#observeClaim(run, this.#confirmedBy(run));
+
+		if (local.kind === "found") {
+			this.#observeClaim(run, await this.#stillReady(run));
+
+			if (!this.#claimView(run).launch) {
+				this.state.runs.delete(issue);
+
+				return null;
+			}
+		}
+
 		this.state.totals.claims++;
 		this.#see(issue, record.updatedAt, { kind: "claimed" });
 		this.#input.log("claim_taken", {
