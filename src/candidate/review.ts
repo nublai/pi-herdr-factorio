@@ -56,6 +56,7 @@ export type TrustedCheck = {
 	readonly name: string;
 	readonly exitCode: number;
 	readonly durationMs: number;
+	readonly testGlobs?: readonly string[] | "globs not recorded";
 };
 
 /**
@@ -84,11 +85,31 @@ export type TrustedEvidence = {
 
 const TRUSTED_CHECKS_MAX = 32;
 
+const TRUSTED_TEST_GLOBS = [
+	"test/src/**/*.test.ts",
+	"test/host/**/*.test.ts",
+	"test/integration/*.test.ts",
+];
+
 function trustedChecks(
 	value: JsonValue | undefined,
 	verdict: Verdict,
+	rawGlobs: JsonValue | undefined,
 ): TrustedCheck[] | null {
 	const items = arrayOf(value);
+
+	const globs =
+		rawGlobs === undefined ? "globs not recorded" : textsOf(rawGlobs);
+
+	if (
+		globs === null ||
+		(globs !== "globs not recorded" &&
+			(globs.length === 0 ||
+				globs.length > TRUSTED_TEST_GLOBS.length ||
+				new Set(globs).size !== globs.length ||
+				globs.some((glob) => !TRUSTED_TEST_GLOBS.includes(glob))))
+	)
+		return null;
 
 	if (
 		items === null ||
@@ -119,7 +140,13 @@ function trustedChecks(
 					fieldOf(check, "signal") == null)
 		)
 			return null;
-		checks.push({ name, exitCode, durationMs });
+		const result = { name, exitCode, durationMs };
+
+		checks.push(
+			name === "baseline_tests" || name === "main_tests"
+				? { ...result, testGlobs: globs }
+				: result,
+		);
 	}
 
 	return checks;
@@ -187,7 +214,13 @@ export function trustedEvidence(input: {
 	const gate = objectOf(parseJson(gateReceipt));
 	const ci = objectOf(parseJson(report));
 	const reportId = countOf(fieldOf(ci, "reportId"));
-	const checks = trustedChecks(fieldOf(gate, "checks"), verdict);
+
+	const checks = trustedChecks(
+		fieldOf(gate, "checks"),
+		verdict,
+		fieldOf(gate, "testGlobs"),
+	);
+
 	const heldout = heldoutTotals(fieldOf(gate, "heldoutCounts"));
 
 	if (

@@ -35,7 +35,7 @@ import {
 	contractDigestOf,
 	type Contract,
 } from "../../../src/contract/contract.ts";
-import { parseJson } from "../../../src/core/json.ts";
+import { objectOf, parseJson } from "../../../src/core/json.ts";
 import { digestOf } from "../../../src/core/run.ts";
 import { isRepoSlug } from "../../../src/trust/platform.ts";
 
@@ -402,6 +402,12 @@ test("a candidate defect cannot pass preserved regression tests; receipts bind b
 		install: false,
 	});
 
+	assert.deepEqual(
+		objectOf(
+			parseJson(readFileSync(join(f.root, "result", "receipt.json"), "utf8")),
+		)?.testGlobs,
+		["test/src/**/*.test.ts"],
+	);
 	assert.equal(receipt.gateSha, f.gateSha);
 	assert.equal(receipt.candidateSha, candidateSha);
 	assert.equal(receipt.status, "failed");
@@ -1398,9 +1404,17 @@ test("main integration suites run on the baseline and candidate even when the ca
 	);
 	const gateSha = f.commit();
 	f.git("rm", "test/integration/driver.test.ts");
-	f.put(path, JSON.stringify(manifest));
+	f.put(
+		path,
+		JSON.stringify({ ...manifest, testGlobs: ["candidate-controlled"] }),
+	);
 	const candidateSha = f.commit();
 	const r = await checkCandidate({ ...gateInput(f, candidateSha), gateSha });
+	assert.deepEqual(r.testGlobs, [
+		"test/src/**/*.test.ts",
+		"test/integration/*.test.ts",
+	]);
+	assert.equal(r.gateSha, gateSha);
 	assert.equal(r.status, "passed");
 	assert.equal(r.baselineCounts["test/integration/driver.test.ts"], 1);
 	assert.equal(r.candidateCounts["test/integration/driver.test.ts"], 1);

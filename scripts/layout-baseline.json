@@ -5176,7 +5176,7 @@
 				},
 				{
 					"file": "host/gates/manifest.ts",
-					"expression": "return { checks, tests };"
+					"expression": "return { checks, tests, testGlobs };"
 				},
 				{
 					"file": "host/gates/gates.ts",

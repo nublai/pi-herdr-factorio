@@ -81,6 +81,7 @@ export type GateReceipt = {
 	status: "passed" | "failed" | "incomplete";
 	reason: string | null;
 	readonly checks: GateCheck[];
+	testGlobs?: readonly string[];
 	ignoredChanges: readonly string[];
 	replacedTests: readonly (ReplacedTest & {
 		beforeDigest: string;
@@ -353,6 +354,7 @@ export async function checkCandidate(
 		receipt.replacementsDigest = digest;
 		await exportTree(input.repository, input.gateSha, baseline);
 		const manifest = manifestOf(baseline);
+		receipt.testGlobs = manifest.testGlobs;
 
 		const material = await materializeCandidate({
 			...input,
