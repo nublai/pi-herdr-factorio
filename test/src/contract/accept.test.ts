@@ -17,6 +17,7 @@ import { isGitSha } from "../../../src/config/schema.ts";
 import {
 	ACCEPTANCE_ISOLATION,
 	acceptancePrompt,
+	readAcceptanceSuite,
 	SCAN_GUIDANCE,
 	SCAN_SENTENCE,
 	SUPPRESSION_EXAMPLES,
@@ -90,7 +91,201 @@ const suite = {
 	],
 };
 
+const MUST_ACCEPT_JUDGES = [
+	"Review the added due-retry test: establish a due retry, fail its direct issue GET while retaining the stale list entry, assert the GET occurred, assert deferral, and assert no additional launch.",
+	"The test asserts deferral and no additional launch.",
+	"Review the added test: establish a stale list entry, assert the GET occurred, and assert no launch.",
+	"Confirm the change does not modify excluded files.",
+	"Confirm the diff does not touch .github or test/acceptance.",
+	"Check that the error message names the missing field.",
+	"Verify the test runs the CLI with --help and asserts the exit code.",
+	"Check the README section on running the CLI matches the new flag.",
+	"Confirm the diff keeps the attempt and run counters unchanged.",
+	"Verify the receipt records the model and run identity.",
+	"Run IDs remain derived from the issue number in the diff.",
+	"Running totals still come from the usage ledger.",
+	"Executing stages keep their captured identity.",
+	"Read the controller diff and run through each branch of the switch to confirm every case returns.",
+	"Confirm the test passes a frozen clock to the controller.",
+	"Verify the build passes the abort signal to the runner.",
+	"Check that lint suppressions are not added.",
+	"Confirm format of the log line matches the contract wording.",
+	"Ensure CI workflow files are untouched.",
+	"Tests for invalid input remain present and unchanged.",
+	"Review whether the retry path, once due, then runs the GET before relaunching.",
+	"Confirm the docs explain how to run the new command.",
+	"Verify the test mutates only a copy of the fixture.",
+	"Confirm the handler rejects input and then reproduces the original error message verbatim.",
+	"Confirm the change preserves run state; then review the persisted record.",
+	"Confirm the test checks that typecheck failures are reported.",
+	"Running tests record their captured identity.",
+	"Confirm the test succeeds in preserving the original error message.",
+	"Verify the test suite passes an abort signal to each test.",
+];
+
+const MUST_REJECT_JUDGES = [
+	"Require the trusted npm run check gate to pass...",
+	"Independently introduce each regression and verify the dedicated test fails",
+	"Verify the trusted npm run check gate passes, including existing tests and the new controller regression tests; do not invoke the aggregate gate from held-out tests.",
+	"Ensure CI is green.",
+	"All existing tests continue to pass.",
+	"Verify npm run check succeeds.",
+	"Mutation-test each case.",
+	"Existing tests pass.",
+	"Verify that all tests pass.",
+	"Require npm test to pass.",
+	"Typecheck, lint and format pass.",
+	"Tests, typecheck, lint and format all pass.",
+	"The candidate passes all trusted gates.",
+	"Confirm the new test fails on the base commit.",
+	"Temporarily revert the fix and confirm the test fails.",
+	"Break the retry condition and verify the test catches it.",
+	"Invoke the CLI with --help and inspect the output.",
+	"Verify CI passes.",
+	"Confirm the pipeline is green.",
+	"No existing test regresses.",
+	"Verify that npm run check exits successfully, including typecheck, lint, format checking and the existing tests.",
+	"Require the separately executed trusted baseline, main and candidate gates to pass, including typecheck, lint, formatting, and existing status and accounting tests.",
+	"Require the trusted typecheck, lint, format and main-test gates to pass, including all existing main tests; do not rerun npm run check inside held-out tests.",
+	"The trusted baseline, main and candidate gates must report that npm run check passes, including all existing main tests; do not rerun the aggregate gate in the held-out suite.",
+	"Verify the separately trusted npm run check gate passes, including existing status and accounting tests; do not run an aggregate gate again inside acceptance checks.",
+	"Run npm run check and require success, including existing tests.",
+	"Verify npm run check passes, including all existing tests. Also verify test/round-label.test.ts directly imports and tests the named export.",
+	"Introduce a regression in the retry guard and confirm the dedicated test fails.",
+	"Mutation test each case.",
+	"Verify the gates are green.",
+	"Read the diff and run the CLI.",
+	"Read the diff then run npm test.",
+	"Read the diff. Run the tests.",
+	"Read the diff; invoke the command.",
+	"Confirm by executing the CLI.",
+	"Check by running the test suite.",
+	"Verify by mutation-testing each case.",
+	"Inject a regression and verify the test fails.",
+	"Re-run the test suite.",
+	"Require check:layout to pass.",
+	"Confirm check:decisions succeeds.",
+	"Verify npm run test:integration passes.",
+	"Ensure npm run format:check passes.",
+	"Execute code to confirm the behavior.",
+	"Run the CLI and inspect its output.",
+	"Verify by invoking the command.",
+	"Confirm by reproducing the failure.",
+	"Check by mutating the retry condition.",
+	"Verify by injecting a regression.",
+	"Check by introducing a regression.",
+	"Require npm run typecheck to pass.",
+	"Require npm run lint to pass.",
+	"Require npm run format to pass.",
+	"Require npm run test to pass.",
+	"Confirm `NPM RUN CHECK:LAYOUT` succeeds.",
+	"Require npm run check:decisions to pass.",
+];
+
 describe("held-out acceptance output", () => {
+	for (const judge of MUST_ACCEPT_JUDGES)
+		it(`must accept judge: ${judge}`, { timeout: 1000 }, () => {
+			assert.equal(
+				writeAcceptance(
+					JSON.stringify({
+						...suite,
+						scenarios: [
+							...suite.scenarios,
+							{ id: "S3", criteria: ["A2"], checks: [], judge },
+						],
+					}),
+					contract,
+				).kind,
+				"suite",
+			);
+		});
+
+	for (const judge of MUST_REJECT_JUDGES)
+		it(`must reject judge: ${judge}`, { timeout: 1000 }, () => {
+			const parsed = writeAcceptance(
+				JSON.stringify({
+					...suite,
+					scenarios: [
+						...suite.scenarios,
+						{ id: "S3", criteria: ["A2"], checks: [], judge },
+					],
+				}),
+				contract,
+			);
+
+			assert.equal(parsed.kind, "malformed");
+
+			if (parsed.kind === "malformed")
+				assert.ok(
+					parsed.reason === "judge_restates_gate" ||
+						parsed.reason === "judge_requires_execution",
+				);
+		});
+
+	it("reads and reuses a pre-validator stored suite without re-judging its text", {
+		timeout: 5000,
+	}, async () => {
+		const stored = {
+			version: 2,
+			scenarios: [
+				{
+					id: "S1",
+					kind: "new_behavior",
+					criteria: ["A1"],
+					checks: ["version.test.ts"],
+					judge: null,
+				},
+				{
+					id: "S2",
+					kind: "preservation",
+					criteria: ["A2"],
+					checks: [],
+					judge: "Verify the trusted npm run check gate passes.",
+				},
+			],
+			files: suite.files.filter((file) => file.path === "version.test.ts"),
+		};
+
+		const parsed = readAcceptanceSuite(stored, contract);
+		assert.equal(parsed.kind, "suite");
+
+		if (parsed.kind !== "suite") return;
+		const root = mkdtempSync(join(tmpdir(), "factory-stored-judge-"));
+		const contractDigest = contractDigestOf(contractBytes(contract));
+
+		try {
+			const saved = await fileArtifacts(root).store({
+				contract,
+				contractDigest,
+				suite: parsed.suite,
+				model: "openai/gpt-6.1-sol",
+				observed: null,
+			});
+
+			assert.equal(saved.kind, "found");
+
+			const recovered = await fileArtifacts(root).read(
+				contract.runId,
+				contract,
+				contractDigest,
+			);
+
+			assert.equal(recovered.kind, "found");
+
+			if (saved.kind === "found" && recovered.kind === "found") {
+				assert.equal(
+					saved.receipt.acceptanceDigest,
+					recovered.receipt.acceptanceDigest,
+				);
+				assert.equal(
+					recovered.suite.scenarios[1]?.judge,
+					stored.scenarios[1]?.judge,
+				);
+			}
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
 	it("publishes only validated IDs and mappings through the shared renderer", () => {
 		const digest = digestOf("suite");
 
