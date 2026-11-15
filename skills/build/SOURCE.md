@@ -5,3 +5,5 @@ The sandbox protocol is original to this repository. The applicable Feature or B
 Amended on 2026-11-15 for #735 round 3 with the `replacesTests` paragraph, original to this repository, written from the owner's decision and the replacement rules in `docs/operations/factory-cli.md`. No upstream text was added.
 
 Amended again on 2026-11-15 for #807 and the #430 diagnosis with the rule that new regression tests go in new test files, original to this repository. No upstream text was added.
+
+Amended a third time on 2026-11-15 after root's review of #807 (finding M2) with the rule that new helpers and fixtures also go in new files, original to this repository. No upstream text was added.

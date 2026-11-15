@@ -425,7 +425,7 @@ function hasDuplicateKey(text: string): boolean {
 	return false;
 }
 
-// Loaded on first use, so the controller and gates that import this module never load the compiler.
+// Loaded on first use, so importing this module does not load the compiler.
 const loadTypescript = (): typeof TS =>
 	createRequire(import.meta.url)("typescript");
 
