@@ -22,6 +22,7 @@ export {
 } from "../core/run.ts";
 
 import type { Contract } from "../contract/contract.ts";
+import { judgeOnlyRefusal } from "../contract/acceptance.ts";
 import {
 	arrayOf,
 	countOf,
@@ -545,19 +546,20 @@ export type OwnerJudgment = {
 export const OWNER_JUDGMENTS_MAX = 10;
 export const OWNER_REASON_MAX = 160;
 
-function plainReason(text: string): string {
-	return [...text]
-		.map((char) => {
-			const code = char.codePointAt(0) ?? 0;
+function plainChars(text: string): string[] {
+	return [...text].map((char) => {
+		const code = char.codePointAt(0) ?? 0;
 
-			return code < 32 ||
-				(code >= 127 && code <= 159) ||
-				/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(char)
-				? " "
-				: char;
-		})
-		.slice(0, OWNER_REASON_MAX)
-		.join("");
+		return code < 32 ||
+			(code >= 127 && code <= 159) ||
+			/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/.test(char)
+			? " "
+			: char;
+	});
+}
+
+function ownerScenario(scenario: string): string {
+	return /^S[1-9][0-9]{0,2}$/.test(scenario) ? scenario : "S?";
 }
 
 /**
@@ -571,9 +573,52 @@ export function ownerJudgments(review: {
 	return unverifiableOnly(review)
 		.slice(0, OWNER_JUDGMENTS_MAX)
 		.map((j) => ({
-			scenario: /^S[1-9][0-9]{0,2}$/.test(j.scenario) ? j.scenario : "S?",
-			reason: plainReason(j.reason),
+			scenario: ownerScenario(j.scenario),
+			reason: plainChars(j.reason).slice(0, OWNER_REASON_MAX).join(""),
 		}));
+}
+
+/**
+ * Every unverifiable judgment routed to the owner, with the reviewer's full
+ * reason as plain text: the same scenario and character rules as
+ * `ownerJudgments`, without its count or length limit.
+ */
+export function unverifiableJudgments(review: {
+	readonly seats: readonly SeatResult[];
+}): readonly OwnerJudgment[] {
+	return unverifiableOnly(review).map((j) => ({
+		scenario: ownerScenario(j.scenario),
+		reason: plainChars(j.reason).join(""),
+	}));
+}
+
+export const UNVERIFIABLE_CODES = [
+	"evidence_missing",
+	"needs_execution",
+	"other",
+] as const;
+
+export type UnverifiableCode = (typeof UNVERIFIABLE_CODES)[number];
+
+/**
+ * Why review could not verify, from controller facts only, by precedence:
+ * `evidence_missing` when the review had no trusted-pipeline evidence, then
+ * `needs_execution` when any unverifiable scenario's judge is one the accept
+ * validator refuses as `judge_requires_execution`, otherwise `other`. A
+ * `null` judge is a scenario whose bound judge text is unavailable.
+ */
+export function unverifiableCode(input: {
+	readonly trusted: boolean;
+	readonly judges: readonly (string | null)[];
+}): UnverifiableCode {
+	if (!input.trusted) return "evidence_missing";
+
+	return input.judges.some(
+		(judge) =>
+			judge !== null && judgeOnlyRefusal(judge) === "judge_requires_execution",
+	)
+		? "needs_execution"
+		: "other";
 }
 
 export function reviewSeats(

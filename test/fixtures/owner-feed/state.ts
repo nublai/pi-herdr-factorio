@@ -1,11 +1,20 @@
 import assert from "node:assert/strict";
-import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { join, relative, sep } from "node:path";
 import {
 	fileAdmissionStore,
 	snapshotDigest,
 } from "../../../src/trust/admission.ts";
-import { digestOf, runIdOf } from "../../../src/core/run.ts";
+import { type Digest, digestOf, runIdOf } from "../../../src/core/run.ts";
+import { fileRunFiles } from "../../../host/controller/run-files.ts";
+import { fileArtifacts } from "../../../src/contract/artifacts.ts";
+import {
+	type Contract,
+	contractBytes,
+	contractDigestOf,
+} from "../../../src/contract/contract.ts";
+import { validationDir } from "../../../src/candidate/validation.ts";
+import { type GenerationRef, refOf } from "../../../src/candidate/state.ts";
 import { isGitSha } from "../../../src/config/schema.ts";
 import { isRepoSlug } from "../../../src/trust/platform.ts";
 import type { JsonValue } from "../../../src/core/json.ts";
@@ -107,8 +116,11 @@ export async function addRun(
 }
 
 /** A published PR that is certified and waiting for the owner's review. */
-function waitingBook() {
-	const refreshing = candidateLifecycleFixture();
+function waitingBook(acceptanceDigest?: Digest) {
+	const refreshing = candidateLifecycleFixture(
+		acceptanceDigest === undefined ? {} : { acceptanceDigest },
+	);
+
 	assert.ok(refreshing.kind === "selected");
 
 	const certified = refreshing.history.find(
@@ -142,8 +154,12 @@ function waitingBook() {
  * A run whose certified PR waits for the owner, which is the pr_review kind.
  * The candidate book is pinned to issue 1, so the run must be issue 1.
  */
-export async function addWaitingRun(root: string, title: string) {
-	const { book, projection } = waitingBook();
+export async function addWaitingRun(
+	root: string,
+	title: string,
+	acceptanceDigest?: Digest,
+) {
+	const { book, projection } = waitingBook(acceptanceDigest);
 
 	return addRun(root, 1, projection.status, {
 		title,
@@ -151,6 +167,179 @@ export async function addWaitingRun(root: string, title: string) {
 		enteredAt: now - 4 * 86_400_000,
 		handoff: JSON.parse(JSON.stringify(book)),
 	});
+}
+
+/**
+ * Holds the waiting run on issue 1 as `review_unverifiable`, with these
+ * code-review judgments on its current review. Calling it again replaces them.
+ * Returns the held generation's reference.
+ */
+export async function holdUnverifiable(
+	root: string,
+	runId: string,
+	judgments: readonly { scenario: string; reason: string }[],
+): Promise<GenerationRef> {
+	const path = join(root, "claims", `${runId}.json`);
+	const claim = JSON.parse(await readFile(path, "utf8"));
+	const review = claim.handoff.current.certification.review;
+	const reason = "review_unverifiable";
+
+	await save(root, ["claims", `${runId}.json`], {
+		...claim,
+		status: "blocked",
+		handoff: {
+			...claim.handoff,
+			current: {
+				...claim.handoff.current,
+				review: {
+					...review,
+					blocking: true,
+					seats: review.seats.map((seat: { seat: string }) =>
+						seat.seat === "code-review"
+							? {
+									...seat,
+									judgments: judgments.map((j) => ({
+										...j,
+										outcome: "unverifiable",
+									})),
+								}
+							: seat,
+					),
+				},
+			},
+			published: {
+				...claim.handoff.published,
+				readiness: { kind: "not_ready", reason, since: now },
+			},
+			work: { kind: "held", reason, since: now },
+		},
+	});
+
+	const book = parseCandidateState(claim.handoff);
+	assert.ok(book?.kind === "selected");
+
+	return refOf(book.current.intent);
+}
+
+/**
+ * Saves the trusted gate receipt and CI report of the run's current
+ * generation, matching its stored verdict, so `trustedEvidence` accepts them.
+ */
+export async function saveTrustedRecords(root: string, runId: string) {
+	const claim = JSON.parse(
+		await readFile(join(root, "claims", `${runId}.json`), "utf8"),
+	);
+
+	const book = parseCandidateState(claim.handoff);
+	assert.ok(book?.kind === "selected");
+	const { intent, verdict, report } = book.current;
+	assert.ok(verdict !== null && report !== null);
+
+	const dir = relative(
+		root,
+		validationDir(root, runId, intent.round, intent.generation),
+	).split(sep);
+
+	await save(root, [...dir, "report.json"], report);
+	await save(root, [...dir, "receipt.json"], {
+		version: 2,
+		status: "passed",
+		modelCalls: 0,
+		candidateSha: verdict.candidateSha,
+		gateSha: verdict.gateSha,
+		heldoutDigest: verdict.heldoutDigest,
+		nonce: report.nonce,
+		requiredChecks: [...verdict.requiredChecks],
+		heldoutFailures: [],
+		heldoutCounts: { "test/acceptance/1/checks/a.test.ts": 1 },
+		checks: verdict.requiredChecks.map((name) => ({
+			name,
+			exitCode: 0,
+			durationMs: 1000,
+			signal: null,
+		})),
+	});
+}
+
+/**
+ * Stores a contract and an acceptance suite for issue 1's run: S1 is checked,
+ * and each `judges` entry is a judge-only scenario. Returns the suite's
+ * acceptance digest.
+ */
+export async function saveJudgeSuite(
+	root: string,
+	judges: Readonly<Record<string, string>>,
+): Promise<Digest> {
+	const runId = runIdOf({ repo, issue: 1, eventId: "1" });
+
+	const contract: Contract = {
+		version: 2,
+		runId,
+		issue: 1,
+		base: { repo, sha },
+		snapshot: {
+			digest: digestOf("snapshot"),
+			source: "unedited",
+			eventId: "1",
+			eventAt: new Date(now - 86_400_000).toISOString(),
+		},
+		link: null,
+		summary: "Change a",
+		behavior: ["Return 2"],
+		acceptance: [{ id: "A1", kind: "new_behavior", text: "Return 2" }],
+		exclusions: [],
+		compatibility: [],
+		limits: [],
+		files: ["src/a.ts"],
+		evidence: [],
+	};
+
+	const bytes = contractBytes(contract);
+	const contractDigest = contractDigestOf(bytes);
+	assert.ok(
+		await fileRunFiles(root).writeContract({
+			contract,
+			bytes,
+			digest: contractDigest,
+		}),
+	);
+
+	const stored = await fileArtifacts(root).store({
+		contract,
+		contractDigest,
+		suite: {
+			version: 2,
+			scenarios: [
+				{
+					id: "S1",
+					kind: "new_behavior",
+					criteria: ["A1"],
+					checks: ["a.test.ts"],
+					judge: null,
+				},
+				...Object.entries(judges).map(([id, judge]) => ({
+					id,
+					kind: "new_behavior" as const,
+					criteria: ["A1"],
+					checks: [],
+					judge,
+				})),
+			],
+			files: [
+				{
+					path: "a.test.ts",
+					type: "node:test",
+					content: "import {test} from 'node:test'; test('a',()=>{});",
+				},
+			],
+		},
+		model: "openai/gpt-6.1-sol",
+		observed: null,
+	});
+
+	assert.ok(stored.kind === "found");
+
+	return stored.receipt.acceptanceDigest;
 }
 
 /** A run that continues an answered question, which is the question_answered kind. */

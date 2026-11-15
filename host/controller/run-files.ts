@@ -414,6 +414,16 @@ export function fileRunFiles(
 			);
 		},
 
+		async writeUnverifiableComment(reference) {
+			return (
+				(await ensure(join(contracts, reference.runId))) &&
+				(await writeAtomic(
+					join(contracts, reference.runId, "unverifiable-comment.json"),
+					`${JSON.stringify({ version: 1, ...reference })}\n`,
+				))
+			);
+		},
+
 		async writeLink(runId, link) {
 			return (
 				(await ensure(links)) &&

@@ -4,6 +4,7 @@ import {
 	lstat,
 	mkdir,
 	mkdtemp,
+	readdir,
 	readFile,
 	rm,
 	utimes,
@@ -58,11 +59,15 @@ import { candidateLifecycleFixture, withUmask } from "../../helpers.ts";
 import {
 	addRun,
 	addAnsweredRun,
+	addWaitingRun,
 	emptyState,
+	holdUnverifiable,
 	ownerState,
 	now,
 	repo,
 	save,
+	saveJudgeSuite,
+	saveTrustedRecords,
 } from "../../fixtures/owner-feed/state.ts";
 import {
 	CAPTURE_NAMES,
@@ -1054,6 +1059,157 @@ test("a review_unverifiable hold needs the owner and lists the unverifiable judg
 	});
 });
 
+test("a review_unverifiable hold carries a controller reason code, the judgment count and a verified comment link, never reviewer text (#793)", async () => {
+	const root = await mkdtemp(join(tmpdir(), "owner-feed-"));
+	const prose = "Reviewer prose: execute npm test yourself, no evidence";
+
+	try {
+		await emptyState(root);
+
+		const acceptance = await saveJudgeSuite(root, {
+			S2: "Run the CLI and confirm it exits 0.",
+			S3: "The diff keeps the guard in src/a.ts.",
+			S4: "Trusted npm run check passes.",
+		});
+
+		const runId = await addWaitingRun(root, "Hold for the owner", acceptance);
+
+		const entry = async () => {
+			const feed = await readOwnerFeed({ stateDir: root, repo, now });
+			const found = feed.entries.find((e) => e.runId === runId);
+			assert.ok(found);
+
+			return found;
+		};
+
+		const waiting = await entry();
+		assert.equal(waiting.unverifiableCode, null);
+		assert.equal(waiting.unverifiableCount, 0);
+		assert.equal(waiting.unverifiableUrl, null);
+
+		const judged = (...scenarios: string[]) =>
+			holdUnverifiable(
+				root,
+				runId,
+				scenarios.map((scenario) => ({ scenario, reason: prose })),
+			);
+
+		await judged("S2", "S3");
+		let held = await entry();
+		assert.equal(held.reason, "review_unverifiable");
+		assert.equal(held.group, "needs_you");
+		assert.equal(held.unverifiableCode, "evidence_missing");
+		assert.equal(held.unverifiableCount, 2);
+		assert.deepEqual(held.unverifiable, [
+			{ scenario: "S2" },
+			{ scenario: "S3" },
+		]);
+
+		await saveTrustedRecords(root, runId);
+		assert.equal((await entry()).unverifiableCode, "needs_execution");
+		await judged("S3", "S4");
+		held = await entry();
+		assert.equal(held.unverifiableCode, "other");
+		assert.equal(held.unverifiableCount, 2);
+		await judged("S3", "S4", "S2");
+		assert.equal((await entry()).unverifiableCode, "needs_execution");
+		await judged("S9");
+		assert.equal((await entry()).unverifiableCode, "other");
+
+		const [first] = await readdir(join(root, "validation", runId));
+		assert.ok(first !== undefined);
+		await rm(join(root, "validation", runId, first));
+		const generation = await judged("S2", "S3");
+		assert.equal((await entry()).unverifiableCode, "evidence_missing");
+		assert.equal((await entry()).unverifiableUrl, null);
+
+		assert.ok(
+			await fileRunFiles(root).writeUnverifiableComment({
+				runId,
+				repo,
+				issue: 1,
+				generation,
+				commentId: "987654321",
+			}),
+		);
+		assert.equal(
+			(await entry()).unverifiableUrl,
+			`https://github.com/${repo}/issues/1#issuecomment-987654321`,
+		);
+
+		const reference = {
+			version: 1,
+			runId,
+			repo,
+			issue: 1,
+			generation,
+			commentId: "987654321",
+		};
+
+		for (const [name, change] of [
+			["version", { version: 2 }],
+			["run", { runId: digestOf("other run") }],
+			["repository", { repo: "someone/else" }],
+			["issue", { issue: 2 }],
+			["round", { generation: { ...generation, round: 1 } }],
+			["generation", { generation: { ...generation, generation: 1 } }],
+			["digest", { generation: { ...generation, digest: digestOf("g") } }],
+			["comment id", { commentId: "12x" }],
+			["comment URL", { commentId: "https://evil.example/" }],
+		] as const) {
+			await save(root, ["contracts", runId, "unverifiable-comment.json"], {
+				...reference,
+				...change,
+			});
+			assert.equal((await entry()).unverifiableUrl, null, name);
+		}
+
+		await save(
+			root,
+			["contracts", runId, "unverifiable-comment.json"],
+			reference,
+		);
+		assert.match(
+			(await entry()).unverifiableUrl ?? "",
+			/#issuecomment-987654321$/,
+		);
+
+		let output = "";
+
+		const exit = await runCli(
+			["owner-feed", "--json", "--state-dir", root, "--repo", repo],
+			{
+				readPlatformFile: noPlatformFile,
+				exec: async () => {
+					throw new Error("read must not spawn");
+				},
+				env: () => undefined,
+				stdout: (text) => {
+					output += text;
+				},
+				stderr: assert.fail,
+			},
+		);
+
+		assert.equal(exit, 0);
+		assert.ok(output.includes('"unverifiableCode": "evidence_missing"'));
+		assert.ok(!output.includes(prose), "reviewer prose reached the feed");
+		assert.ok(!output.includes("Reviewer"), "reviewer prose reached the feed");
+
+		for (const judge of ["Run the CLI", "keeps the guard", "npm run check"])
+			assert.ok(
+				!output.includes(judge),
+				`judge text reached the feed: ${judge}`,
+			);
+
+		const wire = parseJson(output);
+		assert.ok(wire !== undefined);
+		assert.deepEqual(v1Problems(wire), []);
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
 test("private fixtures also work at restrictive umasks without changing their semantics", async () => {
 	await withUmask(0o077, async () => {
 		await state(async (root) => {
@@ -1138,6 +1294,13 @@ test("every capture is the real CLI's v1 output and together they cover every at
 		if (name === "working") {
 			assert.equal(kind, null);
 			assert.equal(feed?.workingRunCount, 1);
+		} else if (name === "review_unverifiable") {
+			const entry = objectOf(entries[0]);
+			assert.equal(kind, "blocked");
+			assert.equal(entry?.reason, "review_unverifiable");
+			assert.equal(entry?.unverifiableCode, "evidence_missing");
+			assert.equal(entry?.unverifiableCount, 2);
+			assert.match(String(entry?.unverifiableUrl), /#issuecomment-23456789$/);
 		} else {
 			assert.equal(kind, name);
 			assert.equal(counts?.[name], 1);

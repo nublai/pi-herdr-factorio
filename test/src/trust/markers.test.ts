@@ -4,7 +4,10 @@ import type { CommentEdit, IssueComment } from "../../../src/github/adapter.ts";
 import {
 	CONTROLLER_LOGIN,
 	currentMarker,
+	DETAIL_MAX_BYTES,
+	DETAIL_REASON_MAX,
 	formatMarker,
+	formatUnverifiableDetail,
 	isTerminal,
 	type Marker,
 	MARKER_MAX_BYTES,
@@ -14,7 +17,10 @@ import {
 	RUN_STATUSES,
 } from "../../../src/trust/markers.ts";
 import { digestOf, runIdOf } from "../../../src/core/run.ts";
-import type { HandoffReason } from "../../../src/candidate/state.ts";
+import type {
+	GenerationRef,
+	HandoffReason,
+} from "../../../src/candidate/state.ts";
 import type { JsonValue } from "../../../src/core/json.ts";
 import { type GitSha, isGitSha } from "../../../src/config/schema.ts";
 import { isRepoSlug, type RepoSlug } from "../../../src/trust/platform.ts";
@@ -323,6 +329,108 @@ describe("held marker text", () => {
 		assert.ok(Buffer.byteLength(capped, "utf8") <= MARKER_MAX_BYTES);
 		assert.match(capped, /- \d+ more are listed in the owner feed\.\n$/);
 		assert.equal(parseMarker(capped).kind, "marker");
+	});
+
+	it("publishes every unverifiable judgment with its full inert reason in the detail comment (#795)", () => {
+		const generation: GenerationRef = {
+			round: 1,
+			generation: 2,
+			digest: digestOf("g"),
+		};
+
+		const judgments = Array.from({ length: 12 }, (_, i) => ({
+			scenario: `S${i + 1}`,
+			reason: `${"No trusted output shows this behaviour ".repeat(6)}tail ${i + 1} end`,
+		}));
+
+		judgments.push({ scenario: "S13", reason: "@owner see #12 <b>now</b>" });
+
+		const detail = formatUnverifiableDetail({ runId, generation, judgments });
+		assert.ok(detail !== null);
+		assert.ok(judgments[0]!.reason.length > 160);
+
+		for (const j of judgments.slice(0, 12))
+			assert.ok(
+				detail.body.includes(`\n- ${j.scenario}: ${j.reason}\n`),
+				j.scenario,
+			);
+
+		assert.match(detail.body, /\n- S13: /);
+		assert.doesNotMatch(detail.body, /@owner|#12|<b>/);
+		assert.doesNotMatch(detail.body, /truncated|omitted/);
+		assert.equal(detail.body.trimEnd().split("\n").at(-1), detail.key);
+		assert.match(
+			detail.key,
+			new RegExp(`run=${runId} g=${generation.digest} `),
+		);
+		assert.equal(parseMarker(detail.body).kind, "none");
+
+		const again = formatUnverifiableDetail({ runId, generation, judgments });
+		assert.equal(again?.key, detail.key);
+		assert.ok(again?.body === detail.body);
+
+		assert.notEqual(
+			formatUnverifiableDetail({
+				runId,
+				generation,
+				judgments: judgments.slice(1),
+			})?.key,
+			detail.key,
+		);
+		assert.equal(
+			formatUnverifiableDetail({ runId, generation, judgments: [] }),
+			null,
+		);
+	});
+
+	it("cuts only a reason beyond the generous cap, marks it, and keeps the detail comment under GitHub's limit (#795)", () => {
+		const generation: GenerationRef = {
+			round: 0,
+			generation: 0,
+			digest: digestOf("g"),
+		};
+
+		const exact = "a".repeat(DETAIL_REASON_MAX);
+		const long = `${"b".repeat(DETAIL_REASON_MAX)}${"z".repeat(500)}`;
+
+		const detail = formatUnverifiableDetail({
+			runId,
+			generation,
+			judgments: [
+				{ scenario: "S1", reason: exact },
+				{ scenario: "S2", reason: long },
+			],
+		});
+
+		assert.ok(detail !== null);
+		assert.ok(detail.body.includes(`\n- S1: ${exact}\n`));
+		assert.ok(
+			detail.body.includes(
+				`\n- S2: ${"b".repeat(DETAIL_REASON_MAX)} (truncated: 500 more characters)\n`,
+			),
+		);
+		assert.ok(!detail.body.includes("bz"));
+		assert.ok(!detail.body.includes("zz"));
+
+		const huge = formatUnverifiableDetail({
+			runId,
+			generation,
+			judgments: Array.from({ length: 30 }, (_, i) => ({
+				scenario: `S${i + 1}`,
+				reason: "#".repeat(DETAIL_REASON_MAX),
+			})),
+		});
+
+		assert.ok(huge !== null);
+		const bytes = Buffer.byteLength(huge.body, "utf8");
+		assert.ok(bytes <= DETAIL_MAX_BYTES, String(bytes));
+		assert.ok(DETAIL_MAX_BYTES < 65_536);
+		assert.match(
+			huge.body,
+			/\n- \d+ more judgments are omitted to fit GitHub's comment size limit\.\n/,
+		);
+		assert.match(huge.body, /\n- S1: ＃/);
+		assert.equal(huge.body.trimEnd().split("\n").at(-1), huge.key);
 	});
 
 	it("uses stable neutral text when a candidate hold reason is unavailable", () => {

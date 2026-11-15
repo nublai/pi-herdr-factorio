@@ -42,6 +42,9 @@
 			},
 			"notProven": [],
 			"unverifiable": [],
+			"unverifiableCode": null,
+			"unverifiableCount": 0,
+			"unverifiableUrl": null,
 			"steps": []
 		}
 	],

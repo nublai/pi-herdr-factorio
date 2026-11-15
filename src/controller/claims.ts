@@ -1,6 +1,6 @@
 import type { AcceptanceQualification } from "../candidate/diagnosis.ts";
 import { candidateProjection } from "../candidate/handoff.ts";
-import type { CandidateState } from "../candidate/state.ts";
+import type { CandidateState, GenerationRef } from "../candidate/state.ts";
 import type { ValidationState } from "../candidate/validation.ts";
 import type { GitSha } from "../config/schema.ts";
 import type { ArtifactStore, ContractRead } from "../contract/artifacts.ts";
@@ -124,6 +124,14 @@ export interface RunFiles {
 		readonly repo: RepoSlug;
 		readonly issue: number;
 		readonly digest: QuestionsDigest;
+		readonly commentId: string;
+	}): Promise<boolean>;
+	/** Records the review detail comment that lists a held generation's unverifiable judgments, replacing any earlier one. */
+	writeUnverifiableComment(input: {
+		readonly runId: Digest;
+		readonly repo: RepoSlug;
+		readonly issue: number;
+		readonly generation: GenerationRef;
 		readonly commentId: string;
 	}): Promise<boolean>;
 	/** The link and answers are written before the claim, so they may be replaced until then. */

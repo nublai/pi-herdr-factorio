@@ -229,6 +229,8 @@ export function memoryFiles(): RunFiles & {
 			return true;
 		},
 		writeQuestionsComment: fileRunFiles(artifactRoot).writeQuestionsComment,
+		writeUnverifiableComment:
+			fileRunFiles(artifactRoot).writeUnverifiableComment,
 		async writeQuestions({ runId, digest }) {
 			questions.set(runId, digest);
 

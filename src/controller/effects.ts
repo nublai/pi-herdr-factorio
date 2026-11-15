@@ -1,4 +1,5 @@
 import type { PatchRead } from "../candidate/build.ts";
+import type { GenerationRef } from "../candidate/state.ts";
 import type { WorkflowConfig } from "../config/schema.ts";
 import {
 	type AcceptanceSuite,
@@ -104,6 +105,55 @@ export async function postKeyed(
 	}
 
 	return post.kind === "posted";
+}
+
+/**
+ * Posts a held generation's review detail comment once, keyed by its last
+ * line. Only a fresh POST's comment ID is recorded; a detail already on the
+ * issue is left as found, never re-posted and never linked by guess. True
+ * when the detail is on the issue.
+ */
+export async function postUnverifiableDetail(
+	input: Pick<OrchestratorInput, "platform" | "log" | "files">,
+	adapter: GitHubTicketAdapter,
+	writer: GitHubTicketWriter,
+	run: Pick<ActiveRun, "issue" | "runId">,
+	generation: GenerationRef,
+	detail: { readonly key: string; readonly body: string },
+): Promise<boolean> {
+	const found = await hasKeyed(input, adapter, run.issue, detail.key);
+
+	if (found === null) return false;
+
+	if (found) return true;
+
+	const post = await writer.postComment(run.issue, detail.body);
+
+	if (post.kind !== "posted") {
+		input.log("comment_unconfirmed", {
+			issue: run.issue,
+			runId: run.runId,
+			outcome: post.kind,
+		});
+
+		return false;
+	}
+
+	if (
+		!(await input.files.writeUnverifiableComment({
+			runId: run.runId,
+			repo: adapter.repo,
+			issue: run.issue,
+			generation,
+			commentId: post.id,
+		}))
+	)
+		input.log("unverifiable_reference_unavailable", {
+			issue: run.issue,
+			runId: run.runId,
+		});
+
+	return true;
 }
 
 export async function postQuestions(

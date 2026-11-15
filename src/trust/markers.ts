@@ -1,9 +1,9 @@
 import type { CommentEdit, IssueComment } from "../github/adapter.ts";
-import type { HandoffReason } from "../candidate/state.ts";
+import type { GenerationRef, HandoffReason } from "../candidate/state.ts";
 import type { OwnerJudgment } from "../candidate/review.ts";
 import { inert } from "../contract/render.ts";
 import { type ControllerIdentity, EXE_DEV_PLATFORM } from "./platform.ts";
-import { type Digest, isDigest, runIdOf } from "../core/run.ts";
+import { type Digest, digestOf, isDigest, runIdOf } from "../core/run.ts";
 import { isStage, type Stage } from "../core/stages.ts";
 import type { JsonValue } from "../core/json.ts";
 import { type CadenceJob, type GitSha, isGitSha } from "../config/schema.ts";
@@ -334,6 +334,63 @@ export function formatMarker(
 	return marker.status === "blocked" && holdReason === "review_unverifiable"
 		? withOwnerJudgments(body, judgments)
 		: body;
+}
+
+export const DETAIL_REASON_MAX = 2000;
+export const DETAIL_MAX_BYTES = 60 * 1024;
+
+function detailReason(reason: string): string {
+	const chars = [...reason];
+	const cut = chars.length - DETAIL_REASON_MAX;
+
+	return cut > 0
+		? `${inert(chars.slice(0, DETAIL_REASON_MAX).join(""))} (truncated: ${cut} more characters)`
+		: inert(reason);
+}
+
+/**
+ * The review detail comment for a `review_unverifiable` hold: every
+ * unverifiable judgment with the reviewer's reason made inert, each cut only
+ * beyond `DETAIL_REASON_MAX` code points, and the whole body within
+ * `DETAIL_MAX_BYTES`. The last line is a key over the run, the held
+ * generation and the listed judgments, so the same detail is posted once.
+ * Null when there is no judgment to list.
+ */
+export function formatUnverifiableDetail(input: {
+	readonly runId: Digest;
+	readonly generation: GenerationRef;
+	readonly judgments: readonly OwnerJudgment[];
+}): { readonly key: string; readonly body: string } | null {
+	const { runId, generation, judgments } = input;
+
+	if (judgments.length === 0) return null;
+
+	const key = `<!-- factory-unverifiable run=${runId} g=${generation.digest} d=${digestOf(JSON.stringify(judgments))} -->`;
+	const tail = `\n${key}\n`;
+
+	const more = (n: number) =>
+		n === 0
+			? ""
+			: `- ${n} more judgments are omitted to fit GitHub's comment size limit.\n`;
+
+	let text = `Factory run \`${runId.slice(0, 12)}\`, round ${generation.round}, generation ${generation.generation}: review could not verify these ${judgments.length} judgments from trusted evidence, so no repair runs and the owner must decide. Each reason is the reviewer's own text.\n\n`;
+	let shown = 0;
+
+	for (const j of judgments) {
+		const line = `- ${j.scenario}: ${detailReason(j.reason)}\n`;
+
+		if (
+			Buffer.byteLength(
+				text + line + more(judgments.length - shown - 1) + tail,
+				"utf8",
+			) > DETAIL_MAX_BYTES
+		)
+			break;
+		text += line;
+		shown++;
+	}
+
+	return { key, body: text + more(judgments.length - shown) + tail };
 }
 
 function parseJsonText(text: string): JsonValue | undefined {

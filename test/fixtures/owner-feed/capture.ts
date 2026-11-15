@@ -13,6 +13,7 @@ import {
 	addRun,
 	addWaitingRun,
 	emptyState,
+	holdUnverifiable,
 	now,
 	repo,
 	save,
@@ -36,7 +37,15 @@ export const CAPTURED_KINDS = [
 	"failed",
 ] as const satisfies readonly AttentionKind[];
 
-export const CAPTURE_NAMES = [...CAPTURED_KINDS, "working"] as const;
+export const CAPTURE_NAMES = [
+	...CAPTURED_KINDS,
+	"working",
+	"review_unverifiable",
+] as const;
+
+/** The review reason in the `review_unverifiable` capture's state, which the feed must never carry. */
+export const REVIEWER_PROSE =
+	"Reviewer prose: no trusted result for this check.";
 
 export type CaptureName = (typeof CAPTURE_NAMES)[number];
 
@@ -79,6 +88,25 @@ const BUILDERS = {
 	failed: async (root) => {
 		await addFailedRun(root, 16, "Review a change that is too large");
 	},
+	review_unverifiable: async (root) => {
+		const runId = await addWaitingRun(
+			root,
+			"Decide a check review could not verify",
+		);
+
+		const generation = await holdUnverifiable(root, runId, [
+			{ scenario: "S2", reason: REVIEWER_PROSE },
+			{ scenario: "S3", reason: REVIEWER_PROSE },
+		]);
+
+		await fileRunFiles(root).writeUnverifiableComment({
+			runId,
+			repo,
+			issue: 1,
+			generation,
+			commentId: "23456789",
+		});
+	},
 	working: async (root) => {
 		const runId = await addRun(root, 17, "running", {
 			title: "Render <b>raw</b> **markdown** titles as plain text",
@@ -108,6 +136,7 @@ export function redactionProblems(text: string, root: string): string[] {
 		[root, "the temporary state directory"],
 		[homedir(), "the home directory"],
 		["Fixture only.", "an admission snapshot body"],
+		[REVIEWER_PROSE, "reviewer prose"],
 	].flatMap(([needle, what]) =>
 		needle !== undefined && needle !== "" && text.includes(needle)
 			? [`capture contains ${what}`]
