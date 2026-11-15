@@ -15,6 +15,7 @@ import {
 	type ReviewReceipt,
 	type ReviewInputRefusal,
 	type ReviewSeat,
+	SECOND_JUDGE,
 	unverifiableOnly,
 } from "./review.ts";
 import type {
@@ -1001,14 +1002,21 @@ export function certifyGeneration(input: {
 		report.heldoutDigest !== v.heldoutDigest
 	)
 		throw new Error("certification_binding");
-	const judgments = r.seats.flatMap((s) => s.judgments);
+
+	const judges = r.seats.filter(
+		(s) => s.seat === "code-review" || s.seat === SECOND_JUDGE,
+	);
 
 	if (
-		judgments.length !== v.unjudged.length ||
-		v.unjudged.some(
-			(id) =>
-				judgments.filter((j) => j.scenario === id && j.outcome === "pass")
-					.length !== 1,
+		r.seats.some((s) => !judges.includes(s) && s.judgments.length > 0) ||
+		judges.some(
+			(s) =>
+				s.judgments.length !== v.unjudged.length ||
+				v.unjudged.some(
+					(id) =>
+						s.judgments.filter((j) => j.scenario === id && j.outcome === "pass")
+							.length !== 1,
+				),
 		)
 	)
 		throw new Error("certification_judgments");

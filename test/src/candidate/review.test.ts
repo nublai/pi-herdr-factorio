@@ -26,6 +26,18 @@ import {
 	trustedEvidence,
 	unverifiableCode,
 	unverifiableOnly,
+	JUDGE_TABLE,
+	judgePlaceholder,
+	ownerJudgments,
+	scenarioJudgments,
+	SECOND_JUDGE,
+	SECOND_JUDGE_UNCONFIGURED,
+	UNVERIFIABLE_CODES,
+	unverifiableJudgments,
+	type Finding,
+	type Judgment,
+	type JudgmentOutcome,
+	type JudgeRoute,
 } from "../../../src/candidate/review.ts";
 import {
 	certifyR8,
@@ -2983,5 +2995,434 @@ describe("builder family at review preparation", () => {
 		} finally {
 			f.close();
 		}
+	});
+});
+
+describe("two judges for judge-only judgments (#735 round 2)", () => {
+	const outcomes = [...JUDGMENT_OUTCOMES];
+	const columns = [...outcomes, "missing"] as const;
+
+	const expected = (first: string, second: string): JudgeRoute => {
+		if (first === "fail" || second === "fail") return "fail";
+
+		if (second === "missing") return "missing";
+
+		if (first === "pass" && second === "pass") return "pass";
+
+		return first === "pass" || second === "pass" ? "disagree" : "unverified";
+	};
+
+	const seat = (
+		name: string,
+		judgments: readonly Judgment[],
+		extra: Partial<SeatReceipt> = {},
+	): SeatReceipt => ({
+		seat: name,
+		findings: [],
+		judgments,
+		requested: OPENAI,
+		observed: null,
+		label: "context-isolated, unknown family, not cross-family",
+		fallback: false,
+		tokens: 1,
+		...extra,
+	});
+
+	const paired = (
+		first: JudgmentOutcome,
+		second: JudgmentOutcome | "missing",
+	) => ({
+		seats: [
+			seat("code-review", [
+				{ scenario: "S1", outcome: first, reason: "first" },
+			]),
+			seat("security-review", []),
+			seat("simplify", []),
+			second === "missing"
+				? judgePlaceholder({
+						scenarios: ["S1"],
+						outcome: "unverifiable",
+						reason: SECOND_JUDGE_UNCONFIGURED,
+						family: FAMILY_MISSING,
+						builder: FAMILY_MISSING,
+						requested: "none",
+						tokens: 0,
+					})
+				: seat(SECOND_JUDGE, [
+						{ scenario: "S1", outcome: second, reason: "second" },
+					]),
+		],
+	});
+
+	it("defines every first-by-second pair: any fail fails, two passes pass, a lone pass disagrees, no second judge is missing", () => {
+		assert.deepEqual(Object.keys(JUDGE_TABLE).sort(), [...outcomes].sort());
+
+		for (const first of outcomes) {
+			assert.deepEqual(
+				Object.keys(JUDGE_TABLE[first]).sort(),
+				[...columns].sort(),
+			);
+
+			for (const second of columns)
+				assert.equal(
+					JUDGE_TABLE[first][second],
+					expected(first, second),
+					`${first}/${second}`,
+				);
+		}
+	});
+
+	it("routes each pair of a review: pass certifies, fail repairs, every other pair holds for the owner", () => {
+		for (const first of outcomes)
+			for (const second of columns) {
+				const review = paired(first, second);
+				const route = expected(first, second);
+				const [only] = scenarioJudgments(review);
+				assert.equal(only?.route, route, `${first}/${second}`);
+				assert.equal(
+					blocksReview(review.seats),
+					route !== "pass",
+					`${first}/${second} blocks`,
+				);
+				assert.deepEqual(
+					unverifiableOnly(review).map((j) => j.route),
+					route === "pass" || route === "fail" ? [] : [route],
+					`${first}/${second} held`,
+				);
+			}
+	});
+
+	it("keeps single-judge routing for a review written before the second judge existed", () => {
+		for (const outcome of outcomes) {
+			const review = {
+				seats: [
+					seat("code-review", [{ scenario: "S1", outcome, reason: "why" }]),
+				],
+			};
+
+			assert.deepEqual(
+				unverifiableOnly(review).map((j) => [j.route, j.paired]),
+				outcome === "unverifiable" ? [["unverified", false]] : [],
+				outcome,
+			);
+		}
+	});
+
+	it("never holds a review with a blocking finding or any failing scenario", () => {
+		const finding: Finding = {
+			id: "F1",
+			severity: "blocking",
+			category: "bug",
+			path: "src/a.ts",
+			startLine: 1,
+			endLine: 1,
+			claim: "broken",
+			evidence: "line 1",
+		};
+
+		const review = paired("pass", "unverifiable");
+		assert.equal(unverifiableOnly(review).length, 1);
+		assert.deepEqual(
+			unverifiableOnly({
+				seats: [
+					{ ...seat("security-review", []), findings: [finding] },
+					...review.seats,
+				],
+			}),
+			[],
+		);
+		assert.deepEqual(
+			unverifiableOnly({
+				seats: [
+					seat("code-review", [
+						{ scenario: "S1", outcome: "pass", reason: "a" },
+						{ scenario: "S2", outcome: "fail", reason: "b" },
+					]),
+					seat(SECOND_JUDGE, [
+						{ scenario: "S1", outcome: "unverifiable", reason: "c" },
+						{ scenario: "S2", outcome: "pass", reason: "d" },
+					]),
+				],
+			}),
+			[],
+		);
+	});
+
+	it("gives the hold a closed-set code: second_judge_missing, then evidence_missing, then judges_disagree", () => {
+		assert.ok(UNVERIFIABLE_CODES.includes("judges_disagree"));
+		assert.ok(UNVERIFIABLE_CODES.includes("second_judge_missing"));
+		const readOnly = "The diff keeps the guard in src/a.ts.";
+		const execution = "Run the CLI and confirm it exits 0.";
+
+		assert.equal(
+			unverifiableCode({
+				trusted: false,
+				judges: [readOnly],
+				routes: ["missing"],
+			}),
+			"second_judge_missing",
+		);
+		assert.equal(
+			unverifiableCode({
+				trusted: false,
+				judges: [readOnly],
+				routes: ["disagree"],
+			}),
+			"evidence_missing",
+		);
+		assert.equal(
+			unverifiableCode({
+				trusted: true,
+				judges: [execution, readOnly],
+				routes: ["unverified", "disagree"],
+			}),
+			"judges_disagree",
+		);
+		assert.equal(
+			unverifiableCode({
+				trusted: true,
+				judges: [execution],
+				routes: ["unverified"],
+			}),
+			"needs_execution",
+		);
+		assert.equal(
+			unverifiableCode({
+				trusted: true,
+				judges: [readOnly],
+				routes: ["unverified"],
+			}),
+			"other",
+		);
+	});
+
+	it("adds the second judge only when the verdict has judge-only scenarios, and it judges every one with no findings", () => {
+		assert.deepEqual(reviewSeats(["src/format.ts"], {}, []), [
+			"code-review",
+			"security-review",
+			"simplify",
+		]);
+		assert.deepEqual(reviewSeats(["src/format.ts"], {}, ["S1"]), [
+			"code-review",
+			"security-review",
+			"simplify",
+			SECOND_JUDGE,
+		]);
+		assert.deepEqual(reviewSeats(["src/core/run.ts"], {}, ["S1"]), [
+			"code-review",
+			"security-review",
+			"simplify",
+			"ultrareview",
+			SECOND_JUDGE,
+		]);
+
+		const files = new Map([["src/a.ts", 3]]);
+		const judged = [{ scenario: "S1", outcome: "pass", reason: "ok" }];
+
+		assert.ok(
+			parseSeat(
+				JSON.stringify({ seat: SECOND_JUDGE, findings: [], judgments: judged }),
+				SECOND_JUDGE,
+				files,
+				["S1"],
+			),
+		);
+		assert.equal(
+			parseSeat(
+				JSON.stringify({ seat: SECOND_JUDGE, findings: [], judgments: [] }),
+				SECOND_JUDGE,
+				files,
+				["S1"],
+			),
+			null,
+		);
+		assert.equal(
+			parseSeat(
+				JSON.stringify({
+					seat: SECOND_JUDGE,
+					findings: [
+						{
+							id: "F1",
+							severity: "advisory",
+							category: "bug",
+							path: "src/a.ts",
+							startLine: 1,
+							endLine: 1,
+							claim: "c",
+							evidence: "e",
+						},
+					],
+					judgments: judged,
+				}),
+				SECOND_JUDGE,
+				files,
+				["S1"],
+			),
+			null,
+		);
+	});
+
+	it("asks the second judge for the scenarios alone, from the same captured input and nothing else", () => {
+		const input: ReviewInput = {
+			binding: {
+				runId: digestOf("run"),
+				round: 0,
+				candidateSha: "c".repeat(40),
+				patchDigest: patch("one"),
+				contractDigest: digestOf("contract"),
+				acceptanceDigest: digestOf("acceptance"),
+				ciRunId: 1,
+				originalBase: "a".repeat(40),
+				baseSha: "a".repeat(40),
+			},
+			seats: ["code-review", "security-review", "simplify", SECOND_JUDGE],
+			files: new Map(),
+			scenarios: ["S1", "S2"],
+			prompt: "CAPTURED REVIEW INPUT",
+		};
+
+		const prompt = seatPrompt(input, SECOND_JUDGE);
+		assert.ok(
+			prompt.startsWith(
+				"CAPTURED REVIEW INPUT\n\nYou are the second-judge seat.",
+			),
+		);
+		assert.match(
+			prompt,
+			/Judge exactly these scenarios once each: \["S1","S2"\]\./,
+		);
+		assert.match(prompt, /findings must be \[\]/);
+		assert.doesNotMatch(prompt, /code-review/);
+		assert.equal(seatPrompt(input, SECOND_JUDGE), prompt);
+	});
+
+	it("records an unconfigured second judge only on its own seat, round-trips it and never counts it toward r8", () => {
+		const verdict = { ...passingVerdict(patch("one")), unjudged: ["S1"] };
+
+		const claude: FamilyInput = {
+			kind: "anthropic-gateway",
+			model: "claude-sonnet-5-5",
+		};
+
+		const openai: FamilyInput = { kind: "openai-request", model: OPENAI };
+
+		const input: ReviewInput = {
+			binding: {
+				runId: digestOf("run"),
+				round: 0,
+				candidateSha: verdict.candidateSha,
+				patchDigest: verdict.patchDigest,
+				contractDigest: digestOf("contract"),
+				acceptanceDigest: verdict.acceptanceDigest,
+				ciRunId: verdict.ciRunId,
+				originalBase: verdict.originalBase,
+				baseSha: verdict.baseSha,
+				execution: {
+					generation: 0,
+					intentDigest: digestOf("intent"),
+					attempt: 1,
+					workflowSha: verdict.baseSha,
+					workflowDigest: digestOf("workflow"),
+				},
+			},
+			seats: ["code-review", "security-review", "simplify", SECOND_JUDGE],
+			files: new Map([["src/a.ts", 3]]),
+			scenarios: ["S1"],
+			prompt: "",
+		};
+
+		const seats = paired("pass", "missing").seats.map((s) => ({
+			...s,
+			family: openai,
+		}));
+
+		const receipt = reviewCandidate(input, verdict, seats, {
+			builder: openai,
+			accept: claude,
+		});
+
+		assert.equal(receipt.blocking, true);
+		assert.equal(receipt.seats[3]?.unconfigured, true);
+		assert.deepEqual(
+			parseReviewReceipt(parseJson(JSON.stringify(receipt))),
+			receipt,
+		);
+
+		const forged = {
+			...receipt,
+			seats: receipt.seats.map((s, i) =>
+				i === 0 ? { ...s, unconfigured: true } : s,
+			),
+		};
+
+		assert.equal(parseReviewReceipt(parseJson(JSON.stringify(forged))), null);
+		assert.throws(
+			() =>
+				reviewCandidate(
+					input,
+					verdict,
+					seats.map((s, i) =>
+						i === 0 ? { ...s, unconfigured: true as const } : s,
+					),
+					{ builder: openai, accept: claude },
+				),
+			/review_malformed/,
+		);
+
+		const judgeOnly = paired("pass", "pass").seats.map((s) => ({
+			...s,
+			family: s.seat === SECOND_JUDGE ? claude : openai,
+		}));
+
+		assert.equal(
+			reviewCandidate(input, verdict, judgeOnly, {
+				builder: openai,
+				accept: claude,
+			}).r8,
+			"incomplete",
+		);
+	});
+
+	it("tells the owner each judge's vote with both reasons as plain text, and the marker cuts it", () => {
+		const long = "x".repeat(300);
+
+		const review = {
+			seats: [
+				seat("code-review", [
+					{ scenario: "S1", outcome: "pass", reason: "first\u202e saw it" },
+				]),
+				seat(SECOND_JUDGE, [
+					{ scenario: "S1", outcome: "unverifiable", reason: long },
+				]),
+			],
+		};
+
+		const [detail] = unverifiableJudgments(review);
+		assert.equal(detail?.route, "disagree");
+		assert.deepEqual(detail?.votes, [
+			{ seat: "code-review", outcome: "pass", reason: "first  saw it" },
+			{ seat: SECOND_JUDGE, outcome: "unverifiable", reason: long },
+		]);
+
+		const [marker] = ownerJudgments(review);
+		assert.deepEqual(Object.keys(marker ?? {}).sort(), ["reason", "scenario"]);
+		assert.ok(
+			marker?.reason.startsWith(
+				"The judges disagree. code-review pass: first  saw it",
+			),
+		);
+		assert.equal([...(marker?.reason ?? "")].length, 160);
+
+		const legacy = {
+			seats: [
+				seat("code-review", [
+					{ scenario: "S1", outcome: "unverifiable", reason: "why" },
+				]),
+			],
+		};
+
+		assert.deepEqual(unverifiableJudgments(legacy), [
+			{ scenario: "S1", reason: "why" },
+		]);
 	});
 });

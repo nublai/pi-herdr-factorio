@@ -406,6 +406,7 @@ async function unverifiableHold(
 			judges: judgments.map(
 				(j) => scenarios.find((s) => s.id === j.scenario)?.judge ?? null,
 			),
+			routes: judgments.map((j) => j.route),
 		}),
 		unverifiableCount: judgments.length,
 		unverifiableUrl:

@@ -272,7 +272,69 @@ export const REVIEW_SEATS = [
 	"simplify",
 ] as const;
 
-export type ReviewSeat = (typeof REVIEW_SEATS)[number] | "ultrareview";
+/**
+ * The independent second judge for judge-only scenarios. It sees the same
+ * captured prompt as every seat, in a fresh session, judges the same
+ * scenarios as code-review and returns no findings.
+ */
+export const SECOND_JUDGE = "second-judge";
+
+export type ReviewSeat =
+	| (typeof REVIEW_SEATS)[number]
+	| "ultrareview"
+	| typeof SECOND_JUDGE;
+
+/**
+ * The most tokens the second judge may spend, inside what is left of the
+ * review round's `REVIEW_MAX_TOKENS`. It is the largest single-seat spend
+ * recorded (31,080 tokens, a code-review seat in pilot 3), rounded down.
+ */
+export const SECOND_JUDGE_MAX_TOKENS = 30_000;
+
+export const SECOND_JUDGE_UNCONFIGURED =
+	"No second judge is configured in stages.review.seats.second-judge.model, so this scenario cannot pass on one judge.";
+
+export const SECOND_JUDGE_BOUND =
+	"The second judge reached its token, turn or time bound before it answered.";
+
+/**
+ * The controller-written `second-judge` seat for a judge that gave no
+ * answer: `unverifiable` and marked `unconfigured` when no second judge is
+ * configured (no model call, `requested` is `none`), or `timeout` when the
+ * judge ran out of its bound. Its reasons are controller text, never model
+ * text.
+ */
+export function judgePlaceholder(input: {
+	readonly scenarios: readonly string[];
+	readonly outcome: "unverifiable" | "timeout";
+	readonly reason: string;
+	readonly family: FamilyInput;
+	readonly builder: FamilyInput;
+	readonly requested: string;
+	readonly tokens: number;
+}): SeatReceipt {
+	const receipt: SeatReceipt = {
+		seat: SECOND_JUDGE,
+		findings: [],
+		judgments: input.scenarios.map((scenario) => ({
+			scenario,
+			outcome: input.outcome,
+			reason: input.reason,
+		})),
+		family: input.family,
+		requested: input.requested,
+		observed: null,
+		label: familyLabel(input.family, input.builder),
+		primary: input.requested,
+		refusal: null,
+		fallback: false,
+		tokens: input.tokens,
+	};
+
+	if (input.outcome === "timeout") return receipt;
+
+	return { ...receipt, unconfigured: true };
+}
 
 export type Finding = {
 	readonly id: string;
@@ -341,6 +403,11 @@ export type ReviewInput = {
 export type SeatReceipt = SeatResult & {
 	/** Present on version 3 receipts: the seat's family evidence. */
 	readonly family?: FamilyInput;
+	/**
+	 * Set only on a `second-judge` seat that ran no model because no second
+	 * judge is configured. Its judgments are controller placeholders.
+	 */
+	readonly unconfigured?: true;
 	readonly primary?: string;
 	readonly refusal?: string | null;
 	readonly fallbackRecord?: JsonValue;
@@ -523,8 +590,12 @@ export function parseSeat(
 		});
 	}
 
+	if (seat === SECOND_JUDGE && parsed.length > 0) return null;
+
 	const judged: Judgment[] = [];
-	const wanted = seat === "code-review" ? scenarios : [];
+
+	const wanted =
+		seat === "code-review" || seat === SECOND_JUDGE ? scenarios : [];
 
 	for (const item of judgments) {
 		const j = objectOf(item);
@@ -550,30 +621,170 @@ export function parseSeat(
 }
 
 /**
- * The judgments a review blocks on when its only blocking items are
- * `unverifiable` judgments: no blocking finding and no other non-pass
- * outcome. Empty for any other review.
+ * What one judge-only scenario comes to once its judges are combined.
+ * `pass` certifies, `fail` takes the repair path, and `disagree`,
+ * `unverified` and `missing` hold the run for the owner.
  */
-export function unverifiableOnly(review: {
-	readonly seats: readonly SeatResult[];
-}): readonly Judgment[] {
-	const open = review.seats.flatMap((seat) =>
-		seat.judgments.filter((j) => j.outcome !== "pass"),
-	);
+export type JudgeRoute =
+	| "pass"
+	| "fail"
+	| "disagree"
+	| "unverified"
+	| "missing";
 
-	return open.every((j) => j.outcome === "unverifiable") &&
-		!review.seats.some((seat) =>
+/** The second judge's column: an outcome, or `missing` when none is configured. */
+export type SecondJudgeOutcome = JudgmentOutcome | "missing";
+
+/**
+ * The full truth table, first judge (code-review) by second judge. Any
+ * `fail` fails. Two passes pass. One pass beside any other outcome is a
+ * disagreement. Two outcomes that are neither pass nor fail leave the
+ * scenario unverified. No second judge, without a fail, is `missing`.
+ */
+export const JUDGE_TABLE: Readonly<
+	Record<JudgmentOutcome, Readonly<Record<SecondJudgeOutcome, JudgeRoute>>>
+> = {
+	pass: {
+		pass: "pass",
+		fail: "fail",
+		unverifiable: "disagree",
+		inconclusive: "disagree",
+		timeout: "disagree",
+		missing: "missing",
+	},
+	fail: {
+		pass: "fail",
+		fail: "fail",
+		unverifiable: "fail",
+		inconclusive: "fail",
+		timeout: "fail",
+		missing: "fail",
+	},
+	unverifiable: {
+		pass: "disagree",
+		fail: "fail",
+		unverifiable: "unverified",
+		inconclusive: "unverified",
+		timeout: "unverified",
+		missing: "missing",
+	},
+	inconclusive: {
+		pass: "disagree",
+		fail: "fail",
+		unverifiable: "unverified",
+		inconclusive: "unverified",
+		timeout: "unverified",
+		missing: "missing",
+	},
+	timeout: {
+		pass: "disagree",
+		fail: "fail",
+		unverifiable: "unverified",
+		inconclusive: "unverified",
+		timeout: "unverified",
+		missing: "missing",
+	},
+};
+
+/**
+ * A review written before the second judge existed has no `second-judge`
+ * seat and keeps single-judge routing: only `unverifiable` holds.
+ */
+const SINGLE_JUDGE: Readonly<Record<JudgmentOutcome, JudgeRoute>> = {
+	pass: "pass",
+	fail: "fail",
+	unverifiable: "unverified",
+	inconclusive: "fail",
+	timeout: "fail",
+};
+
+export type JudgeVote = {
+	readonly seat: string;
+	readonly outcome: JudgmentOutcome;
+	readonly reason: string;
+};
+
+export type ScenarioJudgment = {
+	readonly scenario: string;
+	readonly route: JudgeRoute;
+	/** The first judge's vote, then the second judge's when one ran. */
+	readonly votes: readonly JudgeVote[];
+	/** False only for a review written before the second judge existed. */
+	readonly paired: boolean;
+};
+
+type JudgedReview = {
+	readonly seats: readonly (SeatResult & { readonly unconfigured?: true })[];
+};
+
+/** Each code-review judgment combined with the second judge's by `JUDGE_TABLE`. */
+export function scenarioJudgments(
+	review: JudgedReview,
+): readonly ScenarioJudgment[] {
+	const first = review.seats.find((seat) => seat.seat === "code-review");
+	const second = review.seats.find((seat) => seat.seat === SECOND_JUDGE);
+
+	return (first?.judgments ?? []).map((j) => {
+		const vote = { seat: "code-review", outcome: j.outcome, reason: j.reason };
+
+		if (second === undefined)
+			return {
+				scenario: j.scenario,
+				route: SINGLE_JUDGE[j.outcome],
+				votes: [vote],
+				paired: false,
+			};
+
+		const other =
+			second.unconfigured === true
+				? undefined
+				: second.judgments.find((s) => s.scenario === j.scenario);
+
+		return {
+			scenario: j.scenario,
+			route: JUDGE_TABLE[j.outcome][other?.outcome ?? "missing"],
+			votes:
+				other === undefined
+					? [vote]
+					: [
+							vote,
+							{
+								seat: SECOND_JUDGE,
+								outcome: other.outcome,
+								reason: other.reason,
+							},
+						],
+			paired: true,
+		};
+	});
+}
+
+/**
+ * The judge-only scenarios a review holds for the owner: every scenario
+ * that did not pass, when no blocking finding exists and no scenario
+ * fails. Empty for any other review, which certifies or repairs.
+ */
+export function unverifiableOnly(
+	review: JudgedReview,
+): readonly ScenarioJudgment[] {
+	const routes = scenarioJudgments(review);
+
+	return routes.some((j) => j.route === "fail") ||
+		review.seats.some((seat) =>
 			seat.findings.some(
 				(f) => f.severity === "blocking" && f.category !== "simplify",
 			),
 		)
-		? open
-		: [];
+		? []
+		: routes.filter((j) => j.route !== "pass");
 }
 
 export type OwnerJudgment = {
 	readonly scenario: string;
 	readonly reason: string;
+	/** Both judges' votes, present only when the review had a second-judge seat. */
+	readonly route?: Exclude<JudgeRoute, "pass" | "fail">;
+	readonly votes?: readonly JudgeVote[];
 };
 
 export const OWNER_JUDGMENTS_MAX = 10;
@@ -595,56 +806,92 @@ function ownerScenario(scenario: string): string {
 	return /^S[1-9][0-9]{0,2}$/.test(scenario) ? scenario : "S?";
 }
 
-/**
- * The unverifiable judgments routed to the owner, as plain text: a scenario
- * ID of the form `S<n>` and the reviewer's reason with control and
- * bidirectional characters replaced, cut to `OWNER_REASON_MAX` code points.
- */
-export function ownerJudgments(review: {
-	readonly seats: readonly SeatResult[];
-}): readonly OwnerJudgment[] {
-	return unverifiableOnly(review)
-		.slice(0, OWNER_JUDGMENTS_MAX)
-		.map((j) => ({
-			scenario: ownerScenario(j.scenario),
-			reason: plainChars(j.reason).slice(0, OWNER_REASON_MAX).join(""),
-		}));
+export const ROUTE_TEXT: Readonly<
+	Record<Exclude<JudgeRoute, "pass" | "fail">, string>
+> = {
+	disagree: "The judges disagree",
+	unverified: "Neither judge could verify it",
+	missing: "No second judge is configured",
+};
+
+function ownerJudgment(j: ScenarioJudgment, max: number): OwnerJudgment {
+	const plain = (text: string) => plainChars(text).slice(0, max).join("");
+	const scenario = ownerScenario(j.scenario);
+	const first = j.votes[0];
+
+	if (!j.paired || j.route === "pass" || j.route === "fail")
+		return { scenario, reason: plain(first?.reason ?? "") };
+
+	const votes = j.votes.map((v) => ({ ...v, reason: plain(v.reason) }));
+
+	return {
+		scenario,
+		reason: plain(
+			`${ROUTE_TEXT[j.route]}. ${j.votes.map((v) => `${v.seat} ${v.outcome}: ${v.reason}`).join(" ")}`,
+		),
+		route: j.route,
+		votes,
+	};
 }
 
 /**
- * Every unverifiable judgment routed to the owner, with the reviewer's full
- * reason as plain text: the same scenario and character rules as
- * `ownerJudgments`, without its count or length limit.
+ * The judgments held for the owner, as plain text: a scenario ID of the
+ * form `S<n>` and the reviewer's reason with control and bidirectional
+ * characters replaced, cut to `OWNER_REASON_MAX` code points. With a
+ * second judge the reason names the route and each judge's vote.
  */
-export function unverifiableJudgments(review: {
-	readonly seats: readonly SeatResult[];
-}): readonly OwnerJudgment[] {
-	return unverifiableOnly(review).map((j) => ({
-		scenario: ownerScenario(j.scenario),
-		reason: plainChars(j.reason).join(""),
-	}));
+export function ownerJudgments(review: JudgedReview): readonly OwnerJudgment[] {
+	return unverifiableOnly(review)
+		.slice(0, OWNER_JUDGMENTS_MAX)
+		.map((j) => {
+			const { scenario, reason } = ownerJudgment(j, OWNER_REASON_MAX);
+
+			return { scenario, reason };
+		});
+}
+
+/**
+ * Every judgment held for the owner, with each judge's full reason as plain
+ * text: the same scenario and character rules as `ownerJudgments`, without
+ * its count or length limit, and with both votes when a second judge ran.
+ */
+export function unverifiableJudgments(
+	review: JudgedReview,
+): readonly OwnerJudgment[] {
+	return unverifiableOnly(review).map((j) => ownerJudgment(j, Infinity));
 }
 
 export const UNVERIFIABLE_CODES = [
 	"evidence_missing",
 	"needs_execution",
 	"other",
+	"judges_disagree",
+	"second_judge_missing",
 ] as const;
 
 export type UnverifiableCode = (typeof UNVERIFIABLE_CODES)[number];
 
 /**
- * Why review could not verify, from controller facts only, by precedence:
- * `evidence_missing` when the review had no trusted-pipeline evidence, then
- * `needs_execution` when any unverifiable scenario's judge is one the accept
+ * Why review held the run, from controller facts only, by precedence:
+ * `second_judge_missing` when any held scenario had no second judge
+ * configured, `evidence_missing` when the review had no trusted-pipeline
+ * evidence, `judges_disagree` when one judge passed a held scenario,
+ * `needs_execution` when any held scenario's judge is one the accept
  * validator refuses as `judge_requires_execution`, otherwise `other`. A
  * `null` judge is a scenario whose bound judge text is unavailable.
  */
 export function unverifiableCode(input: {
 	readonly trusted: boolean;
 	readonly judges: readonly (string | null)[];
+	readonly routes?: readonly JudgeRoute[];
 }): UnverifiableCode {
+	const routes = input.routes ?? [];
+
+	if (routes.includes("missing")) return "second_judge_missing";
+
 	if (!input.trusted) return "evidence_missing";
+
+	if (routes.includes("disagree")) return "judges_disagree";
 
 	return input.judges.some(
 		(judge) =>
@@ -665,6 +912,7 @@ export function reviewSeats(
 		};
 		readonly installScripts?: readonly unknown[];
 	} = {},
+	scenarios: readonly string[] = [],
 ): ReviewSeat[] {
 	const risk =
 		paths.some((path) =>
@@ -677,7 +925,9 @@ export function reviewSeats(
 		(gate.dependencies?.added?.length ?? 0) > 0 ||
 		(gate.dependencies?.changed?.length ?? 0) > 0;
 
-	return [...REVIEW_SEATS, ...(risk ? ["ultrareview" as const] : [])];
+	const judge: ReviewSeat[] = scenarios.length > 0 ? [SECOND_JUDGE] : [];
+
+	return [...REVIEW_SEATS, ...(risk ? ["ultrareview" as const] : []), ...judge];
 }
 
 /**
@@ -712,6 +962,8 @@ export function reviewCandidate(
 
 	for (const seat of seats)
 		if (
+			(seat.unconfigured !== undefined &&
+				(seat.unconfigured !== true || seat.seat !== SECOND_JUDGE)) ||
 			parseSeat(
 				JSON.stringify({
 					seat: seat.seat,
@@ -915,7 +1167,7 @@ export function candidateReviewPrompt({
 }
 
 export function seatPrompt(input: ReviewInput, seat: ReviewSeat): string {
-	return `${input.prompt}\n\nYou are the ${seat} seat. Return exactly one JSON object, no fences or prose, no other keys:\n{"seat":"${seat}","findings":[{"id":"F1","severity":"blocking|advisory","category":"bug|security|contract|simplify","path":"src/example.ts","startLine":1,"endLine":1,"claim":"at most 600 characters","evidence":"at most 1200 characters"}],"judgments":[{"scenario":"ID","outcome":"pass|fail|unverifiable|inconclusive|timeout","reason":"at most 600 characters"}]}\nUse actual enum values, not pipe-separated values. Paths must exist in the patched tree, never .github or test/acceptance. Line numbers must be valid. Empty findings are []. ${seat === "code-review" ? `Judge exactly these scenarios once each: ${JSON.stringify(input.scenarios)}.` : "judgments must be []."} ${seat === "simplify" ? "Only advisory simplify findings; no edits." : seat === "security-review" ? "Only high-confidence security findings with a concrete reachable failure; category security." : "Only concrete bugs, security defects or broken contract lines block; ignore speculative and style concerns."}`;
+	return `${input.prompt}\n\nYou are the ${seat} seat. Return exactly one JSON object, no fences or prose, no other keys:\n{"seat":"${seat}","findings":[{"id":"F1","severity":"blocking|advisory","category":"bug|security|contract|simplify","path":"src/example.ts","startLine":1,"endLine":1,"claim":"at most 600 characters","evidence":"at most 1200 characters"}],"judgments":[{"scenario":"ID","outcome":"pass|fail|unverifiable|inconclusive|timeout","reason":"at most 600 characters"}]}\nUse actual enum values, not pipe-separated values. Paths must exist in the patched tree, never .github or test/acceptance. Line numbers must be valid. Empty findings are []. ${seat === "code-review" || seat === SECOND_JUDGE ? `Judge exactly these scenarios once each: ${JSON.stringify(input.scenarios)}.` : "judgments must be []."} ${seat === SECOND_JUDGE ? "You are an independent judge of the judge-only scenarios only. findings must be []. Judge each scenario from the diff, the contract and the trusted evidence above." : seat === "simplify" ? "Only advisory simplify findings; no edits." : seat === "security-review" ? "Only high-confidence security findings with a concrete reachable failure; category security." : "Only concrete bugs, security defects or broken contract lines block; ignore speculative and style concerns."}`;
 }
 
 export function feedbackPrompt(feedback: string): string {

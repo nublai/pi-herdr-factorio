@@ -433,6 +433,65 @@ describe("held marker text", () => {
 		assert.equal(huge.body.trimEnd().split("\n").at(-1), huge.key);
 	});
 
+	it("lists why each judge-only judgment is held and both judges' inert votes in the detail comment (#735 round 2)", () => {
+		const generation: GenerationRef = {
+			round: 0,
+			generation: 1,
+			digest: digestOf("g"),
+		};
+
+		const long = `${"c".repeat(DETAIL_REASON_MAX)}tail`;
+
+		const detail = formatUnverifiableDetail({
+			runId,
+			generation,
+			judgments: [
+				{
+					scenario: "S1",
+					reason: "cut for the marker",
+					route: "disagree",
+					votes: [
+						{
+							seat: "code-review",
+							outcome: "pass",
+							reason: "@owner fixed #12",
+						},
+						{ seat: "second-judge", outcome: "unverifiable", reason: long },
+					],
+				},
+				{
+					scenario: "S2",
+					reason: "cut for the marker",
+					route: "missing",
+					votes: [{ seat: "code-review", outcome: "pass", reason: "seen" }],
+				},
+			],
+		});
+
+		assert.ok(detail !== null);
+		assert.match(
+			detail.body,
+			/two independent judges did not both pass these 2 judge-only judgments/,
+		);
+		assert.match(
+			detail.body,
+			/\n- S1: The judges disagree\.\n  - code-review, pass: /,
+		);
+		assert.ok(
+			detail.body.includes(
+				`\n  - second-judge, unverifiable: ${"c".repeat(DETAIL_REASON_MAX)} (truncated: 4 more characters)\n`,
+			),
+		);
+		assert.ok(
+			detail.body.includes(
+				"\n- S2: No second judge is configured.\n  - code-review, pass: seen\n",
+			),
+		);
+		assert.doesNotMatch(detail.body, /@owner|#12|cut for the marker/);
+		assert.equal(detail.body.trimEnd().split("\n").at(-1), detail.key);
+		assert.equal(parseMarker(detail.body).kind, "none");
+	});
+
 	it("uses stable neutral text when a candidate hold reason is unavailable", () => {
 		const value = marker({
 			v: 3,

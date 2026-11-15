@@ -143,14 +143,17 @@ function certifiedPair(builder: FamilyInput, author: FamilyInput): boolean {
 /**
  * `complete` only when the builder is a verified OpenAI family and the
  * gateway observed an Anthropic model on the accept author and on at least
- * one blocking seat (any seat but the advisory `simplify`). Every other
+ * one blocking seat (any seat but the advisory `simplify` and the
+ * `second-judge`, which judges scenarios and reviews no code). Every other
  * shape, an Anthropic builder included, is `incomplete`. Labels are never
  * an input.
  */
 export function certifyR8(input: CertificationFamilies): R8 {
 	const seatCross = input.seats.some(
 		(seat) =>
-			seat.seat !== "simplify" && certifiedPair(input.builder, seat.evidence),
+			seat.seat !== "simplify" &&
+			seat.seat !== "second-judge" &&
+			certifiedPair(input.builder, seat.evidence),
 	);
 
 	return certifiedPair(input.builder, input.accept) && seatCross

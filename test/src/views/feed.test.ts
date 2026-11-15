@@ -1210,6 +1210,102 @@ test("a review_unverifiable hold carries a controller reason code, the judgment 
 	}
 });
 
+test("a review_unverifiable hold from two judges carries judges_disagree or second_judge_missing, never either judge's text (#735 round 2)", async () => {
+	const root = await mkdtemp(join(tmpdir(), "owner-feed-"));
+	const prose = "Second judge prose that must stay off the feed";
+
+	try {
+		await emptyState(root);
+
+		const acceptance = await saveJudgeSuite(root, {
+			S2: "Run the CLI and confirm it exits 0.",
+			S3: "The diff keeps the guard in src/a.ts.",
+		});
+
+		const runId = await addWaitingRun(root, "Hold for the owner", acceptance);
+		await saveTrustedRecords(root, runId);
+		await holdUnverifiable(root, runId, [{ scenario: "S3", reason: prose }]);
+
+		const pair = async (
+			first: string,
+			second: { readonly outcome: string; readonly unconfigured?: true },
+		) => {
+			const path = join(root, "claims", `${runId}.json`);
+			const claim = JSON.parse(await readFile(path, "utf8"));
+			const review = claim.handoff.current.review;
+
+			const base = review.seats.filter(
+				(seat: { seat: string }) => seat.seat !== "second-judge",
+			);
+
+			const judge = {
+				...base[0],
+				seat: "second-judge",
+				judgments: [{ scenario: "S3", outcome: second.outcome, reason: prose }],
+				...second,
+			};
+
+			await save(root, ["claims", `${runId}.json`], {
+				...claim,
+				handoff: {
+					...claim.handoff,
+					current: {
+						...claim.handoff.current,
+						review: {
+							...review,
+							seats: [
+								...base.map((seat: { seat: string }) =>
+									seat.seat === "code-review"
+										? {
+												...seat,
+												judgments: [
+													{ scenario: "S3", outcome: first, reason: prose },
+												],
+											}
+										: seat,
+								),
+								judge,
+							],
+						},
+					},
+				},
+			});
+
+			const feed = await readOwnerFeed({ stateDir: root, repo, now });
+			const found = feed.entries.find((e) => e.runId === runId);
+			assert.ok(found);
+			assert.ok(
+				!JSON.stringify(feed).includes(prose),
+				"judge prose reached the feed",
+			);
+			const wire = parseJson(JSON.stringify(feed));
+			assert.ok(wire !== undefined);
+			assert.deepEqual(v1Problems(wire), []);
+
+			return found;
+		};
+
+		const disagree = await pair("pass", { outcome: "unverifiable" });
+		assert.equal(disagree.reason, "review_unverifiable");
+		assert.equal(disagree.unverifiableCode, "judges_disagree");
+		assert.equal(disagree.unverifiableCount, 1);
+		assert.deepEqual(disagree.unverifiable, [{ scenario: "S3" }]);
+
+		const missing = await pair("pass", {
+			outcome: "unverifiable",
+			unconfigured: true,
+		});
+
+		assert.equal(missing.unverifiableCode, "second_judge_missing");
+		assert.equal(missing.unverifiableCount, 1);
+
+		const neither = await pair("unverifiable", { outcome: "timeout" });
+		assert.equal(neither.unverifiableCode, "other");
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
 test("private fixtures also work at restrictive umasks without changing their semantics", async () => {
 	await withUmask(0o077, async () => {
 		await state(async (root) => {
