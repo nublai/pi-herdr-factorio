@@ -336,12 +336,17 @@ export async function executionCharge(
 			"security-review",
 			"simplify",
 			"ultrareview",
+			"second-judge",
 		].some((name) => existsSync(join(dir, name)))
 	) {
 		const names = readdirSync(dir).filter((name) =>
-			["code-review", "security-review", "simplify", "ultrareview"].includes(
-				name,
-			),
+			[
+				"code-review",
+				"security-review",
+				"simplify",
+				"ultrareview",
+				"second-judge",
+			].includes(name),
 		);
 
 		return covered(
@@ -408,6 +413,7 @@ export async function executionEfficiency(
 		"security-review",
 		"simplify",
 		"ultrareview",
+		"second-judge",
 	];
 
 	const names = leaves.filter((name) => existsSync(join(dir, name)));

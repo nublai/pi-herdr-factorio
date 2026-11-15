@@ -254,6 +254,19 @@ export type StageRunSettings = {
 	 * runs `model`.
 	 */
 	readonly codeReviewModel?: ModelId | null;
+	/**
+	 * `stages.review.seats.second-judge.model`. Only the review launch sets
+	 * it, and only the second-judge seat runs it; absent or `null`, that
+	 * seat runs no model and records an unconfigured placeholder.
+	 */
+	readonly secondJudgeModel?: ModelId | null;
+	/**
+	 * Set only for the review's second-judge seat. The gateway then reserves
+	 * each model request's input estimate and output bound against what is
+	 * left of `maxTokens` before forwarding it, and refuses one that cannot
+	 * fit, so the seat never spends past its bound.
+	 */
+	readonly reserveTokens?: boolean;
 };
 
 export type FailedExit = "error" | "malformed" | "crashed" | "aborted";

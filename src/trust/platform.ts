@@ -43,6 +43,7 @@ export const MODEL_POSITIONS = [
 	"validate",
 	"review",
 	"code-review",
+	"second-judge",
 	"cadence",
 ] as const;
 
@@ -182,6 +183,15 @@ const DEFAULT_HISTORICAL_REPOSITORIES: HistoricalRepositories = Object.freeze({
 const ANTHROPIC_STAGES: readonly ModelPosition[] = Object.freeze([
 	"accept",
 	"code-review",
+]);
+
+/**
+ * exe.dev also allows the second judge, under Giuseppe's 2026-11-15
+ * approval of its exe.dev spend. exmach keeps that seat OpenAI-only.
+ */
+const EXE_DEV_ANTHROPIC_STAGES: readonly ModelPosition[] = Object.freeze([
+	...ANTHROPIC_STAGES,
+	"second-judge",
 ]);
 
 /** A whole DNS hostname: at most 253 characters, each label at most 63. */
@@ -649,7 +659,8 @@ export function parsePlatformProfile(input: {
 		ghHost: ghHost.value,
 		repositories,
 		historicalRepositories,
-		anthropicStages: ANTHROPIC_STAGES,
+		anthropicStages:
+			selector.name === "exe-dev" ? EXE_DEV_ANTHROPIC_STAGES : ANTHROPIC_STAGES,
 	});
 
 	const defect = platformDefect(profile);

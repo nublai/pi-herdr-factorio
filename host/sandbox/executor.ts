@@ -205,6 +205,13 @@ export async function withSkills(
 	return `${prompt}\n\n## Skills\n\n${parts.join("\n\n")}\n`;
 }
 
+/** The review executor's seat decorator: the bundle skill named after each seat. */
+export function reviewSkills(
+	bundleDir: string,
+): (prompt: string, seat: string) => Promise<string | null> {
+	return (prompt, seat) => withSkills(bundleDir, prompt, [seat]);
+}
+
 function cleanupBuildAgents(
 	stateDir: string,
 	runId: Digest,
@@ -1356,7 +1363,7 @@ export function sandboxExecutor(config: SandboxExecutorConfig): StageExecutor {
 						dir,
 						(stageDir, tools) =>
 							(config.host ?? sandboxHost)({ ...hostConfig, stageDir, tools }),
-						(prompt, seat) => withSkills(bundle.dir, prompt, [seat]),
+						reviewSkills(bundle.dir),
 					),
 				};
 			}

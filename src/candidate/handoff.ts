@@ -15,6 +15,7 @@ import {
 	type ReviewReceipt,
 	type ReviewInputRefusal,
 	type ReviewSeat,
+	SECOND_JUDGE,
 	unverifiableOnly,
 } from "./review.ts";
 import type {
@@ -752,6 +753,20 @@ export function stopRound(
 	});
 }
 
+/**
+ * The reviews of the generations from earlier rounds than the current one,
+ * the repair history a judge split is checked against.
+ */
+export function earlierReviews(
+	state: Pick<Selected, "current" | "history">,
+): readonly ReviewReceipt[] {
+	return state.history.flatMap((g) =>
+		g.intent.round < state.current.intent.round
+			? (g.review ?? g.certification?.review ?? [])
+			: [],
+	);
+}
+
 function failOrRepair(
 	state: Selected,
 	cause: RepairCause,
@@ -1001,14 +1016,21 @@ export function certifyGeneration(input: {
 		report.heldoutDigest !== v.heldoutDigest
 	)
 		throw new Error("certification_binding");
-	const judgments = r.seats.flatMap((s) => s.judgments);
+
+	const judges = r.seats.filter(
+		(s) => s.seat === "code-review" || s.seat === SECOND_JUDGE,
+	);
 
 	if (
-		judgments.length !== v.unjudged.length ||
-		v.unjudged.some(
-			(id) =>
-				judgments.filter((j) => j.scenario === id && j.outcome === "pass")
-					.length !== 1,
+		r.seats.some((s) => !judges.includes(s) && s.judgments.length > 0) ||
+		judges.some(
+			(s) =>
+				s.judgments.length !== v.unjudged.length ||
+				v.unjudged.some(
+					(id) =>
+						s.judgments.filter((j) => j.scenario === id && j.outcome === "pass")
+							.length !== 1,
+				),
 		)
 	)
 		throw new Error("certification_judgments");
@@ -2495,8 +2517,22 @@ export function handoffCandidate(
 					...updated,
 					current: { ...updated.current, review: event.result.review },
 				};
+
+				const held = unverifiableOnly(
+					event.result.review,
+					earlierReviews(state),
+				);
+
+				if (held.some((j) => j.route === "split" || j.route === "exhausted")) {
+					next =
+						state.published === null
+							? hold(updated, "review_unverifiable", now)
+							: stopRound(updated, "review_unverifiable", now);
+					break;
+				}
+
 				const fingerprints = findingFingerprints(event.result.review);
-				const ownerOnly = unverifiableOnly(event.result.review).length > 0;
+				const ownerOnly = held.length > 0;
 
 				if (
 					state.current.intent.round > 0 &&

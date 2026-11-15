@@ -453,7 +453,7 @@ describe("platform selection", () => {
 			historicalRepositories: {
 				"nublai/pi-herdr-factorio": ["giuseppecrj/pi-herdr-factorio"],
 			},
-			anthropicStages: ["accept", "code-review"],
+			anthropicStages: ["accept", "code-review", "second-judge"],
 		});
 		assert.equal(Object.isFrozen(unset), true);
 		assert.equal(Object.isFrozen(unset.modelBasePaths), true);
@@ -1301,7 +1301,7 @@ describe("Anthropic positions", () => {
 			assert.deepEqual(errorOf(workflowText(lines), EXE_DEV_PLATFORM), {
 				kind: "workflow_validation_error",
 				field,
-				message: `${field} provider anthropic is allowed only for stages.accept.model and stages.review.seats.code-review.model: on the VM it spends exe.dev credits`,
+				message: `${field} provider anthropic is allowed only for stages.accept.model, stages.review.seats.code-review.model, and stages.review.seats.second-judge.model: on the VM it spends exe.dev credits`,
 			});
 			assert.deepEqual(errorOf(workflowText(lines), EXMACH), {
 				kind: "workflow_validation_error",

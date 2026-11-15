@@ -18,6 +18,7 @@ import {
 	promotedHead,
 	candidateAllowance,
 	certifyGeneration,
+	earlierReviews,
 	notProven,
 	renderLimitation,
 } from "../../../src/candidate/handoff.ts";
@@ -56,9 +57,15 @@ import { storeFeedbackBatch } from "../../../host/controller/candidate-port.ts";
 import { type FamilyInput, familyLabel } from "../../../src/core/models.ts";
 import {
 	findingFingerprints,
+	type JudgmentOutcome,
 	ownerJudgments,
 	type ReviewReceipt,
 	reviewR8,
+	reviewSeats,
+	SECOND_JUDGE,
+	unverifiableCode,
+	unverifiableJudgments,
+	unverifiableOnly,
 } from "../../../src/candidate/review.ts";
 import {
 	dispatchNonce,
@@ -405,6 +412,7 @@ function validated(
 		read: import("../../../src/candidate/validation.ts").ReadAssessment,
 	) => import("../../../src/candidate/validation.ts").ReadAssessment,
 	now?: number,
+	unjudged: readonly string[] = [],
 ) {
 	const request = pending(state, "validate");
 	const g = request.generation;
@@ -468,7 +476,7 @@ function validated(
 			passed: passes || name !== "heldout",
 		})),
 		requiredChecks,
-		unjudged: [],
+		unjudged: [...unjudged],
 	};
 
 	const report: TrustedReport = {
@@ -493,7 +501,7 @@ function validated(
 					validation,
 					verdict,
 					report,
-					seats: ["code-review", "security-review", "simplify"],
+					seats: reviewSeats([], {}, unjudged),
 					assessment: (tamper ?? ((read) => read))(
 						verdictAssessment(
 							pin.runId,
@@ -2517,6 +2525,382 @@ test("a published unverifiable-only hold outside a feedback round refreshes when
 	});
 
 	assert.equal(moved.effect?.kind, "validate");
+});
+
+/**
+ * A review whose two judges split on S1: code-review votes `first` and the
+ * second judge votes `second`. An execution without a second-judge seat gets
+ * one, so a published feedback round can carry the split too.
+ */
+function splitReceipt(
+	e: ReviewExecution,
+	first: JudgmentOutcome,
+	second: JudgmentOutcome,
+	reason: string,
+): ReviewReceipt {
+	const r = receipt(e);
+
+	const seats = r.seats.some((seat) => seat.seat === SECOND_JUDGE)
+		? r.seats
+		: [...r.seats, { ...r.seats[0]!, seat: SECOND_JUDGE }];
+
+	const vote = (outcome: JudgmentOutcome) => [
+		{
+			scenario: "S1",
+			outcome,
+			reason: outcome === "fail" ? reason : "the guard is present",
+		},
+	];
+
+	return {
+		...r,
+		blocking: true,
+		seats: seats.map((seat) =>
+			seat.seat === "code-review"
+				? { ...seat, judgments: vote(first) }
+				: seat.seat === SECOND_JUDGE
+					? { ...seat, judgments: vote(second) }
+					: seat,
+		),
+	};
+}
+
+/** Round 0 splits on S1 and repairs once; returns the round-1 review launch. */
+function splitRepaired(first: JudgmentOutcome, second: JudgmentOutcome) {
+	const round0 = reviewing(
+		validated(select(), true, undefined, undefined, undefined, ["S1"]),
+	);
+
+	assert.deepEqual(round0.execution.seats, [
+		"code-review",
+		"security-review",
+		"simplify",
+		SECOND_JUDGE,
+	]);
+
+	const due = selected(
+		handoffCandidate(round0.state, {
+			kind: "review_settled",
+			execution: round0.execution,
+			tokens: 7,
+			result: {
+				kind: "passed",
+				review: splitReceipt(round0.execution, first, second, "missing guard"),
+				patch: { kind: "found", receipt: patch, patch: "patch" },
+			},
+		}).state,
+	);
+
+	assert.ok(due.work.kind === "repair_due");
+	assert.equal(due.work.round, 1);
+
+	const issued = handoffCandidate(due, observed()).state;
+	const request = pending(issued, "repair_build");
+
+	const running = handoffCandidate(issued, {
+		kind: "effect_completed",
+		completion: { kind: "repair_build", request, started: true },
+	}).state;
+
+	const repaired = { ...patch, round: 1, patchDigest: digestOf("patch-r1") };
+
+	const built = handoffCandidate(running, {
+		kind: "repair_settled",
+		execution: request.execution,
+		tokens: 123,
+		result: { kind: "passed", patch: repaired },
+	}).state;
+
+	return {
+		active: reviewing(
+			validated(
+				handoffCandidate(built, observed()).state,
+				true,
+				undefined,
+				undefined,
+				undefined,
+				["S1"],
+			),
+		),
+		repaired,
+	};
+}
+
+for (const [first, second] of [
+	["fail", "pass"],
+	["pass", "fail"],
+] as const)
+	for (const reason of [
+		"missing guard",
+		"the guard still rejects the valid branch",
+	])
+		test(`a ${first}/${second} judge split that persists after one repair holds as review_unverifiable with judges_disagree, never repair round 2 (${reason === "missing guard" ? "unchanged" : "changed"} reason) (#805 B2)`, () => {
+			const { active, repaired } = splitRepaired(first, second);
+			const review = splitReceipt(active.execution, first, second, reason);
+
+			const step = handoffCandidate(active.state, {
+				kind: "review_settled",
+				execution: active.execution,
+				tokens: 9,
+				result: {
+					kind: "passed",
+					review,
+					patch: { kind: "found", receipt: repaired, patch: "patch-r1" },
+				},
+			});
+
+			const held = selected(step.state);
+
+			assert.equal(step.effect, null);
+			assert.ok(held.work.kind === "held");
+			assert.equal(held.work.reason, "review_unverifiable");
+			assert.equal(held.current.certification, null);
+			assert.ok(held.current.review !== undefined);
+			assert.equal(
+				reviewReceiptDigest(held.current.review),
+				reviewReceiptDigest(review),
+			);
+
+			const restored = parseCandidateState(JSON.parse(JSON.stringify(held)));
+			assert.ok(restored?.kind === "selected");
+
+			const stable = handoffCandidate(
+				restored,
+				observed(restored.current.intent.baseSha),
+			);
+
+			assert.equal(stable.effect, null);
+			assert.ok(selected(stable.state).work.kind === "held");
+
+			const earlier = earlierReviews(restored);
+			const judged = unverifiableOnly(review, earlier);
+
+			assert.deepEqual(
+				judged.map((j) => [j.scenario, j.route]),
+				[["S1", "split"]],
+			);
+			assert.deepEqual(
+				judged[0]?.votes.map((v) => [v.seat, v.outcome]),
+				[
+					["code-review", first],
+					[SECOND_JUDGE, second],
+				],
+			);
+			assert.deepEqual(
+				ownerJudgments(review, earlier).map((j) => j.scenario),
+				["S1"],
+			);
+			assert.deepEqual(
+				unverifiableJudgments(review, earlier).map((j) => j.route),
+				["split"],
+			);
+			assert.equal(
+				unverifiableCode({
+					trusted: false,
+					judges: [null],
+					routes: judged.map((j) => j.route),
+				}),
+				"judges_disagree",
+			);
+			assert.deepEqual(unverifiableOnly(review), []);
+		});
+
+test("judges that agree on a fail after a repaired split keep the repair path (#805 B2)", () => {
+	const { active, repaired } = splitRepaired("fail", "pass");
+	const review = splitReceipt(active.execution, "fail", "fail", "still broken");
+
+	const next = selected(
+		handoffCandidate(active.state, {
+			kind: "review_settled",
+			execution: active.execution,
+			tokens: 9,
+			result: {
+				kind: "passed",
+				review,
+				patch: { kind: "found", receipt: repaired, patch: "patch-r1" },
+			},
+		}).state,
+	);
+
+	assert.ok(next.work.kind === "repair_due");
+	assert.equal(next.work.round, 2);
+	assert.deepEqual(unverifiableOnly(review, earlierReviews(next)), []);
+});
+
+test("a published feedback round whose judge split persists stops as review_unverifiable, not review_failed (#805 B2)", () => {
+	const queued = queuedFeedback();
+
+	const oldExecution = queued.accounts.find(
+		(a) => a.execution.stage === "review",
+	)?.execution;
+
+	assert.ok(oldExecution?.stage === "review");
+
+	const rebuilding = rebuildingFeedback({
+		...queued,
+		current: {
+			...queued.current,
+			review: splitReceipt(oldExecution, "fail", "pass", "missing guard"),
+		},
+	});
+
+	const changed = { ...patch, round: 1, patchDigest: digestOf("split-repair") };
+
+	const built = handoffCandidate(rebuilding.state, {
+		kind: "repair_settled",
+		execution: rebuilding.execution,
+		tokens: 10,
+		result: { kind: "passed", patch: changed },
+	}).state;
+
+	const active = reviewing(
+		validated(handoffCandidate(built, readyObservation(built)).state),
+	);
+
+	const stopped = selected(
+		handoffCandidate(active.state, {
+			kind: "review_settled",
+			execution: active.execution,
+			tokens: 30,
+			result: {
+				kind: "passed",
+				review: splitReceipt(active.execution, "fail", "pass", "missing guard"),
+				patch: { kind: "found", receipt: changed, patch: "split-repair" },
+			},
+		}).state,
+	);
+
+	const notice = pending(stopped, "post_notice");
+
+	assert.ok(notice.then.kind === "held");
+	assert.equal(notice.then.reason, "review_unverifiable");
+	assert.equal(notice.withdraw, "review_unverifiable");
+});
+
+/**
+ * The review the host publishes when code-review ran out of the shared
+ * bound: its scenario `timeout`, and every later seat `budgetStopped`.
+ */
+function exhaustedReceipt(e: ReviewExecution): ReviewReceipt {
+	const r = splitReceipt(e, "timeout", "timeout", "unused");
+
+	return {
+		...r,
+		seats: r.seats.map((seat) =>
+			seat.seat === "code-review"
+				? seat
+				: { ...seat, findings: [], budgetStopped: true as const },
+		),
+	};
+}
+
+test("a review a first judge's bound exhaustion stopped holds as review_unverifiable with judge_budget_exhausted, at the review token cap, never failing or repairing (#805 B3)", () => {
+	const active = reviewing(
+		validated(select(), true, undefined, undefined, undefined, ["S1"]),
+	);
+
+	const review = exhaustedReceipt(active.execution);
+
+	const step = handoffCandidate(active.state, {
+		kind: "review_settled",
+		execution: active.execution,
+		tokens: REVIEW_MAX_TOKENS,
+		result: {
+			kind: "passed",
+			review,
+			patch: { kind: "found", receipt: patch, patch: "patch" },
+		},
+	});
+
+	const held = selected(step.state);
+
+	assert.equal(step.effect, null);
+	assert.ok(held.work.kind === "held");
+	assert.equal(held.work.reason, "review_unverifiable");
+	assert.equal(held.current.certification, null);
+	assert.deepEqual(
+		held.accounts.find((a) => a.execution.id === active.execution.id)?.spend,
+		{ kind: "known", tokens: REVIEW_MAX_TOKENS },
+	);
+
+	const restored = parseCandidateState(JSON.parse(JSON.stringify(held)));
+	assert.ok(restored?.kind === "selected");
+	assert.ok(restored.current.review !== undefined);
+
+	const judged = unverifiableOnly(restored.current.review);
+
+	assert.deepEqual(
+		judged.map((j) => [j.scenario, j.route]),
+		[["S1", "exhausted"]],
+	);
+	assert.equal(
+		unverifiableCode({
+			trusted: true,
+			judges: [null],
+			routes: judged.map((j) => j.route),
+		}),
+		"judge_budget_exhausted",
+	);
+
+	for (const bad of [
+		{ budgetStopped: false },
+		{ budgetStopped: true, findings: [receipt(active.execution).seats[0]] },
+	])
+		assert.equal(
+			parseCandidateState(
+				JSON.parse(
+					JSON.stringify({
+						...held,
+						current: {
+							...held.current,
+							review: {
+								...review,
+								seats: review.seats.map((seat) =>
+									seat.seat === "simplify" ? { ...seat, ...bad } : seat,
+								),
+							},
+						},
+					}),
+				),
+			),
+			null,
+		);
+});
+
+test("a published feedback round a first judge's bound exhaustion stopped stops as review_unverifiable, not review_failed (#805 B3)", () => {
+	const queued = queuedFeedback();
+	const rebuilding = rebuildingFeedback(queued);
+	const changed = { ...patch, round: 1, patchDigest: digestOf("exhausted") };
+
+	const built = handoffCandidate(rebuilding.state, {
+		kind: "repair_settled",
+		execution: rebuilding.execution,
+		tokens: 10,
+		result: { kind: "passed", patch: changed },
+	}).state;
+
+	const active = reviewing(
+		validated(handoffCandidate(built, readyObservation(built)).state),
+	);
+
+	const stopped = selected(
+		handoffCandidate(active.state, {
+			kind: "review_settled",
+			execution: active.execution,
+			tokens: 30,
+			result: {
+				kind: "passed",
+				review: exhaustedReceipt(active.execution),
+				patch: { kind: "found", receipt: changed, patch: "exhausted" },
+			},
+		}).state,
+	);
+
+	const notice = pending(stopped, "post_notice");
+
+	assert.ok(notice.then.kind === "held");
+	assert.equal(notice.then.reason, "review_unverifiable");
+	assert.equal(notice.withdraw, "review_unverifiable");
 });
 
 for (const published of [false, true])
@@ -8412,36 +8796,36 @@ test("stored books keep their bytes and refusals through parse, transition and f
 
 const STORED_BOOK_DIGESTS = {
 	unprepared:
-		"7821e0c2e322c59348c74a1c9c028f3bdeaccc7c52fee7bea4c0b8ebb0bbd227",
+		"a809a92c446cb50454e780189f427682192ef1547fdb253c47e14e0936b263cc",
 	pending_validate:
-		"00c7f1e3bb757661669ccf1b6aff4eac7ded10e7c0991a648ba6c7161d1962e0",
+		"0d7e8908c62a82ada3238391dd21c92fcf842829b72fe2d4061db49f9b040127",
 	captured_review:
-		"7125b09121dfc21c7a3dcd8e7e9c2ec7088ae025f7e0b8e7ed0a23e93d410841",
+		"80b6418d780234ba25e250d75d68467c14d7d055e52773316b57157d2125f874",
 	unknown_usage:
-		"ec4723d6973f0673675a340376517b9b0d22ab911470e91d77c9736fd8182473",
-	certified: "267f50df89e77244840b917073545ef121e516cf25d2c287c145d2510031bb30",
+		"af0675dc41800d7bb134ca0d600427c0ad853f2ca6fb58c15b8b5a63220740a8",
+	certified: "3fd1f26494c465203b5534e34e8cff1a21b280ca35f7ccbde67218fd9f52fff3",
 	pending_open_pr:
-		"a834e18b7b95eca5c9876d9abe41d8cf609a61a68c3db4efc3b895826c4336ec",
-	waiting: "dcbe5e2d5163e43d842caa49919e9545b35f19fa006e844f0f8c9e6326297663",
-	owner_due: "e51a913638d3c4acecb8c65aba152e12768757ba851734b2c9e04e9577772730",
+		"67dfaa4cb6128a4b55a5f90b6bb3add1b33fc7ff317580cae85e7c52f485595b",
+	waiting: "927249773fb59b96ac959b844f61fafb816badda5b708ba040c246f983269e98",
+	owner_due: "8b29988e483f2e51fbaeacfa92f5a70865bf53b4eff5cd39f4cc772059e4f706",
 	owner_deriving:
-		"ba356c57398b64060acbc9650d0a8743e02ba6f611558000198842c4cbdd549b",
+		"86143be75ddcbd1c0779713ca5c6131b7301afd2902d3e935143d38cc6c21a36",
 	owner_recertify:
-		"55fc1f52ff3b7b9f37a3a4712e59f2a1eb689dcb7a1c0d3ed27db72c18292939",
+		"37ba8de1edb53e44fbf2b3afa5edab5a5a19654d335914c60f9a9b4184d9d647",
 	late_unknown:
-		"1708b4ee2dc6d1b0da9b15595a9f68bbbb674c4749d96f1255e88f2b2a108d31",
+		"aedbf57381f0c7f9aecb2ef9fb7cce63fca3bde916aaeec849307d9e69331445",
 	feedback_queued:
-		"5d2cccf17dea75d9a771f04ab43180a735063cb678e4cab63428487b97ea5ba0",
+		"2fd59b89a998f4ba2f04f516fff2df6ce9bb958150b3932cc50294711a3c10d8",
 	feedback_rebuilding:
-		"bab9e6c9fd04365c57450fd63f140ef5a279d44a52d5f1e8b79c5337be2cd49c",
+		"74ccc0ed79234680567f61bac53695b68475d060c098c2a82097114104218f40",
 	merge_pending:
-		"e331420d73ac1a1c91a86a6fed745bdabbce55673baf1b4af1ca2e5d5d23a205",
+		"b032585c5d6a11054c7dd1151f0921d7c626b2de179025285dfabe8bead374f1",
 	legacy_no_feedback:
-		"1bf01ab44a9cf0c7fce50d45b50f91b42eeed7a21a22c8b130c5fa7cf8fd6879",
+		"6aee7e33330e8364631aa5eba6d8909d4914e919a9a301824a549f49e4430af9",
 	legacy_no_owner_head:
-		"48f61512ba3e3b00b8ed7110b21e96b048a394c43e4b4ba067dc4865d33e9161",
+		"2e3de9134d6caf1a7b557061d42418ed1636250fdbbe3dfce6350b8ab69da91e",
 	legacy_v1_certification_review:
-		"dcbe5e2d5163e43d842caa49919e9545b35f19fa006e844f0f8c9e6326297663",
+		"927249773fb59b96ac959b844f61fafb816badda5b708ba040c246f983269e98",
 	owner_patch_missing: null,
 	wrong_pin_workflow: null,
 	wrong_intent_digest: null,
@@ -8454,8 +8838,8 @@ const STORED_BOOK_DIGESTS = {
 	v1_review_unmigratable: null,
 	negative_unknown_floor: null,
 	promoted_generation_missing: null,
-	review_v2: "304c3ff62266480b70999c1388808b48dfff68a55b8639ded9b509620085091e",
-	review_v1: "304c3ff62266480b70999c1388808b48dfff68a55b8639ded9b509620085091e",
+	review_v2: "955390bb8319a8ed55484783fb38c78800e99fc0d54307aeef6230db7a998c9d",
+	review_v1: "955390bb8319a8ed55484783fb38c78800e99fc0d54307aeef6230db7a998c9d",
 	review_v1_broken: null,
 	owner_patch:
 		"959a9c2b7b3c27804a37e17e43cf1d5a9fd10b40ed598c5d6907b90d7f8c1a78",

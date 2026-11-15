@@ -506,6 +506,15 @@ describe("bot label actors", () => {
 			const profile = builtInProfile(name);
 			const github = new FakeGitHub();
 
+			// exmach refuses the trusted workflow's Anthropic second judge (#805 S1).
+			if (name === "exmach") {
+				github.workflow = TRUSTED_WORKFLOW.replace(
+					"    seats:\n      second-judge:\n        model: anthropic/claude-sonnet-5-5\n",
+					"",
+				);
+				assert.ok(github.workflow !== TRUSTED_WORKFLOW);
+			}
+
 			github.permissions.set(profile.controllerLogin, "write");
 			github.add(
 				fakeIssue(14, {

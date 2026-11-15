@@ -93,6 +93,7 @@ import {
 	JUDGMENT_OUTCOMES,
 	ReviewEvidenceUnavailable,
 	REVIEW_DIFF_MAX_BYTES,
+	SECOND_JUDGE_UNCONFIGURED,
 	type JudgmentOutcome,
 	type ReviewReceipt,
 } from "../../../src/candidate/review.ts";
@@ -190,6 +191,7 @@ describe("controller-only validate", () => {
 		judged: readonly { scenario: string; reason: string }[] = [
 			{ scenario: "S2", reason: "no live evidence" },
 		],
+		second: JudgmentOutcome | "missing" | null = outcome ?? null,
 	) {
 		const f = await waitingRun(setup);
 		const contract = await f.files.readContract(runOf(14));
@@ -214,21 +216,50 @@ describe("controller-only validate", () => {
 			unjudged: outcome === undefined ? [] : judged.map((j) => j.scenario),
 		};
 
-		const seats = ["code-review", "security-review", "simplify"].map(
-			(seat) => ({
-				seat,
-				findings: [],
-				judgments:
-					seat === "code-review" && outcome !== undefined
-						? judged.map((j) => ({ ...j, outcome }))
-						: [],
-				requested: "openai/gpt-6.1-sol",
-				observed: null,
-				label: "context-isolated, same model, same family, not cross-family",
-				fallback: false,
-				tokens: 1,
-			}),
+		const judgmentsOf = (seat: string) => {
+			if (seat === "code-review" && outcome !== undefined)
+				return judged.map((j) => ({ ...j, outcome }));
+
+			if (seat !== "second-judge" || second === null) return [];
+
+			if (second === "missing")
+				return judged.map((j) => ({
+					scenario: j.scenario,
+					outcome: "unverifiable" as const,
+					reason: SECOND_JUDGE_UNCONFIGURED,
+				}));
+
+			const vote = second;
+
+			return judged.map((j) => ({ ...j, outcome: vote }));
+		};
+
+		const seats = [
+			"code-review",
+			"security-review",
+			"simplify",
+			...(outcome !== undefined && second !== null ? ["second-judge"] : []),
+		].map((seat) => ({
+			seat,
+			findings: [],
+			judgments: judgmentsOf(seat),
+			requested: "openai/gpt-6.1-sol",
+			observed: null,
+			label: "context-isolated, same model, same family, not cross-family",
+			fallback: false,
+			tokens: 1,
+		}));
+
+		const placeholder = seats.findIndex(
+			(seat) => seat.seat === "second-judge" && second === "missing",
 		);
+
+		if (placeholder >= 0) {
+			const seat = seats[placeholder];
+
+			if (seat !== undefined)
+				seats[placeholder] = Object.assign({}, seat, { unconfigured: true });
+		}
 
 		f.executor.validate = async (input) => ({
 			kind: "finished",
@@ -784,7 +815,13 @@ describe("controller-only validate", () => {
 
 	for (const outcome of JUDGMENT_OUTCOMES)
 		it(`hands off a ${outcome} review judgment only when it is pass`, async () => {
-			const f = await reviewingRun(outcome);
+			const f = await reviewingRun(
+				outcome,
+				undefined,
+				undefined,
+				outcome === "pass" ? "pass" : null,
+			);
+
 			f.executor.behaviors = [{ kind: "pass", usage: 11 }];
 			await once(f.controller);
 			await f.controller.tick();
@@ -868,6 +905,58 @@ describe("controller-only validate", () => {
 			);
 		});
 
+	for (const [second, route] of [
+		["unverifiable", "The judges disagree."],
+		["inconclusive", "The judges disagree."],
+		["missing", "No second judge is configured."],
+	] as const)
+		it(`holds a code-review pass beside a second judge's ${second} for the owner, with each vote in the detail comment and no repair (#735 round 2)`, async () => {
+			const f = await reviewingRun("pass", undefined, undefined, second);
+			f.executor.behaviors = [{ kind: "pass", usage: 11 }];
+			await once(f.controller);
+			await f.controller.tick();
+			const book = f.files.claims.get(runOf(14))?.handoff;
+			assert.ok(book?.kind === "selected");
+			assert.ok(book.work.kind === "held", JSON.stringify(book.work));
+			assert.equal(book.work.reason, "review_unverifiable");
+			assert.equal(book.current.certification, null);
+			assert.ok(book.accounts.every((a) => a.execution.stage !== "build"));
+
+			const comments = f.github.issues.get(14)?.comments ?? [];
+
+			const detail = comments.find((c) =>
+				c.body.includes("<!-- factory-unverifiable "),
+			);
+
+			const votes =
+				second === "missing"
+					? "  - code-review, pass: no live evidence\n"
+					: `  - code-review, pass: no live evidence\n  - second-judge, ${second}: no live evidence\n`;
+
+			assert.ok(
+				detail?.body.includes(`\n- S2: ${route}\n${votes}`),
+				detail?.body ?? "no detail comment",
+			);
+			assert.match(
+				detail?.body ?? "",
+				/two independent judges did not both pass/,
+			);
+			assert.match(comments.at(-1)?.body ?? "", /\(review_unverifiable\)/);
+		});
+
+	it("repairs when either judge fails a judge-only scenario, even beside a pass (#735 round 2)", async () => {
+		const f = await reviewingRun("pass", undefined, undefined, "fail");
+		f.executor.behaviors = [{ kind: "pass", usage: 11 }];
+		await once(f.controller);
+		await f.controller.tick();
+		const book = f.files.claims.get(runOf(14))?.handoff;
+		assert.ok(book?.kind === "selected");
+		assert.ok(
+			book.work.kind === "rebuilding" && book.work.execution.round === 1,
+			JSON.stringify(book.work),
+		);
+	});
+
 	it("publishes every unverifiable judgment with its full reason in one detail comment, links it and never posts it twice (#795)", async () => {
 		const judged = Array.from({ length: 12 }, (_, i) => ({
 			scenario: `S${i + 2}`,
@@ -875,7 +964,7 @@ describe("controller-only validate", () => {
 		}));
 
 		assert.ok(judged.every((j) => j.reason.length > 160));
-		const f = await reviewingRun("unverifiable", undefined, judged);
+		const f = await reviewingRun("unverifiable", undefined, judged, null);
 		f.executor.behaviors = [{ kind: "pass", usage: 11 }];
 		await once(f.controller);
 		await f.controller.tick();

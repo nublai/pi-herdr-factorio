@@ -41,6 +41,14 @@ import { isGitSha, type GitSha } from "../config/schema.ts";
 import { isRepoSlug } from "../trust/platform.ts";
 import type { JsonValue } from "../core/json.ts";
 
+const WIRE_SEATS: readonly string[] = [
+	"code-review",
+	"security-review",
+	"simplify",
+	"ultrareview",
+	"second-judge",
+];
+
 function wireObject(
 	value: JsonValue | undefined,
 ): Record<string, JsonValue> | null {
@@ -257,15 +265,11 @@ function wireExecution(
 		v.binding.round === v.round &&
 		Array.isArray(seats) &&
 		seats.length >= 3 &&
-		seats.length <= 4 &&
+		seats.length <= 5 &&
 		["code-review", "security-review", "simplify"].every(
 			(seat) => seats.filter((s) => s === seat).length === 1,
 		) &&
-		seats.every((seat) =>
-			["code-review", "security-review", "simplify", "ultrareview"].includes(
-				String(seat),
-			),
-		)
+		seats.every((seat) => WIRE_SEATS.includes(String(seat)))
 	);
 }
 
@@ -352,7 +356,7 @@ function wireReviewFields(
 				parseFamily(v.accept) === null) ||
 		(v.blocking !== true && v.blocking !== false) ||
 		!Array.isArray(v.seats) ||
-		v.seats.length > 4
+		v.seats.length > 5
 	)
 		return false;
 
@@ -369,6 +373,12 @@ function wireReviewFields(
 			(s.observed !== null && !wireText(s.observed)) ||
 			!wireText(s.label) ||
 			(s.fallback !== true && s.fallback !== false) ||
+			(s.unconfigured !== undefined &&
+				(s.unconfigured !== true || s.seat !== "second-judge")) ||
+			(s.budgetStopped !== undefined &&
+				(s.budgetStopped !== true ||
+					!Array.isArray(s.findings) ||
+					s.findings.length > 0)) ||
 			!wireCount(s.tokens) ||
 			!Array.isArray(s.findings) ||
 			!Array.isArray(s.judgments)
@@ -857,15 +867,8 @@ function wireWork(
 			return (
 				wireStrings(v.seats) &&
 				v.seats.length >= 3 &&
-				v.seats.length <= 4 &&
-				v.seats.every((s) =>
-					[
-						"code-review",
-						"security-review",
-						"simplify",
-						"ultrareview",
-					].includes(s),
-				)
+				v.seats.length <= 5 &&
+				v.seats.every((s) => WIRE_SEATS.includes(s))
 			);
 		case "reviewing":
 			return wireExecution(v.execution) && v.execution.stage === "review";

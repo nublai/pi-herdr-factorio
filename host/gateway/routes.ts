@@ -158,6 +158,13 @@ export type RouteTable = {
 	readonly ceiling: {
 		readonly modelTokens: number;
 		readonly modelRequests: number;
+		/**
+		 * Set only for the review's second judge: each model request reserves
+		 * its body bytes plus its output bound against `modelTokens`, less what
+		 * earlier requests charged and outstanding ones reserved, before it is
+		 * forwarded. One that cannot fit is refused and closes the gate.
+		 */
+		readonly reserve?: true;
 	};
 };
 
@@ -433,6 +440,7 @@ export function builtinTable(input: {
 	fallback: string | null;
 	modelTokens: number;
 	modelRequests: number;
+	reserve?: boolean;
 }): RouteTable {
 	const routes =
 		input.provider === "anthropic"
@@ -448,10 +456,17 @@ export function builtinTable(input: {
 		attempt: input.attempt,
 		forwarderHost: FORWARDER_HOST,
 		routes,
-		ceiling: {
-			modelTokens: input.modelTokens,
-			modelRequests: input.modelRequests,
-		},
+		ceiling:
+			input.reserve === true
+				? {
+						modelTokens: input.modelTokens,
+						modelRequests: input.modelRequests,
+						reserve: true,
+					}
+				: {
+						modelTokens: input.modelTokens,
+						modelRequests: input.modelRequests,
+					},
 	};
 }
 
@@ -1197,6 +1212,7 @@ export function parseRouteTable(
 	const ceiling: JsonObject | null = objectOf(fieldOf(table, "ceiling"));
 	const modelTokens = countOf(fieldOf(ceiling, "modelTokens"));
 	const modelRequests = countOf(fieldOf(ceiling, "modelRequests"));
+	const reserve = fieldOf(ceiling, "reserve");
 
 	if (
 		fieldOf(table, "version") !== 1 ||
@@ -1209,7 +1225,8 @@ export function parseRouteTable(
 		!/^127\.0\.0\.1:[0-9]{1,5}$/.test(forwarderHost) ||
 		items === null ||
 		ceiling === null ||
-		!hasOnlyKeys(ceiling, ["modelTokens", "modelRequests"]) ||
+		!hasOnlyKeys(ceiling, ["modelTokens", "modelRequests", "reserve"]) ||
+		(reserve !== undefined && reserve !== true) ||
 		modelTokens === null ||
 		modelRequests === null
 	) {
@@ -1250,7 +1267,10 @@ export function parseRouteTable(
 			attempt,
 			forwarderHost,
 			routes,
-			ceiling: { modelTokens, modelRequests },
+			ceiling:
+				reserve === true
+					? { modelTokens, modelRequests, reserve }
+					: { modelTokens, modelRequests },
 		},
 	};
 }

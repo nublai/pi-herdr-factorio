@@ -119,6 +119,9 @@ stages:
   review:
     model: openai/gpt-6.1-sol
     fallback_model: openai/gpt-6.1-terra
+    seats:
+      second-judge:
+        model: anthropic/claude-sonnet-5-5
     max_turns: 20
     wall_ms: 900000
     stall_ms: 300000
@@ -163,4 +166,4 @@ The controller publishes the patch and held-out checks, dispatches main's gates 
 
 ## review
 
-Review the full diff read-only against the contract in fresh code-review, security-review and simplify sessions, plus ultrareview for deterministic high-risk changes. Judge every supplied judge-only scenario. Only concrete bugs, security defects, broken contract lines and failed judgments block. Simplify is advisory and never edits. The security seat alone retries a recorded refusal once on the configured fallback. Every seat runs OpenAI, like the builder, so every seat is context-isolated, same family, not cross-family, and certification records `r8` as incomplete. Blocking results share two repair rounds with failed CI; every repair is rebuilt, revalidated and reviewed on its new SHA.
+Review the full diff read-only against the contract in fresh code-review, security-review and simplify sessions, plus ultrareview for deterministic high-risk changes. Two independent judges from different model families judge every supplied judge-only scenario: code-review, and a second judge on Anthropic in its own fresh session with the same captured input and no sight of code-review's votes. A scenario passes only when both judges pass it. Any `fail` from either judge goes to repair. Any other pair holds the run for the owner as `review_unverifiable`, including a judge that refuses, runs out of its bound or gives no readable answer. If the judges still split one `fail` and one `pass` on a scenario after one repair round, the run holds for the owner with code `judges_disagree` and does not repair again. Only concrete bugs, security defects, broken contract lines and failed judgments block. Simplify is advisory and never edits. The security seat alone retries a recorded refusal once on the configured fallback. The findings seats run OpenAI, like the builder, so they are context-isolated, same family, not cross-family. The second judge reviews no code and never counts toward R8, so certification records `r8` as incomplete. Blocking results share two repair rounds with failed CI; every repair is rebuilt, revalidated and reviewed on its new SHA.

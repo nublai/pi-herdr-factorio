@@ -51,12 +51,23 @@ import {
 	candidateBranch,
 	storeOwnerPatch,
 } from "../../../src/github/publish.ts";
-import { certifyR8, type FamilyInput } from "../../../src/core/models.ts";
+import {
+	certifyR8,
+	FAMILY_MISSING,
+	type FamilyInput,
+} from "../../../src/core/models.ts";
 import {
 	familyClaimsHold,
 	ReviewEvidenceUnavailable,
 	reviewCandidate,
+	SECOND_JUDGE_BOUND,
+	SECOND_JUDGE_MAX_TOKENS,
+	SECOND_JUDGE_UNCONFIGURED,
+	scenarioJudgments,
+	seatPrompt,
 	type SeatReceipt,
+	unverifiableCode,
+	unverifiableOnly,
 } from "../../../src/candidate/review.ts";
 import {
 	FakeGitHub,
@@ -102,7 +113,7 @@ import {
 	VISIBLE_WARN_MS,
 	type VisibleRunOptions,
 } from "../../../host/sandbox/visible-tests.ts";
-import { withSkills } from "../../../host/sandbox/executor.ts";
+import { reviewSkills, withSkills } from "../../../host/sandbox/executor.ts";
 import { AuditLog, type JournalRecord } from "../../../host/gateway/audit.ts";
 import {
 	assertReaderParity,
@@ -8308,6 +8319,12 @@ describe("multi-seat candidate review", () => {
 		seats: {
 			readonly journals?: Readonly<Record<string, string>>;
 			readonly codeReviewModel?: ModelId;
+			readonly secondJudgeModel?: ModelId;
+			readonly judgeTokens?: number;
+			readonly refusedSeat?: string;
+			readonly unansweredSeat?: string;
+			readonly seatTokens?: Readonly<Record<string, number>>;
+			readonly outcomes?: Readonly<Record<string, string>>;
 		} = {},
 	) {
 		const fixture = await preparedReviewFixture(attempt, false, controller);
@@ -8322,6 +8339,7 @@ describe("multi-seat candidate review", () => {
 					fallback: model("openai/gpt-6.1-terra"),
 					maxTokens: 30_000,
 					codeReviewModel: seats.codeReviewModel ?? null,
+					secondJudgeModel: seats.secondJudgeModel ?? null,
 				},
 			),
 			workspace: dir,
@@ -8343,8 +8361,22 @@ describe("multi-seat candidate review", () => {
 				findings: [],
 				judgments:
 					seat === "code-review"
-						? [{ scenario: "S1", outcome: "pass", reason: "implemented" }]
-						: [],
+						? [
+								{
+									scenario: "S1",
+									outcome: seats.outcomes?.[seat] ?? "pass",
+									reason: "implemented",
+								},
+							]
+						: seat === "second-judge"
+							? [
+									{
+										scenario: "S1",
+										outcome: seats.outcomes?.[seat] ?? "pass",
+										reason: "judged alone",
+									},
+								]
+							: [],
 			});
 
 			const script =
@@ -8362,7 +8394,11 @@ describe("multi-seat candidate review", () => {
 											rawStopReason: "refusal",
 										}
 									: {
-											tokens: 10,
+											tokens:
+												seats.seatTokens?.[seat] ??
+												(seat === "second-judge"
+													? (seats.judgeTokens ?? 10)
+													: 10),
 											model:
 												seat === "security-review" && security === "fallback"
 													? "gpt-6.1-terra"
@@ -8381,7 +8417,8 @@ describe("multi-seat candidate review", () => {
 							success: true,
 							data: {
 								text:
-									seat === "security-review" && security === "malformed"
+									(seat === "security-review" && security === "malformed") ||
+									seat === seats.unansweredSeat
 										? "bad"
 										: answer,
 							},
@@ -8395,7 +8432,7 @@ describe("multi-seat candidate review", () => {
 			const h = harness(
 				fallback
 					? [script(true), script(security === "refused")]
-					: [script(false)],
+					: [script(seat === seats.refusedSeat)],
 				{ cleanupReserveMs: 1 },
 			);
 
@@ -8883,7 +8920,15 @@ describe("multi-seat candidate review", () => {
 							throw error;
 						}
 					},
-					launch: async (input) => {
+					launch: async (base) => {
+						const input = {
+							...base,
+							settings: {
+								...base.settings,
+								secondJudgeModel: model("openai/gpt-6.1-terra"),
+							},
+						};
+
 						launches.push(input);
 						const result = reviewModule.runReview(input, h.dir, h.create);
 						done.push(result);
@@ -8946,14 +8991,14 @@ describe("multi-seat candidate review", () => {
 					assert.equal(launches.length, 1);
 					assert.equal(launches[0]?.settings.maxTokens, REVIEW_MAX_TOKENS - 10);
 					assert.equal(launches[0]?.remainingRunTokens, TRUSTED_RUN_CAP - 30);
-					assert.equal(h.hosts.length, 3);
-					assert.equal(h.calls.length, 3);
-					assert.equal(claim.usage, 50);
+					assert.equal(h.hosts.length, 4);
+					assert.equal(h.calls.length, 4);
+					assert.equal(claim.usage, 60);
 					assert.ok(book.current.certification);
 					assert.ok(
 						book.work.kind === "effect" && book.work.request.kind === "open_pr",
 					);
-					assert.equal(await f.executor.spent(outputArgs), 30);
+					assert.equal(await f.executor.spent(outputArgs), 40);
 					const output = await f.executor.output(outputArgs);
 					assert.ok(output instanceof Object && output.kind === "review");
 					assert.deepEqual(readFileSync(capturePath), captured);
@@ -8964,7 +9009,7 @@ describe("multi-seat candidate review", () => {
 					const replay = await reviewModule.runReview(launch, h.dir, h.create);
 					assert.equal(replay.kind, "passed");
 					assert.equal(replay.usage, 0);
-					assert.equal(replay.receipt.usage.total, 30);
+					assert.equal(replay.receipt.usage.total, 40);
 				} else {
 					assert.equal(launches.length, 0);
 					assert.equal(h.hosts.length, 1);
@@ -9002,8 +9047,8 @@ describe("multi-seat candidate review", () => {
 				assert.deepEqual(finalBook.accounts, book.accounts);
 				assert.deepEqual(finalBook.work, book.work);
 				assert.equal(final.usage, claim.usage);
-				assert.equal(h.hosts.length, mode === "resume" ? 3 : 1);
-				assert.equal(h.calls.length, mode === "resume" ? 3 : 1);
+				assert.equal(h.hosts.length, mode === "resume" ? 4 : 1);
+				assert.equal(h.calls.length, mode === "resume" ? 4 : 1);
 				assert.ok(f.cleanupRequests.length > 0);
 
 				for (const request of f.cleanupRequests)
@@ -9060,7 +9105,11 @@ describe("multi-seat candidate review", () => {
 				),
 			});
 
-			const receipts = prepared.input.seats.map((seat) =>
+			const sessions = prepared.input.seats.filter(
+				(seat) => seat !== "second-judge",
+			);
+
+			const receipts = sessions.map((seat) =>
 				readFileSync(join(h.dir, seat, "receipt.json")),
 			);
 
@@ -9076,9 +9125,7 @@ describe("multi-seat candidate review", () => {
 			assert.equal(readFileSync(join(h.dir, "review.json"), "utf8"), manifest);
 			assert.deepEqual(readFileSync(join(h.dir, "output.txt")), output);
 			assert.deepEqual(
-				prepared.input.seats.map((seat) =>
-					readFileSync(join(h.dir, seat, "receipt.json")),
-				),
+				sessions.map((seat) => readFileSync(join(h.dir, seat, "receipt.json"))),
 				receipts,
 			);
 			t.diagnostic(
@@ -9342,7 +9389,7 @@ describe("multi-seat candidate review", () => {
 			const seats = JSON.parse(readFileSync(join(h.dir, "output.txt"), "utf8"));
 			assert.deepEqual(
 				seats.map((s: { seat: string }) => s.seat),
-				["code-review", "security-review", "simplify"],
+				["code-review", "security-review", "simplify", "second-judge"],
 			);
 			// Fake hosts keep no journal, so no seat has a family.
 			assert.ok(
@@ -9393,7 +9440,7 @@ describe("multi-seat candidate review", () => {
 
 			assert.deepEqual(
 				seats.map((s: { requested: string }) => s.requested),
-				[CLAUDE, "openai/gpt-6.1-sol", "openai/gpt-6.1-sol"],
+				[CLAUDE, "openai/gpt-6.1-sol", "openai/gpt-6.1-sol", "none"],
 			);
 			assert.deepEqual(
 				seats.map((s: { family: JsonValue }) => s.family),
@@ -9401,6 +9448,7 @@ describe("multi-seat candidate review", () => {
 					{ kind: "anthropic-gateway", model: "claude-sonnet-5-5" },
 					{ kind: "openai-request", model: "openai/gpt-6.1-sol" },
 					{ kind: "openai-request", model: "openai/gpt-6.1-sol" },
+					{ kind: "unavailable", reason: "missing" },
 				],
 			);
 			// The fixture has no build attempt receipt, so the builder is
@@ -9410,6 +9458,475 @@ describe("multi-seat candidate review", () => {
 					(s: { label: string }) =>
 						s.label === "context-isolated, unknown family, not cross-family",
 				),
+			);
+		} finally {
+			h.close();
+		}
+	});
+
+	const judgeJournals = (requests: number) => {
+		const openai = journalLines(requests, "model-openai", {
+			kind: "metered",
+		}).join("\n");
+
+		return {
+			"code-review": openai,
+			"security-review": openai,
+			simplify: openai,
+			"second-judge": journalLines(requests, "model-anthropic", {
+				kind: "metered",
+				observedModel: "claude-sonnet-5-5",
+			}).join("\n"),
+		};
+	};
+
+	it("runs the second judge in a fresh session on its own model, from the captured input alone (#735 round 2)", async () => {
+		const h = await setup("clean", 1, false, {
+			secondJudgeModel: model(CLAUDE),
+			journals: judgeJournals(1),
+		});
+
+		try {
+			const result = await reviewModule.runReview(h.run, h.dir, h.create);
+
+			assert.equal(result.kind, "passed");
+			assert.equal(result.usage, 40);
+			assert.deepEqual(
+				h.hosts.map((host) => host.launches),
+				[
+					["openai/gpt-6.1-sol"],
+					["openai/gpt-6.1-sol"],
+					["openai/gpt-6.1-sol"],
+					[CLAUDE],
+				],
+			);
+
+			const input = h.fixture.prepared.input;
+			const judge = h.calls.find((call) => call.startsWith("second-judge:"));
+
+			assert.equal(judge, `second-judge:${seatPrompt(input, "second-judge")}`);
+			assert.ok(judge?.startsWith(`second-judge:${input.prompt}\n\n`));
+			assert.match(
+				readFileSync(join(h.dir, "code-review", "output.txt"), "utf8"),
+				/implemented/,
+			);
+			assert.doesNotMatch(judge ?? "", /implemented/);
+
+			const seats: SeatReceipt[] = JSON.parse(
+				readFileSync(join(h.dir, "output.txt"), "utf8"),
+			);
+
+			const second = seats.find((seat) => seat.seat === "second-judge");
+
+			assert.equal(second?.requested, CLAUDE);
+			assert.equal(second?.unconfigured, undefined);
+			assert.deepEqual(second?.judgments, [
+				{ scenario: "S1", outcome: "pass", reason: "judged alone" },
+			]);
+			assert.deepEqual(unverifiableOnly({ seats }), []);
+
+			rmSync(join(h.dir, "receipt.json"));
+			rmSync(join(h.dir, "output.txt"));
+			const replay = await reviewModule.runReview(h.run, h.dir, h.create);
+
+			assert.equal(replay.kind, "passed");
+			assert.equal(replay.usage, 0);
+			assert.equal(h.hosts.length, 4);
+			assert.deepEqual(
+				JSON.parse(readFileSync(join(h.dir, "output.txt"), "utf8")),
+				seats,
+			);
+		} finally {
+			h.close();
+		}
+	});
+
+	it("records an unconfigured second judge without a model call, so the review holds for the owner", async () => {
+		const h = await setup();
+
+		try {
+			const result = await reviewModule.runReview(h.run, h.dir, h.create);
+
+			assert.equal(result.kind, "passed");
+			assert.equal(h.hosts.length, 3);
+			assert.equal(existsSync(join(h.dir, "second-judge")), false);
+
+			const seats: SeatReceipt[] = JSON.parse(
+				readFileSync(join(h.dir, "output.txt"), "utf8"),
+			);
+
+			assert.deepEqual(seats.at(-1), {
+				seat: "second-judge",
+				findings: [],
+				judgments: [
+					{
+						scenario: "S1",
+						outcome: "unverifiable",
+						reason: SECOND_JUDGE_UNCONFIGURED,
+					},
+				],
+				family: FAMILY_MISSING,
+				requested: "none",
+				observed: null,
+				label: "context-isolated, unknown family, not cross-family",
+				primary: "none",
+				refusal: null,
+				fallback: false,
+				tokens: 0,
+				unconfigured: true,
+			});
+			assert.deepEqual(
+				unverifiableOnly({ seats }).map((j) => j.route),
+				["missing"],
+			);
+		} finally {
+			h.close();
+		}
+	});
+
+	for (const [bound, settings] of [
+		["the round's remaining tokens", { maxTokens: 35 }],
+		["its own 30,000-token cap", { maxTokens: 1_000_000 }],
+	] as const)
+		it(`bounds the second judge by ${bound} and holds, never failing the review, when it runs out`, async () => {
+			const h = await setup("clean", 1, false, {
+				secondJudgeModel: model(CLAUDE),
+				judgeTokens: SECOND_JUDGE_MAX_TOKENS + 1,
+				journals: judgeJournals(1),
+			});
+
+			try {
+				const result = await reviewModule.runReview(
+					{ ...h.run, settings: { ...h.run.settings, ...settings } },
+					h.dir,
+					h.create,
+				);
+
+				assert.equal(result.kind, "passed");
+
+				const seats: SeatReceipt[] = JSON.parse(
+					readFileSync(join(h.dir, "output.txt"), "utf8"),
+				);
+
+				const second = seats.find((seat) => seat.seat === "second-judge");
+
+				assert.deepEqual(second?.judgments, [
+					{ scenario: "S1", outcome: "timeout", reason: SECOND_JUDGE_BOUND },
+				]);
+				assert.equal(second?.unconfigured, undefined);
+				assert.ok(
+					result.usage <= settings.maxTokens + SECOND_JUDGE_MAX_TOKENS + 1,
+				);
+				assert.deepEqual(
+					unverifiableOnly({ seats }).map((j) => j.route),
+					["disagree"],
+				);
+			} finally {
+				h.close();
+			}
+		});
+
+	it("launches the second judge through the executor's real skill decoration, leaving its complete prompt undecorated (#805 B1)", async () => {
+		const h = await setup("clean", 1, false, {
+			secondJudgeModel: model(CLAUDE),
+			journals: judgeJournals(1),
+		});
+
+		try {
+			const result = await reviewModule.runReview(
+				h.run,
+				h.dir,
+				h.create,
+				reviewSkills(process.cwd()),
+			);
+
+			assert.equal(result.kind, "passed");
+			assert.deepEqual(
+				h.hosts.map((host) => host.launches),
+				[
+					["openai/gpt-6.1-sol"],
+					["openai/gpt-6.1-sol"],
+					["openai/gpt-6.1-sol"],
+					[CLAUDE],
+				],
+			);
+
+			const input = h.fixture.prepared.input;
+			const judge = h.calls.find((call) => call.startsWith("second-judge:"));
+			const code = h.calls.find((call) => call.startsWith("code-review:"));
+
+			assert.ok(judge === `second-judge:${seatPrompt(input, "second-judge")}`);
+			assert.ok(code?.includes("### Skill: code-review"));
+		} finally {
+			h.close();
+		}
+	});
+
+	const noAnswers = [
+		["refused", "inconclusive", /refused to answer/],
+		["unanswered", "inconclusive", /gave no answer the controller could read/],
+		["budget", "timeout", /token, turn or time bound/],
+	] as const;
+
+	for (const side of ["code-review", "second-judge"] as const)
+		for (const [kind, outcome, reason] of noAnswers)
+			for (const other of ["pass", "fail"] as const) {
+				const cascades = side === "code-review" && kind === "budget";
+
+				it(`normalizes a ${kind} ${side} beside a ${other} into the judge table with recorded tokens${cascades ? "; the spent allowance then holds the review with every later seat budget-stopped" : ""} (#805 B3)`, async () => {
+					const h = await setup("clean", 1, false, {
+						secondJudgeModel: model(CLAUDE),
+						journals: judgeJournals(1),
+						refusedSeat: kind === "refused" ? side : undefined,
+						unansweredSeat: kind === "unanswered" ? side : undefined,
+						seatTokens: kind === "budget" ? { [side]: 61 } : {},
+						outcomes: {
+							[side === "code-review" ? "second-judge" : "code-review"]: other,
+						},
+					});
+
+					try {
+						const result = await reviewModule.runReview(
+							{ ...h.run, settings: { ...h.run.settings, maxTokens: 60 } },
+							h.dir,
+							h.create,
+						);
+
+						assert.equal(result.kind, "passed");
+
+						const seats: SeatReceipt[] = JSON.parse(
+							readFileSync(join(h.dir, "output.txt"), "utf8"),
+						);
+
+						if (cascades) {
+							assert.equal(h.hosts.length, 2);
+							assert.equal(seats[0]?.judgments[0]?.outcome, "timeout");
+							assert.equal(seats[0]?.tokens, 61);
+							assert.deepEqual(
+								seats.map((seat) => [seat.seat, seat.budgetStopped ?? false]),
+								[
+									["code-review", false],
+									["security-review", true],
+									["simplify", true],
+									["second-judge", true],
+								],
+							);
+							assert.equal(result.receipt.usage.total, 61);
+							assert.deepEqual(
+								unverifiableOnly({ seats }).map((j) => j.route),
+								["exhausted"],
+							);
+
+							return;
+						}
+
+						const normalized = seats.find((seat) => seat.seat === side);
+						const judged = normalized?.judgments ?? [];
+
+						assert.equal(judged.length, 1);
+						assert.equal(judged[0]?.outcome, outcome);
+						assert.match(judged[0]?.reason ?? "", reason);
+						assert.deepEqual(normalized?.findings, []);
+						assert.equal(normalized?.unconfigured, undefined);
+						assert.equal(normalized?.tokens, kind === "budget" ? 61 : 10);
+						assert.equal(
+							result.receipt.usage.total,
+							seats.reduce((sum, seat) => sum + (seat.tokens ?? 0), 0),
+						);
+						assert.deepEqual(
+							scenarioJudgments({ seats }).map((j) => j.route),
+							[other === "pass" ? "disagree" : "fail"],
+						);
+					} finally {
+						h.close();
+					}
+				});
+			}
+
+	for (const [cap, maxTokens, maxTurns, wallMs, seatTokens, spent] of [
+		["spends exactly the 60 tokens left", 60, 10, 60_000, 60, 60],
+		["has no turn left", 30_000, 0, 60_000, 10, 0],
+		["has no wall time left", 30_000, 10, 0, 10, 0],
+	] as const)
+		it(`holds for the owner, keeping its receipts and spend, when the first judge ${cap} and the findings seats after it cannot run (#805 B3)`, async () => {
+			const h = await setup("clean", 1, false, {
+				secondJudgeModel: model(CLAUDE),
+				journals: judgeJournals(1),
+				seatTokens: { "code-review": seatTokens },
+			});
+
+			try {
+				const result = await reviewModule.runReview(
+					{
+						...h.run,
+						settings: {
+							...h.run.settings,
+							maxTokens,
+							budget: { ...h.run.settings.budget, maxTurns, wallMs },
+						},
+					},
+					h.dir,
+					h.create,
+				);
+
+				assert.equal(result.kind, "passed");
+				assert.equal(result.usage, spent);
+				assert.equal(result.receipt.usage.total, spent);
+				assert.deepEqual(
+					h.hosts.map((host) => host.launches.length),
+					spent > 0 ? [1, 0] : [0, 0],
+				);
+
+				const seats: SeatReceipt[] = JSON.parse(
+					readFileSync(join(h.dir, "output.txt"), "utf8"),
+				);
+
+				assert.deepEqual(
+					seats.map((seat) => [
+						seat.seat,
+						seat.budgetStopped ?? false,
+						seat.findings.length,
+						seat.judgments.map((j) => j.outcome),
+						seat.tokens,
+					]),
+					[
+						["code-review", false, 0, ["timeout"], spent],
+						["security-review", true, 0, [], 0],
+						["simplify", true, 0, [], 0],
+						["second-judge", true, 0, ["timeout"], 0],
+					],
+				);
+				assert.match(seats[0]?.judgments[0]?.reason ?? "", /bound/);
+				assert.match(seats[3]?.judgments[0]?.reason ?? "", /did not run/);
+				assert.equal(seats[3]?.requested, CLAUDE);
+
+				const { executor, execution, args } = h.fixture;
+
+				const request = {
+					runId: execution.runId,
+					stage: "review" as const,
+					attempt: 1,
+					round: 0,
+					execution,
+					workflowSha: args.workflowSha,
+					workflowDigest: args.workflowDigest,
+				};
+
+				const output = await executor.output(request);
+
+				assert.ok(output instanceof Object && output.kind === "review");
+				assert.equal(output.receipt.blocking, true);
+				assert.equal(await executor.spent(request), spent);
+
+				const held = unverifiableOnly(output.receipt);
+
+				assert.deepEqual(
+					held.map((j) => [j.scenario, j.route]),
+					[["S1", "exhausted"]],
+				);
+				assert.equal(
+					unverifiableCode({
+						trusted: true,
+						judges: [null],
+						routes: held.map((j) => j.route),
+					}),
+					"judge_budget_exhausted",
+				);
+			} finally {
+				h.close();
+			}
+		});
+
+	it("keeps a findings seat's budget exhaustion a budget_exhausted review attempt when no judge ran out (#805 B3)", async () => {
+		const h = await setup("clean", 1, false, {
+			secondJudgeModel: model(CLAUDE),
+			journals: judgeJournals(1),
+			seatTokens: { "security-review": 61 },
+		});
+
+		try {
+			const result = await reviewModule.runReview(
+				{ ...h.run, settings: { ...h.run.settings, maxTokens: 70 } },
+				h.dir,
+				h.create,
+			);
+
+			assert.equal(result.kind, "budget_exhausted");
+			assert.equal(h.hosts.length, 2);
+			assert.equal(existsSync(join(h.dir, "output.txt")), false);
+		} finally {
+			h.close();
+		}
+	});
+
+	it("normalizes a refused code-review beside an unconfigured second judge into the missing column (#805 B3)", async () => {
+		const h = await setup("clean", 1, false, { refusedSeat: "code-review" });
+
+		try {
+			const result = await reviewModule.runReview(h.run, h.dir, h.create);
+
+			assert.equal(result.kind, "passed");
+
+			const seats: SeatReceipt[] = JSON.parse(
+				readFileSync(join(h.dir, "output.txt"), "utf8"),
+			);
+
+			assert.deepEqual(
+				unverifiableOnly({ seats }).map((j) => j.route),
+				["missing"],
+			);
+		} finally {
+			h.close();
+		}
+	});
+
+	it("keeps a findings seat's refusal or unreadable answer a failed review attempt (#805 B3)", async () => {
+		for (const seats of [
+			{ refusedSeat: "simplify" },
+			{ unansweredSeat: "simplify" },
+		]) {
+			const h = await setup("clean", 1, false, {
+				secondJudgeModel: model(CLAUDE),
+				journals: judgeJournals(1),
+				...seats,
+			});
+
+			try {
+				const result = await reviewModule.runReview(h.run, h.dir, h.create);
+
+				assert.equal(
+					result.kind,
+					"refusedSeat" in seats ? "refused" : "failed",
+				);
+				assert.equal(h.hosts.length, 3);
+			} finally {
+				h.close();
+			}
+		}
+	});
+
+	it("asks the gateway to reserve the second judge's requests against its remaining allowance, and only the second judge's (#805 B4)", async () => {
+		const h = await setup("clean", 1, false, {
+			secondJudgeModel: model(CLAUDE),
+			journals: judgeJournals(1),
+		});
+
+		try {
+			const result = await reviewModule.runReview(
+				{ ...h.run, settings: { ...h.run.settings, maxTokens: 1_000 } },
+				h.dir,
+				h.create,
+			);
+
+			assert.equal(result.kind, "passed");
+			assert.deepEqual(
+				h.hosts.map((host) =>
+					host.tables.map((table) => [
+						table.ceiling.modelTokens,
+						table.ceiling.reserve ?? false,
+					]),
+				),
+				[[[1_000, false]], [[990, false]], [[980, false]], [[970, true]]],
 			);
 		} finally {
 			h.close();
@@ -9600,7 +10117,7 @@ describe("multi-seat candidate review", () => {
 
 			assert.deepEqual(
 				simplifyOnly.seats.map((seat) => seat.family),
-				[openai, openai, claude],
+				[openai, openai, claude, FAMILY_MISSING],
 			);
 			assert.equal(simplifyOnly.r8, "incomplete");
 			assert.equal(
@@ -9661,11 +10178,13 @@ describe("multi-seat candidate review", () => {
 					h.create,
 				);
 
-				assert.equal(result.kind, "budget_exhausted");
+				// The fixture has a judge-only scenario, so code-review is the first
+				// judge: its exhaustion holds the review for the owner (#805 B3).
+				assert.equal(result.kind, "passed");
 				assert.equal(result.usage, maxTokens === 0 ? 0 : 10);
 				assert.equal(result.receipt.usage.total, result.usage);
 				assert.equal(h.calls.length, maxTokens === 0 ? 0 : 1);
-				assert.equal(existsSync(join(h.dir, "output.txt")), false);
+				assertBudgetHold(h.dir);
 			} finally {
 				h.close();
 			}
@@ -9681,13 +10200,40 @@ describe("multi-seat candidate review", () => {
 				h.create,
 			);
 
-			assert.equal(result.kind, "budget_exhausted");
+			assert.equal(result.kind, "passed");
 			assert.equal(result.receipt.usage.total, 10);
 			assert.equal(h.calls.length, 1);
+			assertBudgetHold(h.dir);
 		} finally {
 			h.close();
 		}
 	});
+
+	/** The published review holds every scenario and accepts no seat after code-review. */
+	function assertBudgetHold(dir: string): void {
+		const seats: SeatReceipt[] = JSON.parse(
+			readFileSync(join(dir, "output.txt"), "utf8"),
+		);
+
+		assert.deepEqual(
+			unverifiableOnly({ seats }).map((j) => j.route),
+			["exhausted"],
+		);
+		assert.equal(seats[0]?.judgments[0]?.outcome, "timeout");
+		assert.deepEqual(
+			seats.slice(1).map((seat) => [seat.seat, seat.findings.length]),
+			[
+				["security-review", 0],
+				["simplify", 0],
+				["second-judge", 0],
+			],
+		);
+		assert.ok(
+			seats
+				.slice(1, 3)
+				.every((seat) => seat.budgetStopped === true && seat.tokens === 0),
+		);
+	}
 });
 
 describe("controller-run specify review", () => {

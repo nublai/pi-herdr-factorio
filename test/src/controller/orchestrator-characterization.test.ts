@@ -27,7 +27,7 @@ describe("L10 scheduling characterization", () => {
 
 		assert.equal(
 			digestOf(text),
-			"666b3e1cde3cc0824365cfea3d31df2d97ac06eea2b185f7aae69d0209e27c07",
+			"8df13ea8c66f58b29dd9f4a01c106e08776c6f0ee08154cfe0d83367672412a5",
 		);
 	});
 });
@@ -129,7 +129,7 @@ describe("L10 fresh-process recovery characterization", () => {
 
 		assert.equal(
 			digestOf(text),
-			"e3581eddd030f739c29b42d49608433314c89035cc3a15d0d913ba593c0cd81e",
+			"71cec53d20c8bccadc2104771310a982f0b9a7b1f5e359725f99b31bb92efa91",
 		);
 	});
 });

@@ -14,9 +14,11 @@ import { networkInterfaces } from "node:os";
 import type { Duplex } from "node:stream";
 import { TLSSocket } from "node:tls";
 import {
+	arrayOf,
 	countOf,
 	fieldOf,
 	type JsonObject,
+	type JsonValue,
 	objectOf,
 	parseJson,
 	textOf,
@@ -101,6 +103,8 @@ type Exchange = {
 	rejected: number | null;
 	/** The gateway gave up before any upstream response headers arrived. */
 	unreachable: boolean;
+	/** Tokens this request holds against a reserving ceiling until it is metered. */
+	reserved: number;
 };
 
 /**
@@ -113,6 +117,92 @@ function meterFor(route: Route, method: string): Meter | null {
 		return method === "POST" ? route.meter : null;
 
 	return route.meter;
+}
+
+/**
+ * Input tokens a provider adds to every request beyond its body, reserved
+ * on top of the body bytes. Anthropic's tool-use system prompt is at most
+ * 804 tokens in its published table (Claude Opus 4.7, tool choice `any` or
+ * `tool`, read 2026-11-15); this rounds that up.
+ */
+export const HIDDEN_PROMPT_TOKENS = 1_024;
+
+/**
+ * What a reserving ceiling makes of a request's content. `text` holds only
+ * text, tool calls and text tool results, which the provider counts at
+ * most one token per byte. `replay` also passes back earlier reasoning
+ * (Anthropic `thinking` or `redacted_thinking`, OpenAI `reasoning`), which
+ * may count as the full reasoning the provider generated, not its bytes.
+ * `refused` holds anything else, such as an image or document, whose
+ * tokens its bytes do not bound.
+ */
+type Content = "text" | "replay" | "refused";
+
+const TEXT_BLOCKS: readonly string[] = [
+	"text",
+	"input_text",
+	"output_text",
+	"refusal",
+	"tool_use",
+	"function_call",
+];
+
+const REPLAY_BLOCKS: readonly string[] = [
+	"thinking",
+	"redacted_thinking",
+	"reasoning",
+];
+
+function combined(contents: readonly Content[]): Content {
+	return contents.includes("refused")
+		? "refused"
+		: contents.includes("replay")
+			? "replay"
+			: "text";
+}
+
+/** A string, or a list of messages, blocks or items, from either provider. */
+function contentOf(value: JsonValue | undefined): Content {
+	if (value === undefined || textOf(value) !== null) return "text";
+
+	const items = arrayOf(value);
+
+	return items === null ? "refused" : combined(items.map(blockOf));
+}
+
+function blockOf(value: JsonValue): Content {
+	const block = objectOf(value);
+	const field = fieldOf(block, "type");
+	const type = textOf(field);
+
+	if (block === null) return "refused";
+
+	if (field === undefined || type === "message")
+		return "role" in block ? contentOf(block.content) : "refused";
+
+	if (type === null) return "refused";
+
+	if (TEXT_BLOCKS.includes(type)) return "text";
+
+	if (REPLAY_BLOCKS.includes(type)) return "replay";
+
+	const result =
+		type === "tool_result"
+			? contentOf(block.content)
+			: type === "function_call_output"
+				? contentOf(block.output)
+				: "refused";
+
+	return result === "text" ? "text" : "refused";
+}
+
+/** The content class of a parsed model request body. */
+function requestContent(json: JsonObject): Content {
+	return combined([
+		contentOf(json.system),
+		contentOf(json.messages),
+		contentOf(json.input),
+	]);
 }
 
 type Bounded =
@@ -413,6 +503,10 @@ export class Gateway implements AdmissionState {
 	#requests = 0;
 	#modelTokens = 0;
 	#modelRequests = 0;
+	/** Output tokens metered so far, which bound any reasoning a request replays. */
+	#outputTokens = 0;
+	/** Tokens outstanding requests hold against a reserving ceiling. */
+	#reserved = 0;
 
 	constructor(options: GatewayOptions) {
 		if (!options.credentials.ok)
@@ -620,6 +714,7 @@ export class Gateway implements AdmissionState {
 			dispatched: null,
 			rejected: null,
 			unreachable: false,
+			reserved: 0,
 		};
 	}
 
@@ -921,7 +1016,7 @@ export class Gateway implements AdmissionState {
 
 		// One byte per input token is conservative; bound output explicitly even
 		// when the client omits a provider limit, so a lost result is chargeable.
-		const bounded = boundBody(
+		let bounded = boundBody(
 			exchange.meter,
 			body,
 			this.#table.ceiling.modelTokens,
@@ -952,6 +1047,58 @@ export class Gateway implements AdmissionState {
 
 		if (!this.#audit.healthy())
 			return this.#deny(exchange, res, "audit-unavailable");
+
+		// A reserving ceiling admits a model request only if its input estimate
+		// plus its output bound fits what earlier requests charged and
+		// outstanding ones reserved left, and lowers the output bound to fit.
+		// The estimate is one token per body byte plus the provider's hidden
+		// prompt, plus every output token so far when the request replays
+		// earlier reasoning. Content whose tokens its bytes do not bound, such
+		// as an image, is refused and closes the gate as a ceiling stop.
+		// Synchronous from here to dispatch, so concurrent requests cannot both
+		// take the same room.
+		if (this.#table.ceiling.reserve === true && exchange.meter !== null) {
+			const json = objectOf(parseJson(body.toString("utf8")));
+
+			if (json === null) return this.#deny(exchange, res, "body-not-allowed");
+
+			const content = requestContent(json);
+
+			if (content === "refused") {
+				this.closeGate("ceiling");
+
+				return this.#deny(exchange, res, "body-not-allowed");
+			}
+
+			const estimate =
+				body.length +
+				HIDDEN_PROMPT_TOKENS +
+				(content === "replay" ? this.#outputTokens + this.#reserved : 0);
+
+			const room =
+				this.#table.ceiling.modelTokens -
+				this.#modelTokens -
+				this.#reserved -
+				estimate;
+
+			if (room < 1) {
+				this.closeGate("ceiling");
+
+				return this.#deny(exchange, res, "budget-closed");
+			}
+
+			bounded = boundBody(
+				exchange.meter,
+				body,
+				Math.min(this.#table.ceiling.modelTokens, room),
+			);
+
+			if (bounded.kind === "deny")
+				return this.#deny(exchange, res, bounded.code);
+
+			exchange.reserved = estimate + bounded.max;
+			this.#reserved += exchange.reserved;
+		}
 
 		this.#forward(
 			exchange,
@@ -1272,6 +1419,8 @@ export class Gateway implements AdmissionState {
 		exchange.inputTokens = usage.inputTokens;
 		exchange.outputTokens = usage.outputTokens;
 		exchange.observedModel = usage.observedModel;
+		this.#reserved -= exchange.reserved;
+		exchange.reserved = 0;
 
 		if (state !== undefined) {
 			state.inputTokens += usage.inputTokens;
@@ -1279,6 +1428,7 @@ export class Gateway implements AdmissionState {
 		}
 
 		this.#modelTokens += usage.inputTokens + usage.outputTokens;
+		this.#outputTokens += usage.outputTokens;
 
 		if (this.#modelTokens >= this.#table.ceiling.modelTokens) {
 			this.closeGate("ceiling");

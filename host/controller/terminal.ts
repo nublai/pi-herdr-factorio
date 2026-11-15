@@ -251,6 +251,7 @@ export async function readTerminalEvidence(
 			"security-review",
 			"simplify",
 			"ultrareview",
+			"second-judge",
 		];
 
 		const sessions = (

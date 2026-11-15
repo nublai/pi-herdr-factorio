@@ -1,6 +1,6 @@
 import type { CommentEdit, IssueComment } from "../github/adapter.ts";
 import type { GenerationRef, HandoffReason } from "../candidate/state.ts";
-import type { OwnerJudgment } from "../candidate/review.ts";
+import { type OwnerJudgment, ROUTE_TEXT } from "../candidate/review.ts";
 import { inert } from "../contract/render.ts";
 import { type ControllerIdentity, EXE_DEV_PLATFORM } from "./platform.ts";
 import { type Digest, digestOf, isDigest, runIdOf } from "../core/run.ts";
@@ -348,13 +348,21 @@ function detailReason(reason: string): string {
 		: inert(reason);
 }
 
+function detailLine(j: OwnerJudgment): string {
+	if (j.route === undefined || j.votes === undefined)
+		return `- ${j.scenario}: ${detailReason(j.reason)}\n`;
+
+	return `- ${j.scenario}: ${ROUTE_TEXT[j.route]}.\n${j.votes.map((v) => `  - ${v.seat}, ${v.outcome}: ${detailReason(v.reason)}\n`).join("")}`;
+}
+
 /**
- * The review detail comment for a `review_unverifiable` hold: every
- * unverifiable judgment with the reviewer's reason made inert, each cut only
- * beyond `DETAIL_REASON_MAX` code points, and the whole body within
- * `DETAIL_MAX_BYTES`. The last line is a key over the run, the held
- * generation and the listed judgments, so the same detail is posted once.
- * Null when there is no judgment to list.
+ * The review detail comment for a `review_unverifiable` hold: every held
+ * judgment with the reviewer's reason made inert, each cut only beyond
+ * `DETAIL_REASON_MAX` code points, and the whole body within
+ * `DETAIL_MAX_BYTES`. A judgment from a review with a second judge lists
+ * why it is held and each judge's outcome and reason. The last line is a
+ * key over the run, the held generation and the listed judgments, so the
+ * same detail is posted once. Null when there is no judgment to list.
  */
 export function formatUnverifiableDetail(input: {
 	readonly runId: Digest;
@@ -373,11 +381,16 @@ export function formatUnverifiableDetail(input: {
 			? ""
 			: `- ${n} more judgments are omitted to fit GitHub's comment size limit.\n`;
 
-	let text = `Factory run \`${runId.slice(0, 12)}\`, round ${generation.round}, generation ${generation.generation}: review could not verify these ${judgments.length} judgments from trusted evidence, so no repair runs and the owner must decide. Each reason is the reviewer's own text.\n\n`;
+	const paired = judgments.some((j) => j.votes !== undefined);
+
+	let text = paired
+		? `Factory run \`${runId.slice(0, 12)}\`, round ${generation.round}, generation ${generation.generation}: two independent judges did not both pass these ${judgments.length} judge-only judgments, so no repair runs and the owner must decide. Each reason is that judge's own text, or the controller's when a judge gave no answer.\n\n`
+		: `Factory run \`${runId.slice(0, 12)}\`, round ${generation.round}, generation ${generation.generation}: review could not verify these ${judgments.length} judgments from trusted evidence, so no repair runs and the owner must decide. Each reason is the reviewer's own text.\n\n`;
+
 	let shown = 0;
 
 	for (const j of judgments) {
-		const line = `- ${j.scenario}: ${detailReason(j.reason)}\n`;
+		const line = detailLine(j);
 
 		if (
 			Buffer.byteLength(

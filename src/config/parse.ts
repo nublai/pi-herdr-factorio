@@ -178,6 +178,7 @@ const POSITION_FIELDS: Readonly<Record<ModelPosition, string>> = {
 	validate: "stages.validate.model",
 	review: "stages.review.model",
 	"code-review": "stages.review.seats.code-review.model",
+	"second-judge": "stages.review.seats.second-judge.model",
 	cadence: "cadence.jobs.<job>.model",
 };
 
@@ -197,6 +198,11 @@ function anthropicRule(platform: ModelPlatform): string {
 			return _exhaustive;
 		}
 	}
+}
+
+/** The provider family of a `<provider>/<model>` id. */
+function providerOf(model: ModelId): string {
+	return model.slice(0, model.indexOf("/"));
 }
 
 /** A `<provider>/<model>` id. Callers decide which providers a field allows. */
@@ -308,7 +314,7 @@ const BUDGET_KEYS = ["max_turns", "wall_ms", "stall_ms"];
 
 const MODEL_KEYS = ["model", "fallback_model"];
 
-const SEAT_KEYS = ["code-review"];
+const SEAT_KEYS = ["code-review", "second-judge"];
 
 function stageEntries(
 	stages: Map<string, YamlNode>,
@@ -403,8 +409,10 @@ function readAcceptStage(
 }
 
 /**
- * Review, plus its one per-seat key, `seats.code-review.model`. Any other
- * seat or seat field fails the load. Absent, code-review inherits `model`.
+ * Review, plus its per-seat keys `seats.code-review.model` and
+ * `seats.second-judge.model`. Any other seat or seat field fails the load.
+ * Absent, code-review inherits `model` and no second judge is configured.
+ * A second judge from the code-review model's own provider family fails.
  */
 function readReviewStage(
 	stages: Map<string, YamlNode>,
@@ -439,10 +447,35 @@ function readReviewStage(
 			)
 		: null;
 
-	return Object.freeze({
-		...readStageModels(entries, "review", platform),
-		codeReviewModel,
-	});
+	const secondJudge = optionalEntries(
+		seats,
+		"second-judge",
+		"stages.review.seats.second-judge",
+		["model"],
+	);
+
+	const secondJudgeModel = secondJudge.has("model")
+		? readPrimaryModel(
+				secondJudge.get("model") ?? null,
+				"stages.review.seats.second-judge.model",
+				"second-judge",
+				platform,
+			)
+		: null;
+
+	const models = readStageModels(entries, "review", platform);
+	const firstJudge = codeReviewModel ?? models.model;
+
+	if (
+		secondJudgeModel !== null &&
+		providerOf(secondJudgeModel) === providerOf(firstJudge)
+	)
+		fail(
+			"stages.review.seats.second-judge.model",
+			`must be a different model family from the code-review seat's model ${firstJudge}`,
+		);
+
+	return Object.freeze({ ...models, codeReviewModel, secondJudgeModel });
 }
 
 function readStageModels(
