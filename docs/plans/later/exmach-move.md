@@ -582,7 +582,7 @@ These questions stay unproven.
 - **Spend.** `MV5` and `MV7` run full tickets at about 540,000 reserved tokens each. Check the program cap with the owner before they launch.
 - **Out of scope.** #717 rewrites F13's credential section in `docs/plans/active/factory-v1.md` in its own docs PR before F13 starts. #718 becomes its own plan after `MV5` and giuseppecrj/exmach#83.
 - **Shep's open questions (MV6).** Shep asked five feed questions on #719. Shep's Factory tab waits on `MV6`'s answers in `owner-feed.md`.
-- **Phone path in other projects (MV8).** `MV8` depends on the `apns` attach in E2, exmach#88, shep#107, a bridge on the VM and shep#140. exmach schedules #88 after Shep's runtimes seam, so `MV8` lands well after the cutover. The the nubl root session session tracks them.
+- **Phone path in other projects (MV8).** `MV8` depends on the `apns` attach in E2, exmach#88, shep#107, a bridge on the VM and shep#140. exmach schedules #88 after Shep's runtimes seam, so `MV8` lands well after the cutover. The nubl root session tracks them.
 - **Provisional GitHub host (MV1, MV2).** `factorio.int.exmach.net` is confirmed only until E1 and E2 land. A change needs only a `ghHost` override in `/etc/factory/platform.json` and the `factorio` line in `targets.env`.
 
 ## Appendix D. Links and reading list
