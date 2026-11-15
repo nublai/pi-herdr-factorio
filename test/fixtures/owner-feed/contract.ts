@@ -102,6 +102,10 @@ const STEP = {
 	tokens: "number|null",
 } satisfies FieldTypes;
 
+const UNVERIFIABLE = {
+	scenario: "string",
+} satisfies FieldTypes;
+
 const UNREADABLE = {
 	issue: "number",
 	issueUrl: "string",
@@ -170,6 +174,13 @@ export function v1Problems(feed: JsonValue): string[] {
 					: fieldProblems(failure, FAILURE, `entries[${index}].failure`)),
 				...itemsOf(objectOf(entry)?.steps).flatMap((step, at) =>
 					fieldProblems(step, STEP, `entries[${index}].steps[${at}]`),
+				),
+				...itemsOf(objectOf(entry)?.unverifiable).flatMap((item, at) =>
+					fieldProblems(
+						item,
+						UNVERIFIABLE,
+						`entries[${index}].unverifiable[${at}]`,
+					),
 				),
 			];
 		}),

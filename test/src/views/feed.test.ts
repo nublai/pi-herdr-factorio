@@ -977,7 +977,7 @@ test("published token-cap holds stay blocked and orange; off-feed budget stops r
 	});
 });
 
-test("a review_unverifiable hold needs the owner and lists the unverifiable judgments as plain text (#735)", async () => {
+test("a review_unverifiable hold needs the owner and lists only the unverifiable scenario IDs, never the model's reasons (#735)", async () => {
 	await state(async (root) => {
 		const feed = await readOwnerFeed({ stateDir: root, repo, now });
 		const waiting = feed.entries.find((entry) => entry.issue === 1);
@@ -1033,12 +1033,24 @@ test("a review_unverifiable hold needs the owner and lists the unverifiable judg
 		assert.equal(held?.reason, reason);
 		assert.equal(held?.kind, "blocked");
 		assert.equal(held?.group, "needs_you");
-		assert.deepEqual(held?.unverifiable, [
-			{ scenario: "S3", reason: "No trusted  npm run check result." },
-		]);
+		assert.deepEqual(held?.unverifiable, [{ scenario: "S3" }]);
+		assert.doesNotMatch(JSON.stringify(updated), /npm run check/);
 		const wire = parseJson(JSON.stringify(updated));
 		assert.ok(wire !== undefined);
 		assert.deepEqual(v1Problems(wire), []);
+
+		const unnamed = parseJson(
+			JSON.stringify({
+				...updated,
+				entries: updated.entries.map((entry) => ({
+					...entry,
+					unverifiable: [{}],
+				})),
+			}),
+		);
+
+		assert.ok(unnamed !== undefined);
+		assert.notDeepEqual(v1Problems(unnamed), []);
 	});
 });
 

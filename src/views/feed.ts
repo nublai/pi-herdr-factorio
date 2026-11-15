@@ -51,7 +51,7 @@ export type FeedEntry = AttentionRun & {
 	ci: "Passed" | "Failed" | "Pending";
 	failure: { stage: string; class: string; reason: string } | null;
 	notProven: readonly string[];
-	unverifiable: readonly OwnerJudgment[];
+	unverifiable: readonly Pick<OwnerJudgment, "scenario">[];
 	steps: readonly FeedStep[];
 };
 
@@ -502,7 +502,9 @@ async function detail(
 			book?.kind === "selected" &&
 			entry.reason === "review_unverifiable" &&
 			book.current.review !== undefined
-				? ownerJudgments(book.current.review)
+				? ownerJudgments(book.current.review).map(({ scenario }) => ({
+						scenario,
+					}))
 				: [],
 		steps: await stepReceipts(root, entry, host),
 	};
