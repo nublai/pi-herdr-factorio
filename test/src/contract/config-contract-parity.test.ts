@@ -138,7 +138,7 @@ test("L08 pins complete workflow values and refusal diagnostics", () => {
 
 	pin(
 		corpus.map(parse),
-		"b2b0852adaeda5d575b4c3820a8cd7337c3c12a08e4dd250ac6ad4192c785984",
+		"ca54fcdf5ce8bcde453264779f495be9f4662c8991a9c075672f986b7e9e5655",
 	);
 });
 
@@ -194,7 +194,7 @@ test("L08 pins main-only caching, snapshot identity, pinned reads and last-valid
 			}),
 			calls,
 		},
-		"14acd52d25cadb67b28bafbf7dbded4a8a14cd0dbda5847ed21f708203561e25",
+		"c247c99941670adcd85566090a1c8826899731a8376ec26c8697e738c951f330",
 	);
 });
 

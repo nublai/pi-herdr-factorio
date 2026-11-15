@@ -845,7 +845,7 @@ describe("parseWorkflow", () => {
 	it("lets code-review inherit review.model when the seat key is absent", () => {
 		const real = readFileSync(WORKFLOW_PATH, "utf8");
 
-		assert.doesNotMatch(real, /\n    seats:/);
+		assert.doesNotMatch(real, /\n      code-review:/);
 
 		const parsed = parse(real);
 
@@ -862,6 +862,106 @@ describe("parseWorkflow", () => {
 
 		if (empty.kind === "valid")
 			assert.equal(empty.config.stages.review.codeReviewModel, null);
+	});
+
+	it("configures the second judge only at seats.second-judge.model, from a different family than the code-review model", () => {
+		const seat = (model: string) =>
+			frontMatter(
+				`stages:\n  review:\n    model: openai/gpt-6.1-sol\n    seats:\n      second-judge:\n        model: ${model}`,
+			);
+
+		const claude = parse(seat("anthropic/claude-sonnet-5-5"));
+
+		assert.equal(claude.kind, "valid");
+
+		if (claude.kind === "valid") {
+			assert.equal(
+				claude.config.stages.review.secondJudgeModel,
+				"anthropic/claude-sonnet-5-5",
+			);
+			assert.equal(claude.config.stages.review.codeReviewModel, null);
+		}
+
+		const sameFamily = validation(seat("openai/gpt-6.1-terra"));
+
+		assert.equal(sameFamily.field, "stages.review.seats.second-judge.model");
+		assert.match(sameFamily.message, /different model family/);
+		assert.match(sameFamily.message, /openai\/gpt-6\.1-sol/);
+
+		const bothClaude = validation(
+			frontMatter(
+				"stages:\n  review:\n    seats:\n      code-review:\n        model: anthropic/claude-sonnet-5-5\n      second-judge:\n        model: anthropic/claude-opus-5",
+			),
+		);
+
+		assert.equal(bothClaude.field, "stages.review.seats.second-judge.model");
+		assert.match(bothClaude.message, /different model family/);
+
+		const inverted = parse(
+			frontMatter(
+				"stages:\n  review:\n    seats:\n      code-review:\n        model: anthropic/claude-sonnet-5-5\n      second-judge:\n        model: openai/gpt-6.1-sol",
+			),
+		);
+
+		assert.equal(inverted.kind, "valid");
+
+		for (const [yaml, field, message] of [
+			[
+				seat("anthropic/not-a-model"),
+				"stages.review.seats.second-judge.model",
+				/limits table/,
+			],
+			[
+				seat("xai/grok-4.6"),
+				"stages.review.seats.second-judge.model",
+				/openai or a listed anthropic/,
+			],
+			[
+				frontMatter(
+					"stages:\n  review:\n    seats:\n      second-judge:\n        fallback_model: openai/gpt-6.1-sol",
+				),
+				"stages.review.seats.second-judge.(unknown key)",
+				/unknown key/,
+			],
+			[
+				frontMatter(
+					"stages:\n  review:\n    model: anthropic/claude-sonnet-5-5\n    seats:\n      second-judge:\n        model: openai/gpt-6.1-sol",
+				),
+				"stages.review.model",
+				/stages\.review\.seats\.second-judge\.model/,
+			],
+		] as const) {
+			const error = validation(yaml);
+
+			assert.equal(error.field, field, yaml);
+			assert.match(error.message, message, yaml);
+		}
+	});
+
+	it("leaves the second judge unconfigured when its key is absent, so judge-only scenarios fail closed", () => {
+		for (const yaml of ["", "stages:\n  review:\n    seats: {}"]) {
+			const parsed = parse(frontMatter(yaml));
+
+			assert.equal(parsed.kind, "valid");
+
+			if (parsed.kind === "valid")
+				assert.equal(parsed.config.stages.review.secondJudgeModel, null);
+		}
+	});
+
+	it("runs the real workflow's second judge on Anthropic beside OpenAI code review", () => {
+		const parsed = parse(readFileSync(WORKFLOW_PATH, "utf8"));
+
+		assert.equal(parsed.kind, "valid");
+
+		if (parsed.kind !== "valid") return;
+
+		assert.equal(parsed.config.stages.review.codeReviewModel, null);
+		assert.equal(parsed.config.stages.review.model, "openai/gpt-6.1-sol");
+		assert.match(
+			parsed.config.stages.review.secondJudgeModel ?? "",
+			/^anthropic\//,
+		);
 	});
 
 	it("rejects a primary model whose provider the sandbox cannot route", () => {

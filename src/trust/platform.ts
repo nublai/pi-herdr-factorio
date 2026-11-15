@@ -43,6 +43,7 @@ export const MODEL_POSITIONS = [
 	"validate",
 	"review",
 	"code-review",
+	"second-judge",
 	"cadence",
 ] as const;
 
@@ -182,6 +183,7 @@ const DEFAULT_HISTORICAL_REPOSITORIES: HistoricalRepositories = Object.freeze({
 const ANTHROPIC_STAGES: readonly ModelPosition[] = Object.freeze([
 	"accept",
 	"code-review",
+	"second-judge",
 ]);
 
 /** A whole DNS hostname: at most 253 characters, each label at most 63. */

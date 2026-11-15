@@ -72,10 +72,14 @@ export type ModelStageSettings = {
  * Review's settings. `model` serves the security, simplify and ultrareview
  * seats; `fallbackModel` is the security seat's refusal retry only.
  * `codeReviewModel` is `stages.review.seats.code-review.model`, and `null`
- * means code-review inherits `model`.
+ * means code-review inherits `model`. `secondJudgeModel` is
+ * `stages.review.seats.second-judge.model`, a different family from the
+ * code-review model; `null` means no second judge is configured and every
+ * judge-only scenario that does not fail holds for the owner.
  */
 export type ReviewStageSettings = ModelStageSettings & {
 	readonly codeReviewModel: ModelId | null;
+	readonly secondJudgeModel: ModelId | null;
 };
 
 export const ACCEPT_EFFORTS = ["low", "medium", "high"] as const;
