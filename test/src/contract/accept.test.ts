@@ -209,6 +209,199 @@ const MUST_REJECT_JUDGES = [
 	"Mutate the deferral check and confirm a test fails.",
 ];
 
+describe("held-out test-path dependencies", () => {
+	const existing = new Set([
+		"test/host/sandbox/launcher.test.ts",
+		"src/version.ts",
+		"host/wrapper.ts",
+		"docs/reference.md",
+	]);
+
+	const original = readFileSync(
+		"test/fixtures/acceptance/430-wrapper-regression.txt",
+		"utf8",
+	);
+
+	const output = (content: string, preservation = false) =>
+		JSON.stringify({
+			...suite,
+			files: suite.files.map((file) =>
+				file.path === (preservation ? "invalid.test.ts" : "version.test.ts")
+					? { ...file, content }
+					: file,
+			),
+		});
+
+	it("refuses the real #430 check with its existing non-replaceable test path", {
+		timeout: 30000,
+	}, () => {
+		const parsed = writeAcceptance(output(original), contract, existing);
+		assert.equal(parsed.kind, "malformed");
+		assert.ok(
+			"reason" in parsed && parsed.reason === "heldout_reads_preserved_test",
+		);
+		assert.ok("scenario" in parsed && parsed.scenario === "S1");
+		assert.ok(
+			"path" in parsed && parsed.path === "test/host/sandbox/launcher.test.ts",
+		);
+	});
+
+	for (const expression of [
+		"readFileSync('test/host/sandbox/launcher.test.ts', 'utf8')",
+		"readFileSync(join('test', 'host', 'sandbox', 'launcher.test.ts'), 'utf8')",
+		"readFileSync(resolve(process.cwd(), 'test/host/sandbox/launcher.test.ts'), 'utf8')",
+		"fs.promises.readFile('test/host/sandbox/launcher.test.ts', 'utf8')",
+		"readFile('test/host/sandbox/launcher.test.ts', 'utf8')",
+		"textRead('test/host/sandbox/launcher.test.ts', 'utf8')",
+		"import '../../../../test/host/sandbox/launcher.test.ts?raw'",
+		"import text from '../../../../test/host/sandbox/launcher.test.ts' with { type: 'text' }",
+		"import('../../../../test/host/sandbox/launcher.test.ts', { with: { type: 'text' } })",
+		"import('../../../../test/host/sandbox/launcher.test.ts?raw')",
+		"import * as paths from 'node:path'; fs.readFileSync(paths.resolve(process.cwd(), 'test', 'host/sandbox/launcher.test.ts'), 'utf8')",
+		"import * as fsp from 'node:fs/promises'; fsp.readFile('test/host/sandbox/launcher.test.ts', 'utf8')",
+		"const base = 'test/host'; const file = join(base, 'sandbox', 'launcher.test.ts'); readFileSync(file, 'utf8')",
+	])
+		it(`refuses a literal existing test read: ${expression}`, {
+			timeout: 30000,
+		}, () => {
+			const content = `import fs, { readFileSync, readFile } from 'node:fs'; import { readFile as textRead } from 'node:fs/promises'; import { join, resolve } from 'node:path'; ${expression};`;
+			const parsed = writeAcceptance(output(content), contract, existing);
+			assert.ok(
+				"reason" in parsed && parsed.reason === "heldout_reads_preserved_test",
+			);
+		});
+
+	for (const [name, content, preservation, replaceable] of [
+		[
+			"candidate-added test",
+			original.replaceAll(
+				"test/host/sandbox/launcher.test.ts",
+				"test/host/sandbox/new-regression.test.ts",
+			),
+			false,
+			false,
+		],
+		["preservation read", original, true, false],
+		[
+			"non-test source",
+			original.replaceAll(
+				"test/host/sandbox/launcher.test.ts",
+				"src/version.ts",
+			),
+			false,
+			false,
+		],
+		["contract replacement", original, false, true],
+		[
+			"dynamic parameter shadows a literal binding",
+			"import { readFileSync } from 'node:fs'; const filename = 'test/host/sandbox/launcher.test.ts'; function inspect(filename) { return readFileSync(filename); } inspect('src/version.ts');",
+			false,
+			false,
+		],
+		[
+			"a parameter shadows the imported reader",
+			"import { readFileSync } from 'node:fs'; const inspect = (readFileSync) => readFileSync('test/host/sandbox/launcher.test.ts'); inspect((text) => text);",
+			false,
+			false,
+		],
+		[
+			"host source",
+			original.replaceAll(
+				"test/host/sandbox/launcher.test.ts",
+				"host/wrapper.ts",
+			),
+			false,
+			false,
+		],
+		[
+			"documentation",
+			original.replaceAll(
+				"test/host/sandbox/launcher.test.ts",
+				"docs/reference.md",
+			),
+			false,
+			false,
+		],
+		[
+			"read expression inside a regex",
+			"import { readFileSync } from 'node:fs'; const pattern = /readFileSync('test\\/host\\/sandbox\\/launcher.test.ts')/;",
+			false,
+			false,
+		],
+		[
+			"cwd in a non-root join segment",
+			"import { readFileSync } from 'node:fs'; import { join } from 'node:path'; readFileSync(join('test', process.cwd(), 'host/sandbox/launcher.test.ts'));",
+			false,
+			false,
+		],
+		[
+			"plain module import is not a text read",
+			"import '../../../../test/host/sandbox/launcher.test.ts';",
+			false,
+			false,
+		],
+		[
+			"dynamic path (known limit)",
+			"import { readFileSync } from 'node:fs'; readFileSync(process.env.TEST_PATH, 'utf8');",
+			false,
+			false,
+		],
+		[
+			"literal not read",
+			"const path = 'test/host/sandbox/launcher.test.ts';",
+			false,
+			false,
+		],
+		[
+			"commented read",
+			"// readFileSync('test/host/sandbox/launcher.test.ts')",
+			false,
+			false,
+		],
+		[
+			"unrelated readFile function",
+			"function readFile(path) {} readFile('test/host/sandbox/launcher.test.ts');",
+			false,
+			false,
+		],
+	] as const)
+		it(`allows ${name}`, { timeout: 30000 }, () => {
+			assert.equal(
+				writeAcceptance(
+					output(content, preservation),
+					{
+						...contract,
+						replacesTests: replaceable
+							? [
+									{
+										path: "test/host/sandbox/launcher.test.ts",
+										reason: "Owner-authorized regression",
+									},
+								]
+							: [],
+					},
+					existing,
+				).kind,
+				"suite",
+			);
+		});
+
+	it("bounds cyclic path bindings and repeated expansion", {
+		timeout: 30000,
+	}, () => {
+		const declarations = Array.from(
+			{ length: 20 },
+			(_, i) => `const p${i + 1} = join(p${i}, p${i});`,
+		).join(" ");
+
+		const content = `import { readFileSync } from 'node:fs'; import { join } from 'node:path'; const p0 = 'test'; ${declarations} const cycle = cycle; readFileSync(p20); readFileSync(cycle);`;
+		assert.equal(
+			writeAcceptance(output(content), contract, existing).kind,
+			"suite",
+		);
+	});
+});
+
 describe("held-out acceptance output", () => {
 	for (const judge of MUST_ACCEPT_JUDGES)
 		it(`must accept judge: ${judge}`, { timeout: 1000 }, () => {

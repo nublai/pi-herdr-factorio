@@ -3287,6 +3287,7 @@
 			"kind": "paths",
 			"reader": "test/src/contract/accept.test.ts",
 			"tokens": {
+				"\"test/fixtures/acceptance/430-wrapper-regression.txt\"": 1,
 				"readFileSync(\"skills/acceptance/SKILL.md\"": 1,
 				"readFileSync(\".github/factory/gates/scan-rules.json\"": 1,
 				"resolve(\".github/factory/gates\")": 1
@@ -3294,6 +3295,10 @@
 			"targets": [
 				{
 					"path": "skills/acceptance/SKILL.md",
+					"type": "file"
+				},
+				{
+					"path": "test/fixtures/acceptance/430-wrapper-regression.txt",
 					"type": "file"
 				},
 				{
@@ -3344,6 +3349,7 @@
 			"kind": "paths",
 			"reader": "test/src/candidate/base-check.test.ts",
 			"tokens": {
+				"\"test/fixtures/acceptance/430-wrapper-regression.txt\"": 1,
 				"resolve(\".github/factory/gates/reporter.mjs\")": 1,
 				"resolve(\".github/factory/gates\")": 3,
 				"readFileSync(\".github/factory/gates/scan-rules.json\"": 1,
@@ -3365,6 +3371,24 @@
 				{
 					"path": "test/fixtures/oracle-corpus",
 					"type": "dir"
+				},
+				{
+					"path": "test/fixtures/acceptance/430-wrapper-regression.txt",
+					"type": "file"
+				}
+			]
+		},
+		{
+			"id": "test-reads-acceptance-controller",
+			"kind": "paths",
+			"reader": "test/src/controller/orchestrator-acceptance.test.ts",
+			"tokens": {
+				"\"test/fixtures/acceptance/430-wrapper-regression.txt\"": 1
+			},
+			"targets": [
+				{
+					"path": "test/fixtures/acceptance/430-wrapper-regression.txt",
+					"type": "file"
 				}
 			]
 		},

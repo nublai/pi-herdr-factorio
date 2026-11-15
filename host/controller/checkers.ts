@@ -23,6 +23,7 @@ import type { AcceptanceBinding } from "../../src/contract/acceptance.ts";
 import {
 	acceptanceDigestOf,
 	JUDGE_REFUSAL_SENTENCES,
+	heldoutPathRefusalSentence,
 	writeAcceptance,
 	type AcceptanceSuite,
 } from "../../src/contract/acceptance.ts";
@@ -83,7 +84,11 @@ export function controllerDraftChecker(config: {
 	};
 
 	return async (text: string, context: DraftCheckContext) => {
-		const parsed = writeAcceptance(text, config.input.contract);
+		const parsed = writeAcceptance(
+			text,
+			config.input.contract,
+			config.input.files,
+		);
 
 		if (parsed.kind !== "suite") {
 			if (!("scenario" in parsed)) return null;
@@ -93,7 +98,10 @@ export function controllerDraftChecker(config: {
 				verdict: "judge_refused",
 				reason: parsed.reason,
 				scenario: parsed.scenario,
-				sentence: JUDGE_REFUSAL_SENTENCES[parsed.reason],
+				sentence:
+					parsed.reason === "heldout_reads_preserved_test"
+						? heldoutPathRefusalSentence(parsed.path)
+						: JUDGE_REFUSAL_SENTENCES[parsed.reason],
 			};
 
 			exclusive(

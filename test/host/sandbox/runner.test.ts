@@ -855,6 +855,7 @@ describe("accept same-session draft checks", () => {
 				stageDir: join(root, label, "stage"),
 				attempt: 1,
 				input: {
+					files: new Set(),
 					contract,
 					digest: contractDigestOf(contractBytes(contract)),
 					repo,

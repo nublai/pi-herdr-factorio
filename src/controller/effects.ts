@@ -353,7 +353,7 @@ export function accepted(
 	const bound = run.inputs?.contract;
 
 	if (bound === undefined || output === null) return null;
-	const parsed = writeAcceptance(output, bound.contract);
+	const parsed = writeAcceptance(output, bound.contract, run.inputs?.files);
 
 	if (parsed.kind === "malformed") {
 		input.log("acceptance_malformed", {

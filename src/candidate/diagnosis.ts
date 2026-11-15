@@ -2,7 +2,7 @@ import type { GitSha } from "../config/schema.ts";
 import {
 	parseAcceptanceBinding,
 	type AcceptanceBinding,
-	type JudgeOnlyRefusal,
+	type AcceptanceDraftRefusal,
 } from "../contract/acceptance.ts";
 import type { Contract, CriterionKind } from "../contract/contract.ts";
 import type { JsonValue } from "../core/json.ts";
@@ -1076,7 +1076,7 @@ export type BaseDraftFeedback = Readonly<{
 export type JudgeDraftFeedback = Readonly<{
 	run: 1 | 2;
 	verdict: "judge_refused";
-	reason: JudgeOnlyRefusal;
+	reason: AcceptanceDraftRefusal;
 	scenario: string;
 	sentence: string;
 }>;

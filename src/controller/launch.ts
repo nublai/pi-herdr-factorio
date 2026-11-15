@@ -127,6 +127,7 @@ export type StageLaunchInput = {
 	readonly source?: SourceFacts;
 	readonly specify?: SpecifyReviewInput;
 	readonly acceptDraft?: {
+		readonly files: ReadonlySet<string>;
 		readonly contract: Contract;
 		readonly digest: ContractDigest;
 		readonly repo: RepoSlug;
