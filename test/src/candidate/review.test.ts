@@ -1421,6 +1421,61 @@ describe("trusted pipeline evidence for review (#735)", () => {
 			assert.equal(trustedEvidence(input), null, name);
 	});
 
+	it("refuses trusted records that disagree on dispatch nonce, report identity, required checks or held-out failures", {
+		timeout: 30_000,
+	}, () => {
+		const cases: readonly [
+			string,
+			Readonly<Record<string, JsonValue>>,
+			Readonly<Record<string, JsonValue>>,
+		][] = [
+			["gate nonce differs from report nonce", { nonce: "another-dispatch" }, {}],
+			["gate nonce missing", { nonce: null }, {}],
+			["gate nonce empty", { nonce: "" }, {}],
+			[
+				"report nonce missing",
+				{},
+				{ nonce: null, externalId: `factory-gates:${verdict.ciRunId}:` },
+			],
+			[
+				"report external id names another run",
+				{},
+				{ externalId: "factory-gates:999:nonce" },
+			],
+			[
+				"report external id names another nonce",
+				{},
+				{ externalId: `factory-gates:${verdict.ciRunId}:another-dispatch` },
+			],
+			["report external id missing", {}, { externalId: null }],
+			["receipt required checks empty", { requiredChecks: [] }, {}],
+			[
+				"receipt required checks differ from the verdict",
+				{ requiredChecks: [...verdict.requiredChecks.slice(1), "other"] },
+				{},
+			],
+			["receipt required checks missing", { requiredChecks: null }, {}],
+			[
+				"held-out failures on a passed receipt",
+				{ heldoutFailures: ["test/acceptance/1/checks/a.test.ts"] },
+				{},
+			],
+			["held-out failures missing", { heldoutFailures: null }, {}],
+		];
+
+		for (const [name, gateChange, reportChange] of cases)
+			assert.equal(
+				trustedEvidence({
+					binding,
+					verdict,
+					gateReceipt: gateReceiptText(verdict, gateChange),
+					report: reportText(verdict, reportChange),
+				}),
+				null,
+				name,
+			);
+	});
+
 	it("labels the trusted evidence in the review prompt, and states when it is unavailable", async () => {
 		const f = await preparedReviewFixture();
 
@@ -1507,6 +1562,21 @@ describe("trusted pipeline evidence for review (#735)", () => {
 			assert.equal(evidenceBlock(legacy.prepared.input.prompt), null);
 		} finally {
 			legacy.close();
+		}
+	});
+
+	it("review preparation omits evidence whose gate receipt and report name different dispatches", {
+		timeout: 30_000,
+	}, async () => {
+		const f = await preparedReviewFixture(1, false, false, (v) => ({
+			"receipt.json": gateReceiptText(v, { nonce: "different-gate-nonce" }),
+			"report.json": reportText(v),
+		}));
+
+		try {
+			assert.equal(evidenceBlock(f.prepared.input.prompt), null);
+		} finally {
+			f.close();
 		}
 	});
 

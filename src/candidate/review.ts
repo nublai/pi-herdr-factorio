@@ -30,6 +30,7 @@ import {
 	objectOf,
 	parseJson,
 	textOf,
+	textsOf,
 	type JsonValue,
 } from "../core/json.ts";
 import {
@@ -139,10 +140,37 @@ function heldoutTotals(
 		: null;
 }
 
+const DISPATCH_NONCE = /^[a-zA-Z0-9_-]{1,100}$/;
+
+function recordsAgree(input: {
+	readonly gate: ReturnType<typeof objectOf>;
+	readonly ci: ReturnType<typeof objectOf>;
+	readonly verdict: Verdict;
+}): boolean {
+	const { gate, ci, verdict } = input;
+	const nonce = textOf(fieldOf(gate, "nonce"));
+	const required = textsOf(fieldOf(gate, "requiredChecks"));
+
+	return (
+		nonce !== null &&
+		DISPATCH_NONCE.test(nonce) &&
+		fieldOf(ci, "nonce") === nonce &&
+		fieldOf(ci, "externalId") ===
+			`factory-gates:${verdict.ciRunId}:${nonce}` &&
+		required !== null &&
+		required.length === verdict.requiredChecks.length &&
+		required.every((name, i) => name === verdict.requiredChecks[i]) &&
+		arrayOf(fieldOf(gate, "heldoutFailures"))?.length === 0
+	);
+}
+
 /**
  * The trusted-pipeline evidence for the candidate under review, or null when
- * a record is missing or its SHA, CI run or digest disagrees with that
- * candidate. Null leaves every judgment that needs it unverifiable.
+ * a record is missing, the records disagree with each other (dispatch nonce,
+ * report external ID, required checks, held-out failures), or a SHA, CI run or
+ * digest disagrees with that candidate. Null leaves every judgment that needs
+ * it unverifiable. The receipt and report digests are fingerprints of the
+ * stored bytes, not an independent authenticity check.
  */
 export function trustedEvidence(input: {
 	readonly binding: Pick<
@@ -174,6 +202,7 @@ export function trustedEvidence(input: {
 		fieldOf(gate, "candidateSha") !== verdict.candidateSha ||
 		fieldOf(gate, "gateSha") !== verdict.gateSha ||
 		fieldOf(gate, "heldoutDigest") !== verdict.heldoutDigest ||
+		!recordsAgree({ gate, ci, verdict }) ||
 		fieldOf(ci, "candidateSha") !== verdict.candidateSha ||
 		fieldOf(ci, "gateSha") !== verdict.gateSha ||
 		fieldOf(ci, "ciRunId") !== verdict.ciRunId ||
