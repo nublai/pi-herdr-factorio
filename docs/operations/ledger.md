@@ -12,7 +12,7 @@ Ruleset `26531115`, "Factory ledger append-only", forbids deletion and non-fast-
 
 ## What a row says
 
-A row is one canonical JSON line with `v: 1`, `v: 2`, `v: 3`, `v: 4` or `v: 5`. Its keys come in a fixed order, it ends in one LF, and its digest is SHA-256 over those exact bytes. It holds:
+A row is one canonical JSON line with versions `v: 1` through `v: 6`. Its keys come in a fixed order, it ends in one LF, and its digest is SHA-256 over those exact bytes. It holds:
 
 - the run's identity;
 - the frozen workflow pin and autonomy policy;
@@ -94,15 +94,34 @@ The row holds no private test names, messages, paths, prompts or session content
 
 ### Version 5: certified head authorship
 
-Every new terminal snapshot and row uses version 5. It equals version 4 except that a landed `factory_verified` assurance is `{kind: "factory_verified", generationDigest, authored: "factory" | "owner"}`. The controller derives `authored` from the origin of the generation that certified the actual merged head, including historical certifications. It does not infer authorship from readiness or the active generation. An owner head that passed trusted gates and fresh review without a build is therefore certified, not an override. `owner_override` and non-landed outcomes are unchanged.
+Version 5 equals version 4 except that a landed `factory_verified` assurance is `{kind: "factory_verified", generationDigest, authored: "factory" | "owner"}`. The controller derives `authored` from the origin of the generation that certified the actual merged head, including historical certifications. It does not infer authorship from readiness or the active generation. An owner head that passed trusted gates and fresh review without a build is therefore certified, not an override. `owner_override` and non-landed outcomes are unchanged.
 
 Owner validation records H as `publication.candidateSha` through a temporary controller-owned pin, so the existing landing check still binds the merged head to that generation. Versions 1–4 parse and re-freeze byte-identically, without adding an authorship field. Their absence of that field is not a claim about owner authorship.
 
 An older controller reports the first version 5 line as `unknown_version` and blocks appends with `ledger_version_unsupported`, rather than misreading it as a corrupt version 4 row. Roll forward only. Never rewrite older rows or lower their version to resume appends.
 
+### Version 6: run measurement facts
+
+New terminal snapshots and rows use version 6. Versions 1 to 5 still parse and freeze to their original bytes. The writer never upgrades a stored terminal snapshot or row.
+
+Version 6 adds three facts:
+
+- `controllerRevision` is the SHA in `install-exe-dev.commit` when the controller records the claim. The private timeline pins it, so a restart or held upgrade cannot replace it. A missing or invalid install receipt is `unavailable:receipt_missing`, never the ticket's base SHA. A run claimed before the upgrade reports `controllerRevision` as unavailable.
+- `timeline` holds `elapsedMs`, `modelMs`, `checkMs`, `ciWaitMs`, `ownerWaitMs` and `controllerMs`. The five categories partition claim-to-terminal elapsed time without overlapping. Model time is stage execution wall time, including tools and in-session revisions, not provider compute time. Check time covers visible tests and local validation. CI wait starts when validation records dispatch. Owner wait covers the candidate's waiting state after handoff. Controller time includes preparation, publication, holds and uncategorized gaps between recorded activities. These numbers measure elapsed time, not summed concurrent execution receipts.
+
+`buildDrafts` summarizes the build receipt counters across attempts, resumes and repair rounds. It holds `draftRuns`, `draftRevisionTokens` and `draftSkips`, whose `tokens` and `wall` fields count skip reasons. Each execution directory contributes once. A missing build receipt or legacy receipt without counters makes the aggregate unavailable, rather than a false zero. `buildDrafts` is also unavailable whenever the timeline is unavailable.
+
+The controller appends private records to `<state>/timeline/<runId>.jsonl`, mode 0600 in a mode 0700 directory outside stage mounts. Each version 1 record has `runId`, monotonic `seq`, epoch-millisecond `at`, `kind` (`start`, `end` or `point`), `name`, `key`, `stage`, `round`, `attempt`, `category` and the pinned `controllerRevision`. Names cover the claim, stage execution, visible tests, validation, CI wait, handoff, ready-for-review, owner wait, controller work, repair lifecycle and terminal observation. Records contain no model text, test names or workspace paths. A transition closes the previous activity before opening the next. Recovery reuses an already-open activity, and terminal retries neither append duplicate ends nor change frozen bytes. Backward clock movements clamp to the previous recorded time.
+
+`repairRounds` counts distinct rounds with `repair_authorized`, `repair_started` and `repair_completed` points. Authorization means the candidate machine scheduled a repair. Started means the executor accepted its launch. Completed means the controller received its settled result, including failed or no-change repairs. Retries within one round do not increase these counts. A run with a complete new timeline and no repairs records three zeros. Missing, corrupt or pre-instrumentation timelines leave the aggregate and timeline unavailable, not zero. Timeline write failures log `timeline_unwritable` without changing scheduling or token accounting.
+
+Build receipts now always include `draftRuns`, `draftRevisionTokens` and `draftSkips`. Build `draftRuns` counts revision prompts sent for unrun test edits, at most one. A reserve skip records `tokens` or `wall` only after the checker found edits that need a revision. Clean builds record zero and an empty skip list even near their limits. Accept retains its existing checker-run count. Both stages checkpoint draft progress in `usage.json` and restore it on a same-attempt resume. Missing fields in old receipts remain missing.
+
+Older controllers reject version 6 with `ledger_version_unsupported`. Roll forward rather than rewriting history. OwnerFeed remains v1 with unchanged fields. The Shep bridge needs no change.
+
 ## Score stream
 
-F12b adds `ledger/scores.jsonl` on the same `factory/ledger` branch. The original empty root and all v1–v5 terminal row bytes stay unchanged. No v6 terminal row is needed. Each writer uses the current base tree, so a run append preserves scores and a score append preserves runs.
+F12b adds `ledger/scores.jsonl` on the same `factory/ledger` branch. The original empty root and all v1–v5 terminal row bytes stay unchanged. Score events use their own format, independent of terminal row versions. Each writer uses the current base tree, so a run append preserves scores and a score append preserves runs.
 
 A score event contains `id`, `scoredRunId`, `scorerId`, `scorerDigest`, `inputDigest`, `includeChildren`, `label`, `score`, `passingScore`, bounded `reasoning`, exact `judgeModel`, `judgeFamily`, `familyNote`, `usage`, `supersedes`, `at`, `status` and `voided`. `usage` holds tokens, wall milliseconds and exactness. `status` is `scored`, `failed` or `voided`. Failed or voided events have no numeric score or declared label; `voided` is `scorer_touched` only for a void. Missing or invalid judge output is never promoted to a pass.
 

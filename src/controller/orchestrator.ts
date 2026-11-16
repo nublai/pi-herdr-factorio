@@ -191,6 +191,8 @@ import {
 	recoverCandidate,
 } from "./recovery.ts";
 
+import type { TimelineInput } from "./timeline.ts";
+
 /** Milliseconds since the epoch. Tests pass a fake. */
 export type Clock = { now(): number };
 
@@ -1202,6 +1204,9 @@ export class Orchestrator {
 
 		if (run.stage === "build" && wallMs === undefined) return;
 
+		if (run.stage === "build")
+			await this.#timeline(run, "visible_tests", "check");
+
 		const output =
 			run.stage === "build"
 				? await this.#input.executor.output({
@@ -1214,6 +1219,8 @@ export class Orchestrator {
 					})
 				: kept;
 
+		if (!(output instanceof Object && output.kind === "pending"))
+			await this.#timeline(run, "controller", "controller");
 		const recovered = await this.#recoverOutput(run, output);
 		const limits = this.#limits();
 
@@ -1727,12 +1734,54 @@ export class Orchestrator {
 			: null;
 	}
 
+	async #timeline(
+		run: Pick<ActiveRun, "runId" | "stage" | "attempt" | "round">,
+		name: TimelineInput["name"],
+		category: TimelineInput["category"],
+		point = false,
+		key = `${name}:${run.stage}:${run.round ?? 0}:${run.attempt}`,
+	): Promise<void> {
+		const port = this.#input.files.timeline;
+
+		if (port === undefined) return;
+
+		const start =
+			name === "claim"
+				? await this.#input.files.accounting?.start(run.runId)
+				: null;
+
+		const input = {
+			repo: this.#input.repo,
+			name,
+			key,
+			category,
+			stage: run.stage,
+			round: run.round ?? 0,
+			attempt: run.attempt,
+			at: start == null ? this.#input.clock.now() : Date.parse(start.startedAt),
+		};
+
+		let written: boolean;
+
+		try {
+			written = await (point
+				? port.point(run.runId, input)
+				: port.transition(run.runId, input));
+		} catch {
+			written = false;
+		}
+
+		if (!written)
+			this.#input.log("timeline_unwritable", { runId: run.runId, name });
+	}
+
 	async #prepareTerminal(run: ActiveRun): Promise<boolean> {
 		const ledger = this.#input.files.ledger;
 		const status = desiredStatus(run.phase);
 
 		if (ledger === undefined || !isTerminal(status)) return true;
 		const fields = { issue: run.issue, runId: run.runId };
+		await this.#timeline(run, "terminal", "controller", true, "terminal");
 		const observedAt = new Date(this.#input.clock.now()).toISOString();
 		let snapshot: JsonValue;
 
@@ -3265,6 +3314,7 @@ export class Orchestrator {
 			return null;
 		}
 
+		await this.#timeline(run, "claim", "controller", true, "claim");
 		this.state.runs.set(issue, run);
 		this.#observeClaim(run, this.#confirmedBy(run));
 
@@ -3657,8 +3707,10 @@ export class Orchestrator {
 		this.state.totals.launches++;
 
 		if (launch.kind === "unavailable") {
+			await this.#timeline(run, "controller", "controller");
 			run.phase = { kind: "blocked", reason: launch.reason };
 		} else {
+			await this.#timeline(run, "stage", "model");
 			run.phase = phase;
 			run.unsettled = null;
 			run.adopted = false;
@@ -3667,6 +3719,17 @@ export class Orchestrator {
 
 			const settled = launch.done.then(
 				async (result) => {
+					if (files.timeline !== undefined)
+						await this.#timeline(
+							{ ...run, stage, attempt },
+							stage === "build" && result.kind === "passed"
+								? "visible_tests"
+								: "controller",
+							stage === "build" && result.kind === "passed"
+								? "check"
+								: "controller",
+						);
+
 					const output =
 						result.kind === "passed"
 							? await executor
@@ -3684,6 +3747,12 @@ export class Orchestrator {
 									.catch(() => null)
 							: null;
 
+					if (files.timeline !== undefined)
+						await this.#timeline(
+							{ ...run, stage, attempt },
+							"controller",
+							"controller",
+						);
 					const walled = isWallOut(output);
 
 					phase.result = withFamily(
@@ -3719,7 +3788,13 @@ export class Orchestrator {
 							: undefined,
 					);
 				},
-				() => {
+				async () => {
+					if (files.timeline !== undefined)
+						await this.#timeline(
+							{ ...run, stage, attempt },
+							"controller",
+							"controller",
+						);
 					phase.result = { kind: "failed", usage: phase.usage, output: null };
 				},
 			);
@@ -3766,6 +3841,59 @@ export class Orchestrator {
 			this.#input.log("claim_unwritable", { runId: run.runId });
 
 			return false;
+		}
+
+		if (state.kind === "selected") {
+			const work = state.work;
+
+			if (work.kind === "repair_due")
+				await this.#timeline(
+					{ ...projected, round: work.round },
+					"repair_authorized",
+					"controller",
+					true,
+					`repair_authorized:${work.round}`,
+				);
+
+			if (work.kind === "effect" && work.request.kind === "repair_build")
+				await this.#timeline(
+					{ ...projected, round: work.request.execution.round },
+					"repair_authorized",
+					"controller",
+					true,
+					`repair_authorized:${work.request.execution.round}`,
+				);
+
+			if (work.kind === "effect" && work.request.kind === "validate") {
+				const waiting = state.current.validation?.dispatchedAt != null;
+
+				await this.#timeline(
+					projected,
+					waiting ? "ci_wait" : "validation",
+					waiting ? "ci_wait" : "check",
+				);
+			} else if (work.kind === "waiting") {
+				await this.#timeline(projected, "owner_wait", "owner_wait");
+
+				if (state.published?.readiness.kind === "ready")
+					await this.#timeline(
+						projected,
+						"ready_for_review",
+						"owner_wait",
+						true,
+						`ready:${state.current.intent.digest}`,
+					);
+			} else if (
+				work.kind === "handoff" ||
+				(work.kind === "effect" &&
+					(work.request.kind === "open_pr" ||
+						work.request.kind === "promote_pr" ||
+						work.request.kind === "complete_handoff"))
+			) {
+				await this.#timeline(projected, "handoff", "controller");
+			} else if (work.kind !== "reviewing" && work.kind !== "rebuilding") {
+				await this.#timeline(projected, "controller", "controller");
+			}
 		}
 
 		this.state.totals.usage += Math.max(0, projected.usage - run.usage);
@@ -3885,17 +4013,19 @@ export class Orchestrator {
 
 			if (!(await this.#commitCandidate(run, step.state))) continue;
 
-			if (this.#candidateRecovery.has(run.runId))
-				this.#watchRecovery(
-					run.runId,
-					await recoverCandidate(
-						this.#input,
-						this.#candidateResults,
-						this.#candidateRecovery,
-						run,
-						this.#buildWallMs(),
-					),
+			if (this.#candidateRecovery.has(run.runId)) {
+				const testing = await recoverCandidate(
+					this.#input,
+					this.#candidateResults,
+					this.#candidateRecovery,
+					run,
+					this.#buildWallMs(),
 				);
+
+				if (testing !== null)
+					await this.#timeline(testing, "visible_tests", "check");
+				this.#watchRecovery(run.runId, testing);
+			}
 
 			for (let index = 0; index < this.#candidateResults.length; ) {
 				const queued = this.#candidateResults[index];
@@ -3957,6 +4087,22 @@ export class Orchestrator {
 						}))
 					)
 						break;
+				}
+
+				if (
+					event.kind === "review_settled" ||
+					event.kind === "repair_settled"
+				) {
+					await this.#timeline(event.execution, "controller", "controller");
+
+					if (event.kind === "repair_settled")
+						await this.#timeline(
+							event.execution,
+							"repair_completed",
+							"controller",
+							true,
+							`repair_completed:${event.execution.round}`,
+						);
 				}
 
 				if (!(await this.#commitCandidate(run, step.state))) break;
@@ -4500,11 +4646,31 @@ export class Orchestrator {
 			return request.kind === "launch_review"
 				? { kind: "launch_review", request, started: false }
 				: { kind: "repair_build", request, started: false };
+		await this.#timeline(execution, "stage", "model");
+
+		if (execution.stage === "build")
+			await this.#timeline(
+				execution,
+				"repair_started",
+				"controller",
+				true,
+				`repair_started:${execution.round}`,
+			);
 		this.#candidateExecutions.set(execution.id, handle);
 		this.state.totals.launches++;
 
 		const settled = launch.done
 			.then(async (result) => {
+				await this.#timeline(
+					execution,
+					execution.stage === "build" && result.kind === "passed"
+						? "visible_tests"
+						: "controller",
+					execution.stage === "build" && result.kind === "passed"
+						? "check"
+						: "controller",
+				);
+
 				const tokens = await executor.spent({
 					runId: execution.runId,
 					stage: execution.stage,
@@ -4528,6 +4694,16 @@ export class Orchestrator {
 							})
 						: null;
 
+				await this.#timeline(execution, "controller", "controller");
+
+				if (execution.stage === "build")
+					await this.#timeline(
+						execution,
+						"repair_completed",
+						"controller",
+						true,
+						`repair_completed:${execution.round}`,
+					);
 				const walled = isWallOut(output);
 
 				let event: CandidateEvent;
@@ -4708,6 +4884,8 @@ export class Orchestrator {
 			return;
 		}
 
+		await this.#timeline(run, "validation", "check");
+
 		const progress: BaseCheckProgress | undefined =
 			reference.kind === "refused"
 				? { kind: "refused", failure: reference.failure }
@@ -4722,6 +4900,7 @@ export class Orchestrator {
 		run.phase.checking = progress?.kind === "checking";
 
 		if (progress?.kind === "checking") return;
+		await this.#timeline(run, "controller", "controller");
 
 		if (progress?.kind === "interrupted") {
 			const limits = this.#limits();
@@ -5503,6 +5682,8 @@ export class Orchestrator {
 	}
 
 	async #publishMarker(run: ActiveRun): Promise<void> {
+		if (run.phase.kind === "base_check")
+			await this.#timeline(run, "validation", "check");
 		const status = desiredStatus(run.phase);
 		const marked = run.marked;
 

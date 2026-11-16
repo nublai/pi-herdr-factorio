@@ -80,9 +80,9 @@ A clean landing needs all of these facts:
    dismissed change request originally submitted by a non-bot actor. Dismissal
    does not erase intervention, even if no repair started or the original
    round-0 head remained certified.
-4. A v5 landing is not `authored: owner`. Older rows lack that field and use
-   their recorded assurance and generation. An `owner_override` is landed but
-   never clean.
+4. A landing in v5 and later is not `authored: owner`. Older rows lack that
+   field and use their recorded assurance and generation. An `owner_override`
+   is landed but never clean.
 5. Seven days have elapsed since the merge, and the defect query found no
    linked follow-up defect in that window.
 

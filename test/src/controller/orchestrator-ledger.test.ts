@@ -245,7 +245,7 @@ describe("ledger outbox enrollment", () => {
 		stage.finish(resultOf(launch, { kind: "passed" }, 300));
 		await once(controller);
 		const row = (await native.ledger?.scan())?.[0]?.row?.row;
-		assert.ok(row && row.v === 5);
+		assert.ok(row && row.v === 6);
 		assert.equal(row.outcome.kind, "needs_info");
 		assert.deepEqual(row.runContext, context);
 		assert.equal(row.provenance.kind, "verification");
@@ -610,7 +610,7 @@ describe("terminal rows keep the real cause", () => {
 		}
 
 		const row = (await outbox.scan())?.[0]?.row?.row;
-		assert.ok(row?.v === 5, "a version 5 row");
+		assert.ok(row?.v === 6, "a version 6 row");
 
 		return { ...f, dir, row };
 	}

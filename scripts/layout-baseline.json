@@ -417,6 +417,46 @@
 				],
 				"since": "L13"
 			},
+			"host/controller/timeline.ts": {
+				"owner": "host/controller",
+				"seats": [
+					"code-review",
+					"security-review",
+					"simplify"
+				],
+				"from": [],
+				"since": "M2"
+			},
+			"src/controller/timeline.ts": {
+				"owner": "src/controller",
+				"seats": [
+					"code-review",
+					"security-review",
+					"simplify"
+				],
+				"from": [],
+				"since": "M2"
+			},
+			"test/host/controller/timeline.test.ts": {
+				"owner": "host/controller",
+				"seats": [
+					"code-review",
+					"security-review",
+					"simplify"
+				],
+				"from": [],
+				"since": "M2"
+			},
+			"test/integration/controller-timeline.test.ts": {
+				"owner": "host/controller",
+				"seats": [
+					"code-review",
+					"security-review",
+					"simplify"
+				],
+				"from": [],
+				"since": "M2"
+			},
 			"host/controller/terminal.ts": {
 				"owner": "host/controller",
 				"seats": [

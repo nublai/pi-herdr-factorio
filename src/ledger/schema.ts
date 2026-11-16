@@ -706,7 +706,7 @@ const rowV4Fields = {
 
 const rowV4Codec = record(rowV4Fields);
 
-const rowV5Codec = record({
+const rowV5Fields = {
 	...rowV4Fields,
 	v: literal(5),
 	outcome: tagged({
@@ -722,7 +722,34 @@ const rowV5Codec = record({
 			}),
 		},
 	}),
+};
+
+const rowV5Codec = record(rowV5Fields);
+
+export const timelineSummary = record({
+	elapsedMs: count,
+	modelMs: count,
+	checkMs: count,
+	ciWaitMs: count,
+	ownerWaitMs: count,
+	controllerMs: count,
 });
+
+const rowV6Codec = record({
+	...rowV5Fields,
+	v: literal(6),
+	controllerRevision: fact(sha),
+	timeline: fact(timelineSummary),
+	buildDrafts: fact(
+		record({
+			draftRuns: count,
+			draftRevisionTokens: count,
+			draftSkips: record({ tokens: count, wall: count }),
+		}),
+	),
+});
+
+export type LedgerRowV6 = Out<typeof rowV6Codec>;
 
 export type LedgerRowV1 = Out<typeof rowCodec>;
 
@@ -739,7 +766,8 @@ export type LedgerRow =
 	| LedgerRowV2
 	| LedgerRowV3
 	| LedgerRowV4
-	| LedgerRowV5;
+	| LedgerRowV5
+	| LedgerRowV6;
 
 /** Old immutable rows expose unknown facts without adding fields to their bytes. */
 export function ledgerEfficiency(row: LedgerRow): EfficiencyFacts {
@@ -751,20 +779,32 @@ export type LedgerRowInput =
 	| Omit<LedgerRowV2, "gaps">
 	| Omit<LedgerRowV3, "gaps">
 	| Omit<LedgerRowV4, "gaps">
-	| Omit<LedgerRowV5, "gaps">;
+	| Omit<LedgerRowV5, "gaps">
+	| Omit<LedgerRowV6, "gaps">;
 
 const codecOf = (value: JsonValue): Codec<LedgerRow> =>
-	fieldOf(objectOf(value), "v") === 5
-		? rowV5Codec
-		: fieldOf(objectOf(value), "v") === 4
-			? rowV4Codec
-			: fieldOf(objectOf(value), "v") === 3
-				? rowV3Codec
-				: fieldOf(objectOf(value), "v") === 2
-					? rowV2Codec
-					: rowCodec;
+	fieldOf(objectOf(value), "v") === 6
+		? rowV6Codec
+		: fieldOf(objectOf(value), "v") === 5
+			? rowV5Codec
+			: fieldOf(objectOf(value), "v") === 4
+				? rowV4Codec
+				: fieldOf(objectOf(value), "v") === 3
+					? rowV3Codec
+					: fieldOf(objectOf(value), "v") === 2
+						? rowV2Codec
+						: rowCodec;
 
 export type LedgerOutcome = LedgerRow["outcome"];
+
+export function ledgerOutcomeOf(
+	value: JsonValue | undefined,
+	rowVersion: JsonValue | undefined,
+): LedgerOutcome {
+	return rowVersion === 5 || rowVersion === 6
+		? rowV5Fields.outcome(value)
+		: outcome(value);
+}
 
 function gapsOf(value: JsonValue, into: Set<GapCode>): Set<GapCode> {
 	const items = arrayOf(value);
@@ -841,7 +881,7 @@ function invariant(row: LedgerRow): string | null {
 	}
 
 	if (
-		(row.v === 4 || row.v === 5) &&
+		(row.v === 4 || row.v === 5 || row.v === 6) &&
 		JSON.stringify(row.provenance) !==
 			JSON.stringify(provenance(provenanceOf(row.runContext)))
 	)
@@ -853,6 +893,16 @@ function invariant(row: LedgerRow): string | null {
 
 		if (isKnownCap(trusted) && isKnownCap(effective) && effective > trusted)
 			return "verification_cap_raised";
+	}
+
+	if (row.v === 6 && row.timeline.kind === "known") {
+		const t = row.timeline.value;
+
+		if (
+			t.elapsedMs !==
+			t.modelMs + t.checkMs + t.ciWaitMs + t.ownerWaitMs + t.controllerMs
+		)
+			return "timeline_sum_mismatch";
 	}
 
 	const stages = row.stages.kind === "known" ? row.stages.value : [];
@@ -1007,7 +1057,7 @@ function lineOf(bytes: Buffer): LedgerLine {
 
 	if (v === null) return { kind: "corrupt", bytes, code: "missing_version" };
 
-	if (v !== 1 && v !== 2 && v !== 3 && v !== 4 && v !== 5)
+	if (v !== 1 && v !== 2 && v !== 3 && v !== 4 && v !== 5 && v !== 6)
 		return { kind: "unknown_version", bytes };
 
 	try {

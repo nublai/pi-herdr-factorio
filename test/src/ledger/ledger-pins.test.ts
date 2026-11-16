@@ -66,12 +66,12 @@ const PIN: Pins = {
 	v5: "b0b932f6431d48d596c118489801c76cd8504ad7f34b4bf9d111b0641b32b7ad",
 	tip: "c80b569d5e18cc7d7effb9431f559a9eddc09e2e",
 	terminal: {
-		failed: "a601a4d847617b7e1f0ee8373b6ba8eb4fa1400230e99842c0792e9a34589575",
+		failed: "6772ce9dba01c5f395863ee66335477e92a0dca652a24d9916cff6aa254eae8f",
 		unknownCost:
-			"d82f7edf8cd59b9a468837610f41113061961487b819c230b5d2b72bc367a77d",
+			"8afe695e598a3ef153316a4daf69613ca981853d49ba428bf39b7ee17aa974b9",
 		unrecorded:
-			"7718b51066582145d257a5fbc5caf8c3c7a89c908e317c629b185378f3db041c",
-		merged: "34d8d68f269a73cfdd7d3b123c6896d98fd1ca15f5c0268b95859adc92235244",
+			"9adbb011dfdc7bd7e96b892ab7f635a5fd4f384eb9c7ec1a7c864dcc597cc096",
+		merged: "b984a6ac6d40aae4647c3c10894c908e2eb4e745dcd2746531a985a440171d4b",
 	},
 	publication: {
 		base: "25672b8c9ac3ce109d44b854e221584254ade4d5",
@@ -487,7 +487,7 @@ describe("L09 ledger and publication characterization", () => {
 		);
 
 		const view = (row: FrozenRow | undefined) => {
-			assert.ok(row && row.row.v === 5);
+			assert.ok(row && row.row.v === 6);
 
 			return {
 				outcome: row.row.outcome,

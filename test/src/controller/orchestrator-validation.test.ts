@@ -38,6 +38,7 @@ import {
 	storeFeedbackBatch,
 } from "../../../host/controller/candidate-port.ts";
 import { readRunCharges } from "../../../host/controller/terminal.ts";
+import { readRunTimeline } from "../../../host/controller/timeline.ts";
 import { serveLoop } from "../../../host/controller/serve-loop.ts";
 import { GitHubTicketAdapter } from "../../../src/github/adapter.ts";
 import type { Exec } from "../../../src/github/exec.ts";
@@ -318,6 +319,42 @@ describe("controller-only validate", () => {
 		return f;
 	}
 
+	it("records handoff, ready-for-review and owner wait before a terminal release", async () => {
+		const dir = stateDir();
+		const native = fileRunFiles(dir);
+
+		const f = await reviewingRun(undefined, (ctx) => {
+			Object.assign(ctx.files, {
+				timeline: native.timeline,
+				ledger: native.ledger,
+				terminalEvidence: native.terminalEvidence,
+			});
+		});
+
+		f.executor.behaviors = [{ kind: "pass", usage: 11 }];
+
+		for (let tick = 0; tick < 5; tick++) {
+			await f.controller.tick();
+			await settle();
+		}
+
+		const before = readRunTimeline(dir, runOf(14));
+
+		assert.ok(before);
+		assert.ok(before.some((r) => r.name === "handoff"));
+		assert.ok(before.some((r) => r.name === "ready_for_review"));
+		f.clock.t += 5000;
+		const issue = f.github.issues.get(14);
+
+		assert.ok(issue);
+		issue.state = "closed";
+		await f.controller.tick();
+		const row = (await native.ledger?.scan())?.[0]?.row?.row;
+
+		assert.ok(row?.v === 6 && row.timeline.kind === "known");
+		assert.equal(row.timeline.value.ownerWaitMs, 5000);
+	});
+
 	for (const recovery of [false, true])
 		for (const fault of [
 			"none",
@@ -550,7 +587,7 @@ describe("controller-only validate", () => {
 				assert.equal(f.executor.launches.length, launches);
 				assert.equal(notices().length, 1);
 				const row = (await outbox.scan())?.[0]?.row?.row;
-				assert.ok(row?.v === 5);
+				assert.ok(row?.v === 6);
 				assert.equal(row.outcome.kind, "failed");
 				assert.deepEqual(row.failure?.kind === "known" && row.failure.value, {
 					stage: "review",
@@ -1378,7 +1415,7 @@ describe("controller-only validate", () => {
 				const row = (await outbox.scan())?.[0]?.row?.row;
 
 				if (target === "open_pr") {
-					assert.ok(row?.v === 5);
+					assert.ok(row?.v === 6);
 					assert.equal(row.outcome.kind, "failed");
 					assert.deepEqual(row.failure?.kind === "known" && row.failure.value, {
 						stage: "land",
@@ -5291,7 +5328,7 @@ describe("controller-only validate", () => {
 		};
 
 		const row = (await outbox.scan())?.[0]?.row?.row;
-		assert.ok(row?.v === 5);
+		assert.ok(row?.v === 6);
 		assert.deepEqual(row.failure, failed);
 		assert.deepEqual(row.outcome, {
 			kind: "failed",

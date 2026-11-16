@@ -610,6 +610,52 @@ describe("L12 stage execution contract", () => {
 		assert.equal(result.receipt.egress, null);
 	});
 
+	it("preserves draft counters and revision tokens across a same-attempt resume", async () => {
+		for (const stage of ["accept", "build"] as const) {
+			const h = harness([]);
+
+			h.host.readUsage = () => ({
+				version: 1,
+				runId: RUN,
+				stage,
+				attempt: 1,
+				startedAt: 1000,
+				deadline: 61000,
+				turns: 2,
+				usage: {
+					total: 40,
+					parent: 40,
+					children: 0,
+					byModel: {},
+					gateway: 40,
+					unreadChildren: 0,
+				},
+				draft: { runs: 1, revisionStart: 25, skips: ["wall"] },
+			});
+			let saved: JsonValue | undefined;
+
+			h.host.writeUsage = (usage) => {
+				saved = JSON.parse(JSON.stringify(usage));
+
+				return true;
+			};
+
+			const result = await runStage(
+				input({ stage }, { maxTokens: 40 }),
+				h.host,
+			);
+
+			assert.equal(result.receipt.draftRuns, 1);
+			assert.equal(result.receipt.draftRevisionTokens, 15);
+			assert.deepEqual(result.receipt.draftSkips, ["wall"]);
+			assert.deepEqual(fieldOf(objectOf(saved), "draft"), {
+				runs: 1,
+				revisionStart: 25,
+				skips: ["wall"],
+			});
+		}
+	});
+
 	it("fails a receipt write only after stopping the session and gateway", async () => {
 		const h = harness(
 			[
@@ -2366,6 +2412,8 @@ describe("private build executor", () => {
 		"replaced",
 		"near-token-cap",
 		"near-wall-cap",
+		"clean-near-token-cap",
+		"clean-near-wall-cap",
 		"context-reserve",
 		"repair-acceptance",
 		"owner-report",
@@ -2491,7 +2539,12 @@ describe("private build executor", () => {
 			let prompts = 0;
 			let reportRequired = false;
 			const turnTokens = scenario === "context-reserve" ? 30_000 : 12;
-			const noEdit = scenario === "clean" || scenario === "repair-acceptance";
+
+			const noEdit =
+				scenario === "clean" ||
+				scenario === "clean-near-token-cap" ||
+				scenario === "clean-near-wall-cap" ||
+				scenario === "repair-acceptance";
 
 			const skip =
 				scenario === "near-token-cap" ||
@@ -2632,14 +2685,19 @@ describe("private build executor", () => {
 					},
 					{
 						maxTokens:
-							scenario === "near-token-cap"
+							scenario === "near-token-cap" ||
+							scenario === "clean-near-token-cap"
 								? 20
 								: scenario === "context-reserve"
 									? 70_000
 									: null,
 						budget: {
 							maxTurns: 10,
-							wallMs: scenario === "near-wall-cap" ? 60_000 : 900_000,
+							wallMs:
+								scenario === "near-wall-cap" ||
+								scenario === "clean-near-wall-cap"
+									? 60_000
+									: 900_000,
 							stallMs: 300_000,
 						},
 					},
@@ -2699,6 +2757,13 @@ describe("private build executor", () => {
 
 			assert.equal(h.pis.length, 1);
 			assert.equal(h.receipts[0]!.usage.total, prompts * turnTokens);
+			assert.equal(h.receipts[0]!.draftRuns, revisions.length);
+			assert.equal(
+				h.receipts[0]!.draftRevisionTokens,
+				revisions.length * turnTokens,
+			);
+
+			if (!skip) assert.deepEqual(h.receipts[0]!.draftSkips, []);
 
 			if (skip) {
 				assert.deepEqual(h.receipts[0]!.draftSkips, [

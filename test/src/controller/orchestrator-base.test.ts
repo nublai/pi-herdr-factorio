@@ -439,7 +439,7 @@ describe("Orchestrator base qualification", () => {
 		assert.equal(statuses(github, 14).at(-1)?.endsWith(":failed"), true);
 
 		const row = (await outbox.scan())?.[0]?.row?.row;
-		assert.ok(row?.v === 5);
+		assert.ok(row?.v === 6);
 		assert.deepEqual(row.acceptAttempts, {
 			kind: "known",
 			value: [
@@ -490,7 +490,7 @@ describe("Orchestrator base qualification", () => {
 		);
 
 		const row = (await outbox.scan())?.[0]?.row?.row;
-		assert.ok(row?.v === 5);
+		assert.ok(row?.v === 6);
 		assert.equal(row.outcome.kind, "budget_exhausted");
 		assert.ok(row.outcome.kind === "budget_exhausted");
 		assert.equal(row.outcome.cap.kind, "unavailable");
