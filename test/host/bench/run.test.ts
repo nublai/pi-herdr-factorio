@@ -16,6 +16,7 @@ import { basename, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, it, type TestContext } from "node:test";
 import { runBenchCli } from "../../../host/cli/bench.ts";
+import { dockerRunner } from "../../../host/gates/runner.ts";
 import {
 	sandboxHost,
 	type SandboxHostConfig,
@@ -386,7 +387,11 @@ async function harness(
 		},
 	};
 
-	const run = async (state = join(root, "trial"), cap = 300000) => {
+	const run = async (
+		state = join(root, "trial"),
+		cap = 300000,
+		overrides: Partial<BenchRuntime> = {},
+	) => {
 		let stdout = "",
 			stderr = "";
 
@@ -414,7 +419,7 @@ async function harness(
 				},
 			},
 			EXE_DEV_PLATFORM,
-			runtime,
+			{ ...runtime, ...overrides },
 		);
 
 		return { code, stdout, stderr, value: () => JSON.parse(stdout) };
@@ -436,6 +441,45 @@ async function harness(
 }
 
 describe("bench run offline CLI", () => {
+	it("refuses a mismatched Docker gate uid before model calls or a claim", {
+		timeout: 60000,
+	}, async (t) => {
+		t.mock.method(dockerRunner, "run", async () => ({
+			exitCode: 1,
+			stdout: "",
+			stderr: "Docker must not run on a mismatched host",
+		}));
+
+		for (const gateRunner of [undefined, dockerRunner]) {
+			const f = await harness(t);
+			const state = join(f.root, "trial");
+			const overrides = { gateRunner, uid: () => 1000 };
+			const result = await f.run(state, 300000, overrides);
+			assert.equal(f.calls.length, 0, "must refuse before any model call");
+			assert.equal(result.code, 1, result.stderr);
+			assert.match(result.stderr, /gate_runner_uid_mismatch/);
+			assert.equal(existsSync(join(state, "claim")), false);
+		}
+	});
+	it("allows a matching Docker gate uid to reach sandbox preflight", async (t) => {
+		const f = await harness(t);
+
+		const result = await f.run(undefined, undefined, {
+			gateRunner: dockerRunner,
+			uid: () => 1001,
+			preflight: async () => {
+				throw new Error("matching_uid_reached_preflight");
+			},
+		});
+
+		assert.equal(result.code, 0, result.stderr);
+		assert.equal(
+			result.value().outcome.reason,
+			"matching_uid_reached_preflight",
+		);
+		assert.equal(existsSync(join(f.root, "trial/claim")), true);
+		assert.equal(f.calls.length, 0);
+	});
 	it("reserves tokens only for the second judge, matching production", {
 		timeout: 60000,
 	}, async (t) => {

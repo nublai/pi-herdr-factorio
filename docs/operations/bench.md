@@ -158,7 +158,9 @@ The state root must be private, owned by the caller, and initially empty.
 A production copy, symlink root, bundle overlap or any other non-bench state
 is refused. The command checks both system and user `factory.service` LoadState;
 a present service, even stopped or masked, refuses execution. An unreadable
-service probe also refuses.
+service probe also refuses. With the real Docker gate runner, the caller's uid
+must equal the gate container's uid, 1001. A mismatch refuses with
+`gate_runner_uid_mismatch` before a claim or any model call.
 
 A write-once claim binds the bundle, variant and cap before preparation.
 The driver reconstructs local Git commits from the archived tree for gates;
@@ -254,22 +256,47 @@ a GitHub integration, GitHub token, `factory.service`, or the production install
 Do not copy production state to the bench host. Transfer only private verified
 task bundles and a Git bundle of the desired committed factory checkout.
 
-1. Install Node 26.12.1, Git, bubblewrap 0.9.0 or newer, and Docker. Make the Docker
-   daemon available to the bench operator, then sign in again if group access
-   changed. Enable the user's systemd manager with
-   `sudo loginctl enable-linger "$USER"`. Confirm `bwrap --version`,
-   `docker info`, and `systemd-run --user --scope --quiet true` succeed.
+1. Install Git, bubblewrap 0.9.0 or newer, and Docker. Create a dedicated bench
+   user with uid 1001 in the docker group, then enable its systemd manager:
+
+   ```sh
+   sudo useradd -m -u 1001 -G docker bench
+   sudo loginctl enable-linger bench
+   sudo -iu bench
+   ```
+
+   The trusted gate container runs as uid 1001, like the GitHub Actions runner.
+   Its bind mounts belong to the bench user. A different uid cannot read
+   `/archives` or write `/cache` and `/w`, even with a less restrictive umask.
+   Keep `umask 077`. Run every remaining installation and trial command as
+   `bench`, with its own home directory and private transferred files.
+
+   Install Node 26.12.1 for `bench`. For a mise installation, use
+   `mise use --global node@26.12.1`. SSH sessions do not reliably load the login
+   shell's PATH. Set the installed Node path and systemd runtime directory
+   explicitly in every session and script, including non-interactive SSH:
+
+   ```sh
+   export PATH="$HOME/.local/share/mise/installs/node/26.12.1/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+   export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+   ```
+
+   Confirm `id -u` prints `1001`, and `node --version` prints `v26.12.1`.
+   Confirm `bwrap --version`, `docker info`, and
+   `systemd-run --user --scope --quiet true` succeed.
 2. On the source checkout, create the transfer bundle from a branch ref.
    The canonical `m5-bench-run` branch is one such ref.
 
    ```sh
-   git bundle create /private/factory-source.bundle refs/heads/m5-bench-run
+   mkdir -p "$HOME/private"
+   git bundle create "$HOME/private/factory-source.bundle" refs/heads/m5-bench-run
    ```
 
-   Clone the transferred Git bundle locally. Use the exact approved commit.
+   Transfer the bundle to the bench user's `$HOME/private/factory-source.bundle`.
+   As `bench`, clone that local file. Use the exact approved commit.
 
    ```sh
-   git clone /private/factory-source.bundle "$HOME/factory-bench"
+   git clone "$HOME/private/factory-source.bundle" "$HOME/factory-bench"
    cd "$HOME/factory-bench"
    git checkout --detach <approved-commit>
    npm ci --ignore-scripts --no-audit --no-fund
@@ -282,7 +309,7 @@ task bundles and a Git bundle of the desired committed factory checkout.
    `FETCH_HEAD` before installing dependencies:
 
    ```sh
-   git fetch /private/factory-source.bundle <bundled-ref>
+   git fetch "$HOME/private/factory-source.bundle" <bundled-ref>
    git checkout --detach FETCH_HEAD
    git rev-parse HEAD
    ```
@@ -292,7 +319,27 @@ task bundles and a Git bundle of the desired committed factory checkout.
    `sandbox` builds only assets. Do not run provisioning without that argument
    or run `install-exe-dev.sh`. Installation downloads public runtime assets and
    registry dependencies but performs no GitHub API authentication.
-3. Set the private task and variant paths. Generate the baseline's pins from
+3. Before the first trial, run this no-model preflight on the installed checkout
+   as `bench`. It exercises the trusted gates' dependency prefetch and offline
+   install in the pinned Docker image under the trial's umask:
+
+   ```sh
+   cd "$HOME/factory-bench"
+   umask 077
+   mkdir -p "$HOME/bench"
+   sha=$(git rev-parse HEAD)
+   node host/cli/index.ts gates --repository "$PWD" \
+     --gate-sha "$sha" --candidate-sha "$sha" \
+     --nonce bench-smoke --output "$HOME/bench/gate-smoke" \
+     --replacements '[]' \
+     --replacements-digest 4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
+   ```
+
+   Require exit 0 and `status: "passed"` in
+   `$HOME/bench/gate-smoke/receipt.json`, including an `install` check with
+   `exitCode: 0`. Stop on any failure. Do not spend model tokens until this
+   preflight passes. It makes npm registry requests but no model requests.
+4. Set the private task and variant paths. Generate the baseline's pins from
    the installed files, not from a copied example.
 
    ```sh
@@ -323,7 +370,7 @@ task bundles and a Git bundle of the desired committed factory checkout.
    JS
    ```
 
-4. Run the replay command above. Keep `trial.json`, native runtime receipts,
+5. Run the replay command above. Keep `trial.json`, native runtime receipts,
    request journals, gateway audits, visible results and gate receipts private.
    Sum all trial charges against the program grant, including incomplete trials.
    Stop and report at the owner's 80-percent threshold. The CLI's cap is per

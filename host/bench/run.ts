@@ -81,7 +81,11 @@ import {
 	type CandidateInput,
 } from "../gates/gates.ts";
 import { heldoutDigest, replacementDigest } from "../gates/materialize.ts";
-import { dockerRunner, type GateRunner } from "../gates/runner.ts";
+import {
+	dockerRunner,
+	GATE_RUNNER_UID,
+	type GateRunner,
+} from "../gates/runner.ts";
 import { readUsernsLimit, runPreflight } from "../isolation/preflight.ts";
 import { detectArch } from "../isolation/seccomp.ts";
 import { locateBundle, SANDBOX_ROOT, withSkills } from "../sandbox/executor.ts";
@@ -107,6 +111,7 @@ export type BenchRuntime = {
 	readonly createHost?: (config: SandboxHostConfig) => StageHost;
 	readonly visible?: typeof runVisibleTests;
 	readonly gateRunner?: GateRunner;
+	readonly uid?: () => number;
 	readonly preflight?: (config: SandboxHostConfig) => Promise<void>;
 };
 
@@ -239,6 +244,12 @@ export async function runBench(
 	},
 	runtime: BenchRuntime,
 ): Promise<string> {
+	if (
+		(runtime.gateRunner ?? dockerRunner) === dockerRunner &&
+		(runtime.uid ?? process.getuid)?.() !== GATE_RUNNER_UID
+	)
+		throw new Error("gate_runner_uid_mismatch");
+
 	const state = resolve(input.stateDir);
 
 	if (existsSync(state)) {

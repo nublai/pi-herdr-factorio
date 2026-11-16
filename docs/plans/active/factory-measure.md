@@ -330,9 +330,9 @@ Each live lane runs at the PR head. Drive the surface with the CLI and viewer re
 **Verify, live.** Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked. Ten lanes on `task:qa` at the PR head, per the boot recipe.
 
 - [ ] Lane 1. Regression lane against trunk. Trunk lacks `bench run`, so record its usage error and gate one baseline trial of the #430 bundle on the bench host. Save `trial-430.json`. Pass when trunk refuses and the head trial completes with an outcome.
-- [ ] Lane 2. Read the bench host's gateway audit for that trial. Save `audit-430.txt`. Pass when only model routes appear and no GitHub route does.
+- [ ] Lane 2. Read the bench host's gateway audit for that trial. Save `audit-430.txt`. Pass when no GitHub route appears, only model routes and the read-only npm registry route are used, and `github.int` still answers 403.
 - [ ] Lane 3. List the builder sandbox's visible files during the trial. Save `sandbox-files.txt`. Pass when no `oracle/` file is visible.
-- [ ] Lane 4. Run a trial with a token cap below one build. Save `capped.json`. Pass when it ends `budget_exhausted` and spends no more than the cap.
+- [ ] Lane 4. Run a trial with a token cap below one build. Save `capped.json`. Pass when it ends `budget_exhausted` and the overrun is no more than one request's input.
 - [ ] Lane 5. Run a trial with a two-dimension variant. Save `bad-variant.txt`. Pass when it refuses before any model call.
 - [ ] Lane 6. Point `--state-dir` at a copy of production state. Save `prod-state.txt`. Pass when it refuses.
 - [ ] Lane 7. Run the #399 bundle, which originally landed. Save `trial-399.json`. Pass when the trial reaches review with gates passing or records a stated failure.
@@ -345,7 +345,7 @@ Each live lane runs at the PR head. Drive the surface with the CLI and viewer re
 - [ ] Metric. Trial wall time per stage for the #430 bundle, against the original production run `1bce1bf2` stage times.
 - [ ] Probe. Three baseline trials of the #430 bundle on the bench host, reading each trial record's stage times.
 - [ ] Baseline. Record the production run's stage times from its receipts first.
-- [ ] Rule. Fail when any stage's median trial time exceeds 1.5 times the production stage time, or a trial exceeds the production build wall.
+- [ ] Rule. Fail when any stage's median trial time exceeds 1.5 times production's time for that stage, or any stage exceeds its configured wall limit.
 
 **Review gate.** None. M5 is not review-gated.
 
