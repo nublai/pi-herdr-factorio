@@ -144,6 +144,13 @@ function git(repository: string, args: readonly string[]): string {
 	).trim();
 }
 
+export function stageBenchPaths(
+	repository: string,
+	paths: readonly string[],
+): void {
+	git(repository, ["--literal-pathspecs", "add", "-f", "--", ...paths]);
+}
+
 async function guardHost(exec: Exec): Promise<void> {
 	for (const scope of [[], ["--user"]]) {
 		const result = await exec("systemctl", [
@@ -503,7 +510,7 @@ export async function runBench(
 				fallback,
 				budget,
 				maxTokens: Math.max(0, Math.min(remaining(), allowance)),
-				reserveTokens: true,
+				reserveTokens: name === SECOND_JUDGE,
 			},
 			remainingRunTokens: remaining(),
 			signal: new AbortController().signal,
@@ -594,7 +601,7 @@ export async function runBench(
 			throw new Error("archived_policy_mismatch");
 		cpSync(base, repository, { recursive: true });
 		git(repository, ["init", "-q"]);
-		git(repository, ["add", "-f", "."]);
+		stageBenchPaths(repository, ["."]);
 		git(repository, ["commit", "-qm", "Archived benchmark base"]);
 		const gateSha = git(repository, ["rev-parse", "HEAD"]);
 		await prepareRepairTree(base, workspace, "", [], "{}");
@@ -691,10 +698,7 @@ export async function runBench(
 			writeFileSync(join(repository, file.path), file.bytes, { mode: 0o600 });
 		}
 
-		git(repository, [
-			"add",
-			"-f",
-			"--",
+		stageBenchPaths(repository, [
 			...collected.changedPaths,
 			...heldoutFiles.map((file) => file.path),
 		]);

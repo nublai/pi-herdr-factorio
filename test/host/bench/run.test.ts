@@ -28,7 +28,8 @@ import {
 } from "../../../host/gateway/client.ts";
 import { manifestDigest } from "../../../host/bundle/manifest.ts";
 import { digestOf } from "../../../src/core/run.ts";
-import type { BenchRuntime } from "../../../host/bench/run.ts";
+import { SECOND_JUDGE } from "../../../src/candidate/review.ts";
+import { stageBenchPaths, type BenchRuntime } from "../../../host/bench/run.ts";
 import {
 	objectOf,
 	parseJson,
@@ -38,11 +39,49 @@ import { EXE_DEV_PLATFORM } from "../../../src/trust/platform.ts";
 import { startEchoFixture } from "../gateway/http-fixtures.ts";
 import { benchFixture, put } from "./fixtures.ts";
 
+// pi-ai 1.4.0 gpt-6.1-sol first-request shape; plain text misses reservation refusals.
+const PI_140_FIRST_REQUEST = {
+	model: "gpt-6.1-sol",
+	stream: true,
+	max_output_tokens: 100,
+	store: false,
+	prompt_cache_key: "synthetic-session",
+	reasoning: { effort: "medium", summary: "auto" },
+	include: ["reasoning.encrypted_content"],
+	input: [
+		{
+			type: "additional_tools",
+			role: "developer",
+			tools: [
+				{
+					type: "function",
+					name: "read",
+					description: "Read a file",
+					parameters: {
+						type: "object",
+						properties: { path: { type: "string" } },
+						required: ["path"],
+					},
+					strict: false,
+				},
+			],
+		},
+		{ role: "developer", content: "Synthetic system prompt" },
+		{
+			role: "user",
+			content: [{ type: "input_text", text: "Synthetic request" }],
+		},
+		{ type: "configuration_update", reasoning: { effort: "medium" } },
+	],
+};
+
 async function harness(
 	t: TestContext,
 	editExisting = false,
 	builtValue = 1,
-	options: Parameters<typeof benchFixture>[1] = {},
+	options: Parameters<typeof benchFixture>[1] & {
+		pi140Request?: boolean;
+	} = {},
 ) {
 	const root = mkdtempSync(join(tmpdir(), "bench-m5-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -54,6 +93,7 @@ async function harness(
 	const buildTools: (readonly string[])[] = [];
 	let service = "not-found";
 	const auditFiles: string[] = [];
+	const reservations: { stage: string; reserve: boolean | undefined }[] = [];
 
 	const runtime: BenchRuntime = {
 		exec: async (command, args) => {
@@ -135,7 +175,10 @@ async function harness(
 							(route) => route.id === "npm" || route.id.startsWith("model-"),
 						),
 					);
-					assert.equal(spec.table.ceiling.reserve, true);
+					reservations.push({
+						stage: basename(config.stageDir ?? ""),
+						reserve: spec.table.ceiling.reserve,
+					});
 					auditFiles.push(spec.auditPath);
 
 					const started = await startGatewayProcess({
@@ -294,16 +337,20 @@ async function harness(
 
 								req.on("error", () => done(0));
 								req.end(
-									JSON.stringify({
-										model: model.slice(model.indexOf("/") + 1),
-										stream: true,
-										max_tokens: 100,
-										max_output_tokens: anthropic ? undefined : 100,
-										input: anthropic ? undefined : "Synthetic request",
-										messages: anthropic
-											? [{ role: "user", content: "Synthetic request" }]
-											: undefined,
-									}),
+									JSON.stringify(
+										options.pi140Request && !anthropic
+											? PI_140_FIRST_REQUEST
+											: {
+													model: model.slice(model.indexOf("/") + 1),
+													stream: true,
+													max_tokens: 100,
+													max_output_tokens: anthropic ? undefined : 100,
+													input: anthropic ? undefined : "Synthetic request",
+													messages: anthropic
+														? [{ role: "user", content: "Synthetic request" }]
+														: undefined,
+												},
+									),
 								);
 							}).then((status) => {
 								emit({
@@ -379,6 +426,7 @@ async function harness(
 		calls,
 		prompts,
 		auditFiles,
+		reservations,
 		buildTools,
 		run,
 		service: (value: string) => {
@@ -388,6 +436,61 @@ async function harness(
 }
 
 describe("bench run offline CLI", () => {
+	it("reserves tokens only for the second judge, matching production", {
+		timeout: 60000,
+	}, async (t) => {
+		const f = await harness(t);
+		const result = await f.run();
+		assert.equal(result.code, 0, result.stderr);
+		assert.equal(result.value().outcome.kind, "passed");
+		assert.deepEqual(
+			f.reservations.map(({ stage }) => stage),
+			["build", "code-review", "security-review", "simplify", SECOND_JUDGE],
+		);
+
+		for (const { stage, reserve } of f.reservations)
+			assert.equal(reserve === true, stage === SECOND_JUDGE, stage);
+	});
+	it("forwards pi 1.4.0 gpt-6.1-sol first-request items through the build gateway", {
+		timeout: 60000,
+	}, async (t) => {
+		const f = await harness(t, false, 1, { pi140Request: true });
+		const result = await f.run();
+		assert.equal(result.code, 0, result.stderr);
+
+		const audit = readFileSync(
+			join(f.root, "trial/runtime/build/egress.jsonl"),
+			"utf8",
+		)
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line));
+
+		assert.ok(
+			audit.some(
+				(row) =>
+					row.route === "model-openai" &&
+					row.decision === "forward" &&
+					row.status === 200,
+			),
+			JSON.stringify(
+				audit.map(({ decision, reason, gate }) => ({ decision, reason, gate })),
+			),
+		);
+		assert.equal(
+			result.value().outcome.kind,
+			"passed",
+			JSON.stringify(result.value().outcome),
+		);
+	});
+	it("stages colon-prefixed paths literally", async (t) => {
+		const f = await harness(t);
+		put(f.repository, ":added.ts", "export const added = 1;\n");
+		put(f.repository, "added.ts", "must remain unstaged\n");
+		stageBenchPaths(f.repository, [":added.ts"]);
+		assert.equal(f.git("diff", "--cached", "--name-only"), ":added.ts");
+		assert.equal(f.git("show", "::added.ts"), "export const added = 1;");
+	});
 	it("passes the recorded replacements digest to trusted gates", {
 		timeout: 60000,
 	}, async (t) => {
@@ -700,14 +803,30 @@ describe("bench run offline CLI", () => {
 		assert.equal(result.value().outcome.stage, "validation");
 		assert.equal(f.calls.length, 1);
 	});
-	it("enforces a below-one-build token cap before forwarding model work", {
+	it("records budget exhaustion after the request crossing the cap, as production does", {
 		timeout: 30000,
 	}, async (t) => {
 		const f = await harness(t);
 		const result = await f.run(join(f.root, "capped"), 1);
 		assert.equal(result.code, 0, result.stderr);
 		assert.equal(result.value().outcome.kind, "budget_exhausted");
-		assert.equal(result.value().accounting.chargedTokens, 0);
+		assert.ok(result.value().accounting.chargedTokens > 1);
+
+		const audit = readFileSync(
+			join(f.root, "capped/runtime/build/egress.jsonl"),
+			"utf8",
+		);
+
+		assert.ok(
+			audit
+				.split("\n")
+				.filter(Boolean)
+				.some((line) => {
+					const row = JSON.parse(line);
+
+					return row.route === "model-openai" && row.decision === "forward";
+				}),
+		);
 	});
 	it("refuses factory.service, copied production state, bad pins and two dimensions before any model call", async (t) => {
 		const f = await harness(t);

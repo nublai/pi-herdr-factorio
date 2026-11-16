@@ -176,8 +176,9 @@ pinned inputs, not a claim that today's runtime matches the historical runtime.
 
 The local base commit preserves every archived file, including tracked files
 that `.gitignore` would exclude. Candidate construction stages the collected
-patch's explicit `changedPaths` and the private suite paths with `git add -f`.
-Ignored additions and deletions therefore reach the gates, as they do in
+patch's explicit `changedPaths` and the private suite paths with
+`git --literal-pathspecs add -f`. Ignored additions and deletions therefore
+reach the gates, as they do in
 production's explicit-path Git Data publication. The gate input carries the
 contract's `replacesTests` and its production `replacementDigest`. The same
 `checkCandidate` checks the tree against the archived gate policy in the pinned
@@ -213,17 +214,22 @@ controller run.
 Only the sanitized workspace enters the builder sandbox. The bundle root,
 `oracle/`, trial records, local Git repository and trusted receipts are not
 mounts. Existing published `test/acceptance/` files are removed by
-`prepareRepairTree`. Review uses a separate sanitized patch tree. The model
-stages get model and read-only npm routes only; neither has a GitHub route.
+`prepareRepairTree`. Production's round-zero builder sees earlier published
+`test/acceptance/` suites; the bench strips them even for round zero. Review uses
+a separate sanitized patch tree. The model stages get model and read-only npm
+routes only; neither has a GitHub route.
 Dependency downloads can occur, so offline here means offline from GitHub,
 not disconnected from the model integration or npm registry.
 
-Every model stage reserves request input plus bounded output against the
-remaining trial cap, including the second judge's 30,000-token limit. This uses
-the gateway's existing text-request reservation and its documented 1,024-token
-hidden-prompt assumption. Review seats share the workflow's turns, wall and
-120,000 tokens. A cap below the first request ends `budget_exhausted` without
-forwarding it. No cap is silently raised.
+As in production, only the second judge reserves request input plus bounded
+output before forwarding, within its 30,000-token limit and the remaining trial
+cap. Reservation uses the gateway's text-request classifier and its documented
+1,024-token hidden-prompt assumption. Other stages bound output to the remaining
+cap and close the gateway when charged usage reaches it. A trial can overrun its
+cap by the input of the one request that crosses it, as production can. A cap
+below the first build request does not prevent forwarding that request. Review
+seats share the workflow's turns, wall and 120,000 tokens. No cap is silently
+raised.
 
 BenchTrial v1 binds its independent ID to the task and variant. It records the
 outcome, per-stage wall time, total wall time, requested and observed seat models,
