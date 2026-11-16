@@ -292,12 +292,13 @@ describe("ledger v6 measurement facts", () => {
 				failure: null,
 			});
 	});
-	it("parses and round-trips controller revision and a partitioned timeline", () => {
+
+	function measuredRow() {
 		const base = rowInput(7);
 		assert.ok(base.provenance.kind === "production");
 		const { policy } = base.provenance;
 
-		const row = ledgerRowOf({
+		return ledgerRowOf({
 			...base,
 			v: 6,
 			buildDrafts: {
@@ -342,9 +343,38 @@ describe("ledger v6 measurement facts", () => {
 				},
 			},
 		});
+	}
+
+	it("parses and round-trips controller revision and a partitioned timeline", () => {
+		const row = measuredRow();
 
 		assert.equal(row.row.v, 6);
 		assert.ok(frozenRowOf(row.bytes)?.bytes.equals(row.bytes));
+	});
+
+	it("rejects timeline totals that do not sum to the elapsed interval", () => {
+		const { row } = measuredRow();
+
+		assert.ok(row.v === 6 && row.timeline.kind === "known");
+
+		for (const delta of [-1, 1]) {
+			const invalid: JsonValue = {
+				...row,
+				timeline: {
+					kind: "known",
+					value: {
+						...row.timeline.value,
+						modelMs: row.timeline.value.modelMs + delta,
+					},
+				},
+			};
+
+			assert.throws(() => ledgerRowOf(invalid), /timeline_sum_mismatch/);
+			assert.equal(
+				frozenRowOf(Buffer.from(`${JSON.stringify(invalid)}\n`)),
+				null,
+			);
+		}
 	});
 });
 

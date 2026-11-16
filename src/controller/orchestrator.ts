@@ -1761,11 +1761,17 @@ export class Orchestrator {
 			at: start == null ? this.#input.clock.now() : Date.parse(start.startedAt),
 		};
 
-		if (
-			!(await (point
+		let written: boolean;
+
+		try {
+			written = await (point
 				? port.point(run.runId, input)
-				: port.transition(run.runId, input)))
-		)
+				: port.transition(run.runId, input));
+		} catch {
+			written = false;
+		}
+
+		if (!written)
 			this.#input.log("timeline_unwritable", { runId: run.runId, name });
 	}
 
@@ -3634,8 +3640,6 @@ export class Orchestrator {
 			result: null,
 		};
 
-		await this.#timeline(run, "stage", "model");
-
 		const launch = await executor.launch({
 			runId: run.runId,
 			stage,
@@ -3706,6 +3710,7 @@ export class Orchestrator {
 			await this.#timeline(run, "controller", "controller");
 			run.phase = { kind: "blocked", reason: launch.reason };
 		} else {
+			await this.#timeline(run, "stage", "model");
 			run.phase = phase;
 			run.unsettled = null;
 			run.adopted = false;

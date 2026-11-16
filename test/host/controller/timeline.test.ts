@@ -119,6 +119,62 @@ it("appends private timeline intervals, pins the installed revision and resumes 
 	assert.equal(statSync(path).mode & 0o777, 0o600);
 });
 
+it("writes nothing after terminal, including new points and transitions after restart", async (t) => {
+	const dir = mkdtempSync(join(tmpdir(), "factory-timeline-terminal-"));
+	t.after(() => rmSync(dir, { recursive: true, force: true }));
+	const run = digestOf("terminal-freeze");
+
+	const input = {
+		repo,
+		at: 1000,
+		category: "controller" as const,
+		stage: null,
+		round: 0,
+		attempt: 0,
+	};
+
+	const port = fileRunTimeline(dir);
+
+	assert.equal(
+		await port.point(run, { ...input, name: "claim", key: "claim" }),
+		true,
+	);
+	assert.equal(
+		await port.point(run, {
+			...input,
+			at: 2000,
+			name: "terminal",
+			key: "terminal",
+		}),
+		true,
+	);
+	const path = join(dir, "timeline", `${run}.jsonl`);
+	const bytes = readFileSync(path);
+	const resumed = fileRunTimeline(dir);
+
+	assert.equal(
+		await resumed.point(run, {
+			...input,
+			at: 3000,
+			name: "ready_for_review",
+			key: "late-point",
+		}),
+		true,
+	);
+	assert.ok(readFileSync(path).equals(bytes));
+	assert.equal(
+		await resumed.transition(run, {
+			...input,
+			at: 4000,
+			name: "stage",
+			category: "model",
+			key: "late-stage",
+		}),
+		true,
+	);
+	assert.ok(readFileSync(path).equals(bytes));
+});
+
 for (const installedRepo of [
 	"nublai/pi-herdr-factorio",
 	"nublai/another-controller",

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +9,7 @@ import { readRunTimeline } from "../../host/controller/timeline.ts";
 import { timelineFacts } from "../../src/controller/timeline.ts";
 import { AUTONOMY_DIGEST } from "../../src/ledger/schema.ts";
 import { digestOf } from "../../src/core/run.ts";
+import type { JsonValue } from "../../src/core/json.ts";
 import {
 	classifiedCase,
 	failingVerdict,
@@ -22,6 +24,145 @@ import {
 	world,
 } from "../src/controller/orchestrator-fixtures.ts";
 
+function recordingWorld(dir: string) {
+	const f = world();
+	const native = fileRunFiles(dir);
+	const accounting = native.accounting;
+
+	assert.ok(accounting && native.ledger);
+	Object.assign(f.files, {
+		ledger: native.ledger,
+		accounting,
+		timeline: native.timeline,
+		terminalEvidence: native.terminalEvidence,
+		prepareRun: async (
+			input: Parameters<NonNullable<typeof native.prepareRun>>[0],
+		) =>
+			accounting.begin({
+				v: 2,
+				runId: input.runId,
+				startedAt: input.startedAt,
+				context: {
+					kind: "production",
+					trustedCap: 800_000,
+					policy: {
+						workflowSha: input.workflowSha,
+						workflowDigest: input.workflowDigest,
+						gates: {
+							kind: "known",
+							value: {
+								sourceSha: input.workflowSha,
+								digest: digestOf("synthetic-gates"),
+							},
+						},
+						autonomy: {
+							approveMerge: "always",
+							land: "propose",
+							digest: AUTONOMY_DIGEST,
+						},
+					},
+				},
+			}),
+	});
+
+	return { f, native };
+}
+
+it("keeps the terminal outcome and non-timeline ledger fields when every timeline write throws", {
+	timeout: 30_000,
+}, async (t) => {
+	const run = async (throws: boolean) => {
+		const dir = mkdtempSync(join(tmpdir(), "factory-timeline-failure-"));
+		t.after(() => rmSync(dir, { recursive: true, force: true }));
+		const { f, native } = recordingWorld(dir);
+
+		assert.ok(native.ledger);
+
+		if (throws) {
+			const fail = async () => {
+				throw new Error("timeline unavailable");
+			};
+
+			Object.assign(f.files, { timeline: { point: fail, transition: fail } });
+		}
+
+		f.github.add(labeled(14));
+		f.executor.fallback = { kind: "fail", usage: 10 };
+		const controller = f.start();
+
+		for (let tick = 0; tick < 6; tick++) {
+			await once(controller);
+			f.clock.t += 30_000;
+		}
+
+		const row = (await native.ledger.scan())?.[0]?.row?.row;
+
+		assert.ok(row?.v === 6);
+		assert.equal(row.outcome.kind, "failed");
+		assert.equal(row.timeline.kind, throws ? "unavailable" : "known");
+		assert.equal(
+			f.logs.some((l) => l.event === "timeline_unwritable"),
+			throws,
+		);
+		assert.equal(row.buildDrafts.kind, throws ? "unavailable" : "known");
+		assert.equal(row.repairRounds.kind, throws ? "unavailable" : "known");
+
+		const {
+			controllerRevision: _revision,
+			timeline: _timeline,
+			repairRounds: _rounds,
+			buildDrafts: _drafts,
+			...unchanged
+		} = row;
+
+		return unchanged;
+	};
+
+	const working = await run(false);
+	const failed = new Map(Object.entries(await run(true)));
+
+	const hash = (value: JsonValue | undefined) =>
+		createHash("sha256")
+			.update(JSON.stringify(value) ?? "undefined")
+			.digest("hex");
+
+	assert.equal(failed.size, Object.keys(working).length);
+
+	for (const [key, value] of Object.entries(working))
+		assert.equal(hash(failed.get(key)), hash(value), key);
+});
+
+it("bounds timeline records across repeated unavailable launches", {
+	timeout: 30_000,
+}, async (t) => {
+	const dir = mkdtempSync(join(tmpdir(), "factory-timeline-unavailable-"));
+	t.after(() => rmSync(dir, { recursive: true, force: true }));
+	const { f } = recordingWorld(dir);
+
+	f.github.add(labeled(14));
+	f.executor.fallback = { kind: "unavailable" };
+	f.executor.ready = true;
+	const controller = f.start();
+
+	for (let tick = 0; tick < 100; tick++) {
+		await once(controller);
+		f.clock.t += 1000;
+	}
+
+	const records = readRunTimeline(dir, runOf(14));
+
+	assert.ok(records);
+	assert.equal(f.executor.launches.length, 100);
+	assert.ok(
+		records.length <= 3,
+		`expected at most 3 timeline lines, got ${records.length}`,
+	);
+	assert.equal(
+		records.some((r) => r.category === "model"),
+		false,
+	);
+});
+
 for (const restart of ["ci_wait", "repair_tests"] as const)
 	it(`records a controller repair round and a v6 timeline through ${restart} restart and terminal freeze`, {
 		timeout: 30_000,
@@ -34,45 +175,9 @@ for (const restart of ["ci_wait", "repair_tests"] as const)
 			join(dir, "install-exe-dev.commit"),
 			`${revision} nublai/pi-herdr-factorio\n`,
 		);
-		const f = world();
-		const native = fileRunFiles(dir);
-		const accounting = native.accounting;
+		const { f, native } = recordingWorld(dir);
 
-		assert.ok(accounting && native.ledger);
-		Object.assign(f.files, {
-			ledger: native.ledger,
-			accounting,
-			timeline: native.timeline,
-			terminalEvidence: native.terminalEvidence,
-			prepareRun: async (
-				input: Parameters<NonNullable<typeof native.prepareRun>>[0],
-			) =>
-				accounting.begin({
-					v: 2,
-					runId: input.runId,
-					startedAt: input.startedAt,
-					context: {
-						kind: "production",
-						trustedCap: 800_000,
-						policy: {
-							workflowSha: input.workflowSha,
-							workflowDigest: input.workflowDigest,
-							gates: {
-								kind: "known",
-								value: {
-									sourceSha: input.workflowSha,
-									digest: digestOf("synthetic-gates"),
-								},
-							},
-							autonomy: {
-								approveMerge: "always",
-								land: "propose",
-								digest: AUTONOMY_DIGEST,
-							},
-						},
-					},
-				}),
-		});
+		assert.ok(native.ledger);
 		f.github.add(labeled(14));
 		f.executor.behaviors = [{ kind: "pass", usage: 10 }];
 		f.executor.acceptBehavior = { kind: "pass", usage: 7 };
