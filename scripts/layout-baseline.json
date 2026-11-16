@@ -71,6 +71,18 @@
 				"from": [],
 				"since": "M5"
 			},
+			"host/cli/cost-evidence.ts": {
+				"owner": "host/cli",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": ["host/cli/cost.ts", "host/cli/scoreboard.ts"],
+				"since": "M3"
+			},
+			"src/core/cost-evidence.ts": {
+				"owner": "src/core",
+				"seats": ["code-review", "security-review", "simplify", "ultrareview"],
+				"from": ["host/cli/cost.ts", "src/views/scoreboard.ts"],
+				"since": "M3"
+			},
 			"src/views/scoreboard.ts": {
 				"owner": "src/views",
 				"seats": ["code-review", "security-review", "simplify"],

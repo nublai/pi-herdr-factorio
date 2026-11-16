@@ -19,12 +19,17 @@ The clean-landing panel reads only `metrics.json`. The controller refreshes it a
 ## Scoreboard
 
 The header's **Scoreboard** link opens `/scoreboard`. `/scoreboard.json`
-returns the same local report as `scoreboard --json --state-dir "$STATE"`.
+returns byte-identical JSON to `scoreboard --json --state-dir "$STATE"`,
+including the default `by: revision` and `selectedGroups`.
 The page covers all retained terminal rows rather than the dashboard's recent
 per-ticket cards. It shows outcomes, ready-PR and landed rates with counts,
 API-equivalent estimates per run and per landed PR, stage tokens and time,
 and coverage. Native disclosures group by controller revision, ticket, stage,
 model and failure class. Tables scroll horizontally on phones.
+Time cells show their source and mark mixed sources as `mixed`. Evidence gaps
+list missing, refused and skipped sources, including per-run read limits.
+The scoreboard resets the 10,000-entry and 48 MiB budgets for each run rather
+than sharing them across history.
 
 All dollar values are labelled `api_equivalent_estimate`. Billed spend stays
 `unavailable`. Unknown readiness, controller revision, time and cost remain

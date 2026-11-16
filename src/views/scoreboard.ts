@@ -1,5 +1,11 @@
 import { timelineFacts, type TimelineRecord } from "../controller/timeline.ts";
 import {
+	addEvidence,
+	costOf,
+	emptyEvidence,
+	type CostEvidence,
+} from "../core/cost-evidence.ts";
+import {
 	STAGE_ORDER,
 	isModelStage,
 	type Stage,
@@ -8,7 +14,6 @@ import {
 import {
 	estimateCost,
 	type CostCoverage,
-	type CostRequest,
 	type Tariff,
 } from "../core/tariff.ts";
 import type { LedgerRow } from "../ledger/schema.ts";
@@ -17,13 +22,8 @@ export type ScoreboardReceipts = {
 	runId: string;
 	title: string | null;
 	timeline: readonly TimelineRecord[] | null;
-	stages: readonly {
-		stage: ModelStage;
-		requests: readonly CostRequest[];
-		missingJournals: number;
-		missingReceipts: number;
-		invalidLines: number;
-	}[];
+	evidenceGaps?: readonly { source: string; reason: string }[];
+	stages: readonly (CostEvidence & { stage: ModelStage })[];
 };
 
 export type ScoreboardBy =
@@ -48,11 +48,32 @@ function amount(values: readonly (number | null)[]): Amount {
 		known: known.length,
 		missing: values.length - known.length,
 		kind:
-			known.length === values.length
+			known.length > 0 && known.length === values.length
 				? "exact"
 				: known.length === 0
 					? "unavailable"
 					: "lower_bound",
+	};
+}
+
+function timeAmount(
+	values: readonly {
+		total: number | null;
+		source: "v6_timeline" | "receipt_wall";
+	}[],
+) {
+	const result = amount(values.map((value) => value.total));
+
+	const sources = [
+		...new Set(
+			values.flatMap((value) => (value.total === null ? [] : [value.source])),
+		),
+	];
+
+	return {
+		...result,
+		kind: sources.length > 1 ? ("mixed" as const) : result.kind,
+		source: sources.length > 1 ? "mixed" : (sources[0] ?? "none"),
 	};
 }
 
@@ -63,61 +84,46 @@ function priced(
 	stage?: Stage,
 	model?: string,
 ) {
-	const requests = evidence
-		.flatMap((entry) => entry.requests)
-		.filter(
-			(request) =>
-				model === undefined || (request.model ?? "unknown") === model,
-		);
+	const retained = emptyEvidence();
 
-	const cost = estimateCost(requests, tariff);
-	cost.coverage.missingJournals = evidence.reduce(
-		(sum, entry) => sum + entry.missingJournals,
-		0,
-	);
-	cost.coverage.missingReceipts = evidence.reduce(
-		(sum, entry) => sum + entry.missingReceipts,
-		0,
-	);
-	cost.coverage.missing += evidence.reduce(
-		(sum, entry) => sum + entry.invalidLines,
-		0,
-	);
+	for (const entry of evidence) addEvidence(retained, entry);
 
 	const ledger =
 		stage === undefined
 			? row.usage.tokens
 			: row.stages.kind === "known"
-				? row.stages.value.find((entry) => entry.stage === stage)?.tokens
+				? (row.stages.value.find((entry) => entry.stage === stage)?.tokens ??
+					null)
 				: null;
 
-	const gap =
-		cost.coverage.missingJournals +
-		cost.coverage.missingReceipts +
-		cost.coverage.missing +
-		cost.coverage.unpriced;
+	const reconciled = costOf(retained, ledger, tariff);
 
-	const difference =
-		model === undefined && ledger != null
-			? ledger.total - cost.tokens.total
-			: null;
+	const cost =
+		model === undefined
+			? reconciled
+			: estimateCost(
+					retained.requests.filter(
+						(request) => (request.model ?? "unknown") === model,
+					),
+					tariff,
+				);
 
-	if (
-		evidence.length === 0 ||
-		(model !== undefined && requests.length === 0) ||
-		gap > 0 ||
-		(model === undefined &&
-			(ledger == null || ledger.kind !== "exact" || difference !== 0))
-	) {
+	if (model !== undefined) {
+		cost.coverage.missingJournals = reconciled.coverage.missingJournals;
+		cost.coverage.missingReceipts = reconciled.coverage.missingReceipts;
+		cost.coverage.missing += retained.invalidLines;
 		cost.coverage.kind =
-			cost.coverage.uncertain > 0 || ledger?.kind === "uncertain"
+			reconciled.coverage.kind === "uncertain"
 				? "uncertain"
-				: cost.coverage.priced > 0
-					? "lower_bound"
-					: "unavailable";
-
-		if (cost.coverage.priced === 0) cost.estimate.usdMicros = null;
+				: cost.coverage.priced === 0
+					? "unavailable"
+					: reconciled.coverage.kind;
 	}
+
+	if (evidence.length === 0) cost.coverage.kind = "unavailable";
+
+	if (cost.coverage.priced === 0 && cost.coverage.kind !== "exact")
+		cost.estimate.usdMicros = null;
 
 	return {
 		...cost,
@@ -125,7 +131,7 @@ function priced(
 			cost.coverage.requests === 0 && cost.coverage.kind !== "exact"
 				? { input: null, output: null, total: null }
 				: cost.tokens,
-		ledgerTokenDifference: difference,
+		ledgerTokenDifference: reconciled.tokenDifference,
 	};
 }
 
@@ -229,7 +235,7 @@ export function scoreboard(
 									stage,
 									requests: [],
 									missingJournals: 1,
-									missingReceipts: 1,
+									missingReceipts: 0,
 									invalidLines: 0,
 								},
 							]
@@ -268,6 +274,7 @@ export function scoreboard(
 			repo: row.repo,
 			issue: row.issue,
 			title: receipt?.title ?? null,
+			evidenceGaps: receipt?.evidenceGaps ?? [],
 			startedAt: row.startedAt.kind === "known" ? row.startedAt.value : null,
 			revision:
 				row.v === 6 && row.controllerRevision.kind === "known"
@@ -317,7 +324,8 @@ export function scoreboard(
 			(cost) => cost?.coverage.kind === "uncertain",
 		)
 			? "uncertain"
-			: costs.every((cost) => cost?.coverage.kind === "exact")
+			: costs.length > 0 &&
+					costs.every((cost) => cost?.coverage.kind === "exact")
 				? "exact"
 				: costs.some((cost) => cost?.estimate.usdMicros != null)
 					? "lower_bound"
@@ -325,6 +333,10 @@ export function scoreboard(
 
 		const coverage = {
 			kind: coverageKind,
+			evidenceGaps: selected.reduce(
+				(sum, run) => sum + run.evidenceGaps.length,
+				0,
+			),
 			runs: Object.fromEntries(
 				["exact", "lower_bound", "uncertain", "unavailable"].map((kind) => [
 					kind,
@@ -387,14 +399,19 @@ export function scoreboard(
 				),
 				kind: coverageKind,
 			},
-			wallMs: amount(
+			wallMs: timeAmount(
 				selected.map((run) =>
 					model !== undefined
-						? null
+						? { total: null, source: "v6_timeline" }
 						: stage === undefined
-							? (run.timeline?.elapsedMs ?? null)
-							: (run.stages.find((entry) => entry.stage === stage)?.wallMs
-									.total ?? null),
+							? {
+									total: run.timeline?.elapsedMs ?? null,
+									source: "v6_timeline",
+								}
+							: (run.stages.find((entry) => entry.stage === stage)?.wallMs ?? {
+									total: null,
+									source: "receipt_wall",
+								}),
 				),
 			),
 			timeline: Object.fromEntries(

@@ -208,6 +208,33 @@ test("scoreboard uses v6 timeline stage intervals and category totals without gu
 		100,
 	);
 	assert.equal(result.summary.readyPr.rate, 1);
+
+	assert.ok(previous.stages.kind === "known");
+
+	const old = {
+		...previous,
+		runId: digestOf("old"),
+		stages: {
+			kind: "known",
+			value: previous.stages.value.map((stage) => ({
+				...stage,
+				wallMs: { kind: "exact", unit: "milliseconds", total: 50 },
+			})),
+		},
+	} satisfies LedgerRow;
+
+	const mixed = scoreboard([run, old], [retained, receipt(old)], PINNED_TARIFF);
+	assert.equal(
+		mixed.groups.stage.find((entry) => entry.key === "build")?.wallMs.kind,
+		"mixed",
+	);
+
+	const time = mixed.groups.stage.find(
+		(entry) => entry.key === "build",
+	)?.wallMs;
+
+	assert.ok(time && "source" in time);
+	assert.equal(time.source, "mixed");
 });
 
 test("scoreboard groups recorded causal failures without treating a PR as readiness", () => {
@@ -273,4 +300,34 @@ test("scoreboard preserves partial estimates and uncertain request coverage", ()
 
 	assert.equal(uncertain.summary.coverage.kind, "uncertain");
 	assert.equal(uncertain.runs[0]?.cost.ledgerTokenDifference, 800);
+	assert.equal(uncertain.groups.model[0]?.coverage.kind, "uncertain");
+});
+
+test("model coverage reconciles all journals against charged tokens before attribution", () => {
+	for (const kind of ["exact", "lower_bound"] as const) {
+		const run = row();
+
+		const tokens: LedgerRow["usage"]["tokens"] =
+			kind === "exact"
+				? { kind, unit: "tokens", total: 2000 }
+				: { kind, unit: "tokens", total: 2000, reason: "receipt_missing" };
+
+		const result = scoreboard(
+			[{ ...run, usage: { ...run.usage, tokens } }],
+			[receipt(run)],
+			PINNED_TARIFF,
+		);
+
+		assert.equal(result.summary.coverage.kind, "lower_bound");
+		assert.equal(result.groups.model[0]?.coverage.kind, "lower_bound");
+		assert.equal(result.groups.model[0]?.estimate.usdMicros, 4000);
+	}
+});
+
+test("empty scoreboard never claims exact coverage, tokens or time", () => {
+	const result = scoreboard([], [], PINNED_TARIFF);
+	assert.equal(result.summary.coverage.kind, "unavailable");
+	assert.equal(result.summary.tokens.kind, "unavailable");
+	assert.equal(result.summary.wallMs.kind, "unavailable");
+	assert.equal(result.summary.timeline.modelMs?.kind, "unavailable");
 });

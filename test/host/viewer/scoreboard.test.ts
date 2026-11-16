@@ -7,13 +7,14 @@ import {
 	writeFile,
 	rm,
 	symlink,
+	truncate,
 } from "node:fs/promises";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { test } from "node:test";
 import { parseLedger, ledgerRowOf } from "../../../src/ledger/schema.ts";
-import { digestOf } from "../../../src/core/run.ts";
+import { digestOf, runIdOf } from "../../../src/core/run.ts";
 import { EXE_DEV_PLATFORM } from "../../../src/trust/platform.ts";
 import { startViewer } from "../../../host/viewer/server.ts";
 
@@ -32,7 +33,17 @@ async function fixture() {
 	const saved = ledgerRowOf({
 		...original.row,
 		startedAt: { kind: "known", value: "2026-11-15T00:00:00Z" },
-		stages: { kind: "known", value: [] },
+		stages: {
+			kind: "known",
+			value: [
+				{
+					stage: "build",
+					wallMs: { kind: "exact", unit: "milliseconds", total: 100 },
+					attempts: { kind: "unavailable", reason: "receipt_missing" },
+					tokens: { kind: "exact", unit: "tokens", total: 1200 },
+				},
+			],
+		},
 		models: { kind: "unavailable", reason: "receipt_missing" },
 	});
 
@@ -138,7 +149,6 @@ test("scoreboard viewer shares HTTP guards, escapes issue titles and matches the
 		const before = digestOf(await readFile(f.rowPath));
 		const output = cli(f.root);
 		assert.equal(output.status, 0, output.stderr);
-		const report = JSON.parse(output.stdout);
 		const page = await get(server.port, "/factory/scoreboard");
 		assert.equal(page.code, 200);
 		assert.ok(
@@ -155,11 +165,10 @@ test("scoreboard viewer shares HTTP guards, escapes issue titles and matches the
 		);
 		assert.equal(page.headers["access-control-allow-origin"], undefined);
 		const json = await get(server.port, "/scoreboard.json");
-		const expected = digestOf(JSON.stringify(report.summary));
-		assert.equal(
-			digestOf(JSON.stringify(JSON.parse(json.body).summary)),
-			expected,
-		);
+		assert.equal(digestOf(json.body), digestOf(output.stdout));
+		assert.ok(page.body.includes("&lt;$0.01"));
+		assert.ok(!page.body.includes("$0.00"));
+		assert.ok(page.body.includes("receipt_wall"));
 
 		for (const path of [
 			"/scoreboard",
@@ -179,6 +188,147 @@ test("scoreboard viewer shares HTTP guards, escapes issue titles and matches the
 		}
 
 		assert.equal(digestOf(await readFile(f.rowPath)), before);
+	} finally {
+		await server.close();
+		await rm(f.root, { recursive: true, force: true });
+	}
+});
+
+for (const entries of [0, 1300])
+	test(`scoreboard grows past the old byte cap with ${entries * 8} extra entries without dropping evidence`, async () => {
+		const f = await fixture();
+
+		try {
+			for (let n = 0; n < 8; n++) {
+				const identity = {
+					repo: f.row.repo,
+					issue: f.row.issue,
+					eventId: String(10000 + n),
+				};
+
+				const saved = ledgerRowOf({
+					...f.row,
+					...identity,
+					runId: runIdOf(identity),
+				});
+
+				const stage = join(f.root, "stages", saved.row.runId, "build-1");
+				await mkdir(stage, { recursive: true });
+				await mkdir(join(f.root, "ledger", saved.row.runId), {
+					recursive: true,
+				});
+				await writeFile(
+					join(f.root, "ledger", saved.row.runId, "row.json"),
+					saved.bytes,
+				);
+				await writeFile(
+					join(stage, "receipt.json"),
+					JSON.stringify({
+						version: 1,
+						runId: saved.row.runId,
+						stage: "build",
+						models: { requested: "openai/gpt-6.1-sol" },
+					}),
+				);
+				await writeFile(
+					join(stage, "egress.requests.jsonl"),
+					(await readFile(join(f.stage, "egress.requests.jsonl"), "utf8")) +
+						" ".repeat(7 * 1024 * 1024),
+				);
+
+				for (let i = 0; i < entries; i++)
+					await mkdir(join(stage, `unrelated-${i}`));
+			}
+
+			const result = cli(f.root);
+			assert.equal(result.status, 0, result.stdout + result.stderr);
+			const report = JSON.parse(result.stdout);
+			assert.equal(report.summary.runs, 9);
+			assert.equal(report.summary.estimate.usdMicros, 36000);
+			assert.equal(report.summary.coverage.missingJournals, 0);
+		} finally {
+			await rm(f.root, { recursive: true, force: true });
+		}
+	});
+
+test("scoreboard reports a skipped directory as a per-run coverage gap", async () => {
+	const f = await fixture();
+
+	try {
+		for (let i = 0; i < 10001; i++) await mkdir(join(f.stage, `entry-${i}`));
+
+		const output = cli(f.root);
+		assert.equal(output.status, 0, output.stderr);
+		const report = JSON.parse(output.stdout);
+		assert.equal(report.summary.coverage.kind, "unavailable");
+		assert.ok(
+			report.runs[0].evidenceGaps.some((gap: { reason: string }) =>
+				gap.reason.includes("per-run entry limit"),
+			),
+		);
+	} finally {
+		await rm(f.root, { recursive: true, force: true });
+	}
+});
+
+test("scoreboard reports skipped oversized journals as explicit read gaps", async () => {
+	const f = await fixture();
+
+	try {
+		await truncate(join(f.stage, "egress.requests.jsonl"), 8 * 1024 * 1024 + 1);
+		const output = cli(f.root);
+		assert.equal(output.status, 0, output.stderr);
+		const report = JSON.parse(output.stdout);
+		assert.equal(report.summary.coverage.kind, "unavailable");
+		assert.ok(
+			report.runs[0].evidenceGaps.some(
+				(gap: { source: string; reason: string }) =>
+					gap.source.endsWith("egress.requests.jsonl") &&
+					gap.reason.includes("limit"),
+			),
+		);
+	} finally {
+		await rm(f.root, { recursive: true, force: true });
+	}
+});
+
+test("scoreboard and cost agree when a recorded stage has no directory", async () => {
+	const f = await fixture();
+
+	try {
+		await rm(f.stage, { recursive: true });
+		const cost = JSON.parse(cli(f.root, [], "cost").stdout);
+		const report = JSON.parse(cli(f.root).stdout);
+		assert.equal(cost.coverage.missingJournals, 1);
+		assert.equal(cost.coverage.missingReceipts, 0);
+		assert.equal(
+			report.summary.coverage.missingJournals,
+			cost.coverage.missingJournals,
+		);
+		assert.equal(
+			report.summary.coverage.missingReceipts,
+			cost.coverage.missingReceipts,
+		);
+	} finally {
+		await rm(f.root, { recursive: true, force: true });
+	}
+});
+
+test("empty scoreboard page shows no landed-PR ratio or exact coverage", async () => {
+	const f = await fixture();
+	await rm(f.rowPath);
+
+	const server = await startViewer({
+		stateDir: f.root,
+		port: 0,
+		platform: EXE_DEV_PLATFORM,
+	});
+
+	try {
+		const page = await get(server.port, "/scoreboard");
+		assert.equal(page.code, 200);
+		assert.ok(page.body.includes("<td>none</td>"));
+		assert.ok(!page.body.includes("· exact"));
 	} finally {
 		await server.close();
 		await rm(f.root, { recursive: true, force: true });

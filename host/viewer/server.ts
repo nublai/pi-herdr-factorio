@@ -262,7 +262,11 @@ export async function startViewer(options: ViewerOptions) {
 				const report = await readScoreboard(stateDir);
 
 				if (path.endsWith(".json"))
-					send(200, JSON.stringify(report), "application/json; charset=utf-8");
+					send(
+						200,
+						`${JSON.stringify(report, null, 2)}\n`,
+						"application/json; charset=utf-8",
+					);
 				else {
 					const { renderScoreboard } = await import("./scoreboard.ts");
 					send(
