@@ -5,7 +5,7 @@ Each path below is authoritative, current, later, background or historical. Read
 | Path | Status | What it holds |
 | --- | --- | --- |
 | `decisions.tsv` | Authoritative | Every decision, grant and verdict, oldest first. Append only. The coordinator adds rows with the pstack `show-me-your-work` skill's `log.sh`. `npm run check:decisions` checks the format and that the committed prefix is unchanged. |
-| `plans/active/` | Current | Plans for programs in progress. `factory-v1.md` is the factory program, PRs F04a to F13. |
+| `plans/active/` | Current | Plans for programs in progress. `factory-v1.md` is the factory program, PRs F04a to F13. `factory-measure.md` is the measurement program, PRs M1 to M6. |
 | `plans/later/` | Later | Plans that wait on other work, and closed programs kept for their evidence. `exmach-move.md` and `factorio-vm.md` are host moves. `codebase-layout.md` is the layout program, PRs L00 to L15, with its completed-PR evidence and the owner's post-program checklist. |
 | `operations/` | Current | Runbooks and contracts for each part of the factory. Tests and `.github/factory/WORKFLOW.md` read some of these files by path. |
 | `architecture.md` | Background | The v1 architecture and the owner decisions behind it. Its definition of done, shape, data, stages, sandbox, and checkpoint sections explain the design. Its status notes, package layout, build order, and VM sections are out of date, so it is not current guidance. The code and `operations/` win when they disagree. Root `DESIGN.md` is the viewer's visual design. |
