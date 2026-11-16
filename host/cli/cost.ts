@@ -17,6 +17,7 @@ import {
 	type CostEstimate,
 } from "../../src/core/tariff.ts";
 import { frozenRowOf, type LedgerRow } from "../../src/ledger/schema.ts";
+import { SPECIFY_SESSIONS } from "../sandbox/receipts.ts";
 import { EXIT, type CliIo } from "./platform.ts";
 
 type Evidence = {
@@ -123,11 +124,31 @@ async function executionEvidence(
 		fieldOf(receipt, "stage") === stage;
 
 	if (!validReceipt) evidence.missingReceipts += 1;
-	const journal = await optionalRead(join(dir, "egress.requests.jsonl"));
 
-	const children = (await directories(dir)).filter(
-		(name) => name !== "sessions" && !/^agent-[0-9]+$/.test(name),
+	const leaves: readonly string[] = [
+		...SPECIFY_SESSIONS,
+		"code-review",
+		"security-review",
+		"simplify",
+		"ultrareview",
+		"second-judge",
+	];
+
+	const children = (await directories(dir)).filter((name) =>
+		leaves.includes(name),
 	);
+
+	if (children.length > 0) {
+		for (const child of children)
+			addEvidence(
+				evidence,
+				await executionEvidence(join(dir, child), runId, stage),
+			);
+
+		return evidence;
+	}
+
+	const journal = await optionalRead(join(dir, "egress.requests.jsonl"));
 
 	if (journal !== null) {
 		for (const line of journal.split("\n")) {
@@ -141,13 +162,7 @@ async function executionEvidence(
 				model: modelOf(settlement, validReceipt ? receipt : null),
 			})),
 		);
-	} else if (children.length === 0) evidence.missingJournals += 1;
-
-	for (const child of children)
-		addEvidence(
-			evidence,
-			await executionEvidence(join(dir, child), runId, stage),
-		);
+	} else evidence.missingJournals += 1;
 
 	return evidence;
 }
@@ -343,7 +358,7 @@ export async function runCostCli(
 	try {
 		const stateDir = resolve(values["state-dir"]);
 
-		if (!(await stat(stateDir)).isDirectory())
+		if (!(await stat(stateDir).catch(() => null))?.isDirectory())
 			throw new Error("state_unavailable");
 		const rows: LedgerRow[] = [];
 
@@ -354,7 +369,7 @@ export async function runCostCli(
 				join(stateDir, "ledger", runId, "row.json"),
 			);
 
-			if (bytes === null) throw new Error("terminal_row_unavailable");
+			if (bytes === null) continue;
 			const saved = frozenRowOf(Buffer.from(bytes));
 
 			if (saved === null || saved.row.runId !== runId)

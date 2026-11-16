@@ -329,10 +329,12 @@ The command reads frozen terminal rows from `<state>/ledger/<runId>/row.json`
 and request journals under `<state>/stages/<runId>/`. It makes no GitHub or
 model call and writes nothing, including when the state is read-only. It
 reports only terminal runs with local rows, not active runs, maintenance,
-measurement jobs or the remote ledger's older history. An unreadable or invalid
-terminal row exits 1 instead of omitting a run. Stage receipts supply model
-identities, not additive charges. Aggregate receipts and their leaves are never
-counted together. Agent and retained-session directories are not executions.
+measurement jobs or the remote ledger's older history. Directories without a
+frozen row are skipped, including pending and blocked runs. An unreadable or
+invalid existing row exits 1 instead of omitting a run. Stage receipts supply
+model identities, not additive charges. When named execution leaves exist, only
+their journals count, never the aggregate directory's journal. Agent and
+retained-session directories are not executions.
 
 Every report, run and stage includes:
 
@@ -376,8 +378,11 @@ means an unsettled request or uncertain ledger charge exists. `lower_bound`
 means other evidence is incomplete but some requests are priced. `unavailable`
 means no estimate can be made for that incomplete group. These labels describe
 coverage, not confidence in billed spend. The no-cache estimate can overstate
-actual API charges. Unknown charges never become zero, and uncertain request
-bounds never enter the estimate. Separate counts remain visible even when
+or understate actual API charges. Cache reads can cost less than plain input,
+while Anthropic cache writes can cost more. Sonnet 5.5 cache writes cost $2.50
+per million tokens against $2 for plain input in the pinned tariff.
+Unknown charges never become zero, and uncertain request bounds never enter
+the estimate. Separate counts remain visible even when
 `uncertain` takes precedence over another coverage gap.
 
 The read-only pilot snapshot from 2026-11-16 contains 13 terminal runs,

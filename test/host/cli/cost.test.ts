@@ -192,6 +192,89 @@ describe("cost CLI", () => {
 		assert.equal(digestOf(readFileSync(journal)), before);
 	});
 
+	it("skips pending and blocked ledger directories with no frozen row, including with --run", () => {
+		const { state, first } = fixture();
+		put(join(state, "ledger", "a".repeat(64), "terminal.json"), "{}\n");
+		put(join(state, "ledger", "b".repeat(64), "blocked.json"), "{}\n");
+
+		for (const extra of [[], ["--run", first.row.runId]]) {
+			const result = cli(state, extra);
+			assert.equal(result.status, 0, result.stdout + result.stderr);
+			const report = JSON.parse(result.stdout);
+			assert.equal(report.runs.length, extra.length === 0 ? 2 : 1);
+			assert.equal(report.estimate.usdMicros, 4_000);
+		}
+	});
+
+	it("counts only named execution leaves when an aggregate also has a journal", () => {
+		const { state, first, journal } = fixture();
+		const dir = dirname(journal);
+		const receipt = readFileSync(join(dir, "receipt.json"), "utf8");
+		const bytes = readFileSync(journal, "utf8");
+
+		for (const child of ["draft", "unrelated"]) {
+			put(join(dir, child, "receipt.json"), receipt);
+			put(join(dir, child, "egress.requests.jsonl"), bytes);
+		}
+
+		const result = cli(state, ["--run", first.row.runId]);
+		assert.equal(result.status, 0, result.stderr);
+		const run = JSON.parse(result.stdout).runs[0];
+		assert.equal(run.coverage.requests, 1);
+		assert.equal(run.coverage.priced, 1);
+		assert.equal(run.coverage.kind, "exact");
+		assert.equal(run.tokens.total, 1_200);
+		assert.equal(run.estimate.usdMicros, 4_000);
+		assert.equal(run.stages[0].estimate.usdMicros, 4_000);
+	});
+
+	it("validates the pinned tariff only for cost, not other CLI commands", () => {
+		const preload = `data:text/javascript,${encodeURIComponent(`
+			import { registerHooks } from "node:module";
+			registerHooks({
+				load(url, context, nextLoad) {
+					if (url.endsWith("/src/core/tariff.json"))
+						return { format: "json", source: "{}", shortCircuit: true };
+					return nextLoad(url, context);
+				}
+			});
+		`)}`;
+
+		for (const command of [
+			["platform", "--env"],
+			["cost", "--json", "--state-dir", temp()],
+		]) {
+			const result = spawnSync(
+				process.execPath,
+				["--import", preload, resolve("host/cli/index.ts"), ...command],
+				{
+					encoding: "utf8",
+					timeout: 30_000,
+					env: { ...process.env, FACTORY_PLATFORM: "exe-dev" },
+				},
+			);
+
+			if (command[0] === "cost") {
+				assert.equal(result.status, 1);
+				assert.match(result.stderr, /tariff_digest_mismatch/);
+			} else {
+				assert.equal(result.status, 0, result.stderr);
+				assert.match(result.stdout, /FACTORY_PLATFORM=/);
+			}
+		}
+	});
+
+	it("reports state_unavailable for both a missing path and a file", () => {
+		const state = temp();
+		put(join(state, "file"), "not a directory\n");
+
+		for (const name of ["missing", "file"]) {
+			const result = cli(join(state, name));
+			assert.equal(result.status, 1);
+			assert.equal(JSON.parse(result.stdout).error, "state_unavailable");
+		}
+	});
+
 	it("filters by a unique run prefix and refuses an absent run", () => {
 		const { state, first } = fixture();
 		const result = cli(state, ["--run", first.row.runId.slice(0, 8)]);

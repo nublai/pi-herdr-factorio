@@ -33,7 +33,6 @@ import { runGatesCli } from "../gates/gates.ts";
 import { runViewerCli } from "../viewer/server.ts";
 import { runBenchCli } from "./bench.ts";
 import { runCadenceCli } from "./cadence.ts";
-import { runCostCli } from "./cost.ts";
 import { runMeasurementCli } from "./measurement.ts";
 import { runMetricsCli } from "./metrics.ts";
 import { runOwnerFeedCli } from "./owner-feed.ts";
@@ -344,7 +343,11 @@ export async function runCli(
 
 	if (argv[0] === "replay") return runReplayCli(argv.slice(1), io, platform);
 
-	if (argv[0] === "cost") return runCostCli(argv.slice(1), io);
+	if (argv[0] === "cost") {
+		const { runCostCli } = await import("./cost.ts");
+
+		return runCostCli(argv.slice(1), io);
+	}
 
 	if (argv[0] === "metrics") return runMetricsCli(argv.slice(1), io, platform);
 
