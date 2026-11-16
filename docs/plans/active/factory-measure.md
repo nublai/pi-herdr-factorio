@@ -314,7 +314,7 @@ Each live lane runs at the PR head. Drive the surface with the CLI and viewer re
 
 **Build.**
 
-- [ ] Define a variant in `src/bench/variant.ts`. It names one changed dimension, a stage's model, a stage's thinking, a skill file or the factory revision, and pins everything else.
+- [ ] Define a variant in `src/bench/variant.ts`. It names exactly one declared dimension, a stage's model, one replaced file under `skills/` with its digest, or `buildRevision` set to `on` or `off`, and pins everything else. Stage thinking and arbitrary factory revisions are out of v1.
 - [ ] Add `bench run --bundle <dir> --variant <file> --state-dir <scratch> --token-cap <n>`. It runs build, visible tests, the trusted gates in the pinned image, held-out validation and both review judges against the bundle, with no GitHub access and no markers. It reuses the sandbox, gate and review components and writes a trial record with outcome, tokens, the M1 estimate and wall time.
 - [ ] Refuse to start when the bench host's `factory.service` is present, when the state directory is a production one, or when the cap would be exceeded.
 
@@ -330,9 +330,9 @@ Each live lane runs at the PR head. Drive the surface with the CLI and viewer re
 **Verify, live.** Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked. Ten lanes on `task:qa` at the PR head, per the boot recipe.
 
 - [ ] Lane 1. Regression lane against trunk. Trunk lacks `bench run`, so record its usage error and gate one baseline trial of the #430 bundle on the bench host. Save `trial-430.json`. Pass when trunk refuses and the head trial completes with an outcome.
-- [ ] Lane 2. Read the bench host's gateway audit for that trial. Save `audit-430.txt`. Pass when only model routes appear and no GitHub route does.
+- [ ] Lane 2. Read the bench host's gateway audit for that trial. Save `audit-430.txt`. Pass when no GitHub route appears, only model routes and the read-only npm registry route are used, and `github.int` still answers 403.
 - [ ] Lane 3. List the builder sandbox's visible files during the trial. Save `sandbox-files.txt`. Pass when no `oracle/` file is visible.
-- [ ] Lane 4. Run a trial with a token cap below one build. Save `capped.json`. Pass when it ends `budget_exhausted` and spends no more than the cap.
+- [ ] Lane 4. Run a trial with a token cap below one build. Save `capped.json`. Pass when it ends `budget_exhausted` and the overrun is no more than one request's input.
 - [ ] Lane 5. Run a trial with a two-dimension variant. Save `bad-variant.txt`. Pass when it refuses before any model call.
 - [ ] Lane 6. Point `--state-dir` at a copy of production state. Save `prod-state.txt`. Pass when it refuses.
 - [ ] Lane 7. Run the #399 bundle, which originally landed. Save `trial-399.json`. Pass when the trial reaches review with gates passing or records a stated failure.
@@ -345,7 +345,7 @@ Each live lane runs at the PR head. Drive the surface with the CLI and viewer re
 - [ ] Metric. Trial wall time per stage for the #430 bundle, against the original production run `1bce1bf2` stage times.
 - [ ] Probe. Three baseline trials of the #430 bundle on the bench host, reading each trial record's stage times.
 - [ ] Baseline. Record the production run's stage times from its receipts first.
-- [ ] Rule. Fail when any stage's median trial time exceeds 1.5 times the production stage time, or a trial exceeds the production build wall.
+- [ ] Rule. Fail when any stage's median trial time exceeds 1.5 times production's time for that stage, or any stage exceeds its configured wall limit.
 
 **Review gate.** None. M5 is not review-gated.
 
@@ -369,7 +369,7 @@ Each live lane runs at the PR head. Drive the surface with the CLI and viewer re
 
 - [ ] Add `bench compare <trials...>`. It pairs trials by task, refuses pairs whose variants differ in an undeclared dimension, and reports per variant the pass rate with its count, the median tokens, the median estimate and the per-task differences. It never reports a ratio for unlike tasks.
 - [ ] Run experiment one, repeatability. Run the baseline variant three times on each of the 7 bundles.
-- [ ] Run experiment two, #813. Run the factory revision before #813 (`d22caaa`) and at #813 (`3183723`) three times each on the #430 bundle.
+- [ ] Run experiment two, #813. Run the #430 bundle with `buildRevision` off and on, three trials each.
 
 **You see.**
 
@@ -383,8 +383,8 @@ Each live lane runs at the PR head. Drive the surface with the CLI and viewer re
 
 - [ ] Lane 1. Regression lane against trunk. Trunk lacks `bench compare`, so record its usage error and gate the head's comparison of experiment one. Save `compare-repeat.txt`. Pass when trunk refuses and the head reports all 7 tasks with three trials each.
 - [ ] Lane 2. Recompute experiment one's pass rates by hand from the trial records. Save `hand-check.txt`. Pass when they match the comparison.
-- [ ] Lane 3. Compare experiment two. Save `compare-813.txt`. Pass when it reports both revisions on the #430 task with counts and per-trial outcomes.
-- [ ] Lane 4. Read experiment two's build receipts. Save `revision-exposure.txt`. Pass when it states how many trials fired the #813 revision, using M2's `draftRuns`.
+- [ ] Lane 3. Compare experiment two. Save `compare-813.txt`. Pass when it reports `buildRevision` off and on for the #430 task with three trials each and per-trial outcomes.
+- [ ] Lane 4. Read experiment two's build receipts. Save `revision-exposure.txt`. Pass when it separates `buildRevision` off and on and states how many on trials fired the #813 revision, using M2's `draftRuns`.
 - [ ] Lane 5. Compare a trial pair with two different changed dimensions. Save `refuse.txt`. Pass when compare refuses and names both dimensions.
 - [ ] Lane 6. Compare with one task missing on one side. Save `missing-task.txt`. Pass when the task is reported missing, not dropped.
 - [ ] Lane 7. Sum the experiments' tokens. Save `spend.txt`. Pass when the total is within the owner's spend grant.

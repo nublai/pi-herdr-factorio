@@ -23,6 +23,54 @@
 			"export": "reviewSeats"
 		},
 		"files": {
+			"src/bench/variant.ts": {
+				"owner": "src/bench",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "M5"
+			},
+			"src/bench/trial.ts": {
+				"owner": "src/bench",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "M5"
+			},
+			"host/bench/archive.ts": {
+				"owner": "host/bench",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "M5"
+			},
+			"host/bench/run.ts": {
+				"owner": "host/bench",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "M5"
+			},
+			"test/src/bench/variant.test.ts": {
+				"owner": "src/bench",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "M5"
+			},
+			"test/src/bench/trial.test.ts": {
+				"owner": "src/bench",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "M5"
+			},
+			"test/host/bench/run.test.ts": {
+				"owner": "host/bench",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "M5"
+			},
+			"test/host/bench/fixtures.ts": {
+				"owner": "host/bench",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "M5"
+			},
 			"src/bench/bundle.ts": {
 				"owner": "src/bench",
 				"seats": ["code-review", "security-review", "simplify"],
@@ -2891,6 +2939,24 @@
 		}
 	},
 	"readers": [
+		{
+			"id": "bench-source-root",
+			"kind": "paths",
+			"reader": "host/bench/run.ts",
+			"tokens": { "new URL(\"../..\", import.meta.url)": 1 },
+			"targets": [{ "path": "host", "type": "dir" }, { "path": "src", "type": "dir" }]
+		},
+		{
+			"id": "test-reads-bench-gate-fixtures",
+			"kind": "paths",
+			"reader": "test/host/bench/fixtures.ts",
+			"tokens": { "new URL(\"../../..\", import.meta.url)": 1 },
+			"targets": [
+				{ "path": ".github/factory/gates/freeze.mjs", "type": "file" },
+				{ "path": ".github/factory/gates/reporter.mjs", "type": "file" },
+				{ "path": ".github/factory/gates/scan-rules.json", "type": "file" }
+			]
+		},
 		{
 			"id": "test-reads-bench-cli",
 			"kind": "paths",

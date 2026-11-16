@@ -3,11 +3,13 @@ import { parseArgs } from "node:util";
 import { isDigest } from "../../src/core/run.ts";
 import type { PlatformProfile } from "../../src/trust/platform.ts";
 import { exportBundle, verifyBundle } from "../bench/export.ts";
+import type { BenchRuntime } from "../bench/run.ts";
 import { type CliIo, EXIT } from "./platform.ts";
 
 const USAGE = `Usage:
   bench export --state-dir <dir> --run <id> --out <dir> [--repository <checkout>]
-  bench verify <bundle>`;
+  bench verify <bundle>
+  bench run --bundle <dir> --variant <file> --state-dir <scratch> --token-cap <n> [--assets-dir <dir>]`;
 
 function parseBenchArgs(argv: readonly string[]) {
 	return parseArgs({
@@ -19,6 +21,10 @@ function parseBenchArgs(argv: readonly string[]) {
 			run: { type: "string" },
 			out: { type: "string" },
 			repository: { type: "string" },
+			bundle: { type: "string" },
+			variant: { type: "string" },
+			"token-cap": { type: "string" },
+			"assets-dir": { type: "string" },
 		},
 	});
 }
@@ -27,6 +33,7 @@ export async function runBenchCli(
 	argv: readonly string[],
 	io: CliIo,
 	platform: PlatformProfile,
+	runtime?: BenchRuntime,
 ): Promise<number> {
 	let args: ReturnType<typeof parseBenchArgs>;
 
@@ -48,7 +55,10 @@ export async function runBenchCli(
 		isDigest(runId) &&
 		Boolean(values["state-dir"]) &&
 		Boolean(values.out) &&
-		values.repository !== "";
+		values.repository !== "" &&
+		Object.keys(values).every((key) =>
+			["state-dir", "run", "out", "repository"].includes(key),
+		);
 
 	const isVerify =
 		command === "verify" &&
@@ -56,13 +66,53 @@ export async function runBenchCli(
 		Boolean(bundle) &&
 		Object.keys(values).length === 0;
 
-	if (!isExport && !isVerify) {
+	const cap = Number(values["token-cap"]);
+
+	const isRun =
+		command === "run" &&
+		positionals.length === 1 &&
+		Boolean(values.bundle) &&
+		Boolean(values.variant) &&
+		Boolean(values["state-dir"]) &&
+		/^[1-9][0-9]*$/.test(values["token-cap"] ?? "") &&
+		Number.isSafeInteger(cap) &&
+		Object.keys(values).every((key) =>
+			["bundle", "variant", "state-dir", "token-cap", "assets-dir"].includes(
+				key,
+			),
+		);
+
+	if (!isExport && !isVerify && !isRun) {
 		io.stderr(`${USAGE}\n`);
 
 		return EXIT.usage;
 	}
 
 	try {
+		if (
+			isRun &&
+			values.bundle !== undefined &&
+			values.variant !== undefined &&
+			values["state-dir"] !== undefined
+		) {
+			const { runBench } = await import("../bench/run.ts");
+			io.stdout(
+				await runBench(
+					{
+						bundle: values.bundle,
+						variantFile: values.variant,
+						stateDir: values["state-dir"],
+						tokenCap: cap,
+						platform,
+						env: io.env,
+					},
+					runtime ?? { exec: io.exec, assetsDir: values["assets-dir"] },
+				),
+			);
+
+			return EXIT.ok;
+		}
+
 		const result =
 			command === "verify" && bundle !== undefined
 				? verifyBundle(bundle)
