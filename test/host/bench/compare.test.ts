@@ -119,7 +119,53 @@ describe("bench compare and spend CLI", () => {
 		assert.equal(value.incompleteTrials, 2);
 		assert.equal(value.unavailableTrials, 1);
 		assert.equal(value.billedSpend, "unavailable");
-		assert.match(f.run("compare", incomplete).stderr, /trial_incomplete/);
+		const compared = f.run("compare", complete, incomplete, empty);
+		assert.equal(compared.status, 0, compared.stderr);
+		assert.equal(JSON.parse(compared.stdout).excludedIncomplete.n, 2);
+		assert.deepEqual(
+			JSON.parse(compared.stdout).excludedIncomplete.directories,
+			[incomplete, empty],
+		);
+		const onlyIncomplete = f.run("compare", incomplete);
+		assert.equal(onlyIncomplete.status, 0, onlyIncomplete.stderr);
+		assert.equal(JSON.parse(onlyIncomplete.stdout).excludedIncomplete.n, 1);
+	});
+	it("spend labels a partially unreadable stage set lower_bound and names the missing stage", (t) => {
+		const f = fixture(t);
+		const dir = join(f.root, "partial");
+		mkdirSync(join(dir, "claim"), { recursive: true });
+		writeFileSync(
+			join(dir, "claim/binding.json"),
+			JSON.stringify({
+				kind: "factory_benchmark_state",
+				version: 1,
+				bundleDigest: syntheticTrial().bundleDigest,
+				variantDigest: syntheticTrial().variantDigest,
+				tokenCap: 540000,
+			}),
+			{ mode: 0o600 },
+		);
+		mkdirSync(join(dir, "runtime/build"), { recursive: true });
+		mkdirSync(join(dir, "runtime/second-judge/egress.requests.jsonl"), {
+			recursive: true,
+		});
+		writeFileSync(
+			join(dir, "runtime/build/egress.requests.jsonl"),
+			JSON.stringify({
+				kind: "result",
+				req: 1,
+				route: "model-openai",
+				inputTokens: 20,
+				outputTokens: 0,
+				status: 200,
+			}),
+		);
+		const result = f.run("spend", dir);
+		assert.equal(result.status, 0, result.stderr);
+		const trial = JSON.parse(result.stdout).trials[0];
+		assert.equal(trial.chargedTokens, 20);
+		assert.equal(trial.coverage, "lower_bound");
+		assert.deepEqual(trial.unavailableStages, ["second-judge"]);
 	});
 	it("does not add runtime charges to a completed record or count copied trial IDs twice", (t) => {
 		const f = fixture(t);

@@ -25,6 +25,69 @@ const journal = [
 	.join("\n");
 
 describe("BenchTrial parser", () => {
+	it("rejects coverage kinds that contradict counts or claim unavailable with a numeric estimate", () => {
+		const trial = syntheticTrial();
+		const missing = syntheticTrial({ missing: true });
+		const cost = trial.accounting.cost;
+
+		for (const value of [
+			{ ...cost, coverage: { ...cost.coverage, kind: "uncertain" } },
+			{ ...cost, coverage: { ...cost.coverage, kind: "lower_bound" } },
+			{ ...cost, coverage: { ...cost.coverage, kind: "unavailable" } },
+			{
+				...missing.accounting.cost,
+				coverage: { ...missing.accounting.cost.coverage, kind: "exact" },
+			},
+			{
+				...cost,
+				coverage: { ...cost.coverage, kind: "lower_bound", priced: 2 },
+			},
+		])
+			assert.throws(
+				() =>
+					parseBenchTrial(
+						JSON.stringify({
+							...trial,
+							accounting: { ...trial.accounting, cost: value },
+						}),
+					),
+				/trial_cost_mismatch/,
+			);
+		assert.equal(
+			parseBenchTrial(JSON.stringify(missing)).accounting.cost.estimate
+				.usdMicros,
+			null,
+		);
+	});
+	it("rejects fallbackRecord because the bench writer never emits it", () => {
+		const trial = syntheticTrial();
+
+		const seat = {
+			seat: "code-review",
+			findings: [],
+			judgments: [],
+			requested: "openai/gpt-6.1-sol",
+			observed: null,
+			label: "same family",
+			fallback: false,
+			tokens: 0,
+		};
+
+		assert.equal(
+			parseBenchTrial(JSON.stringify({ ...trial, judges: [seat] })).judges
+				.length,
+			1,
+		);
+
+		for (const fallbackRecord of [null, 17, {}, { requested: "bogus" }])
+			assert.throws(
+				() =>
+					parseBenchTrial(
+						JSON.stringify({ ...trial, judges: [{ ...seat, fallbackRecord }] }),
+					),
+				/unexpected_keys/,
+			);
+	});
 	it("rejects malformed nested records, duplicate keys and broken semantic bindings", () => {
 		const trial = syntheticTrial();
 		const cost = trial.accounting.cost;

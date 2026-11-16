@@ -104,9 +104,11 @@ export async function runBenchCli(
 
 			const paths = positionals.slice(1);
 
+			const compared = command === "compare" ? readBenchTrials(paths) : null;
+
 			const report =
-				command === "compare"
-					? compareTrials(readBenchTrials(paths))
+				compared !== null
+					? compareTrials(compared.trials, compared.incompleteTrials)
 					: await benchSpend(paths);
 
 			io.stdout(`${JSON.stringify(report, null, 2)}\n`);

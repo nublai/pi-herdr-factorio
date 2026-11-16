@@ -1,6 +1,7 @@
 import type { BenchTrial } from "./trial.ts";
 import type { BenchVariant } from "./variant.ts";
 import type { CostCoverage } from "../core/tariff.ts";
+import { FAILURE_CLASSES, type FailureClassName } from "../ledger/schema.ts";
 
 function selector(change: BenchVariant["change"]): string {
 	switch (change.kind) {
@@ -101,12 +102,71 @@ function distribution(values: readonly number[]) {
 	return { n, median, min: sorted[0] ?? null, max: sorted[n - 1] ?? null };
 }
 
+function failureClass(trial: BenchTrial): FailureClassName | null {
+	const outcome = trial.outcome;
+
+	if (outcome.kind === "passed" || outcome.reason === "trial_incomplete")
+		return null;
+
+	if (
+		outcome.kind === "budget_exhausted" ||
+		outcome.reason === "budget_exhausted"
+	)
+		return "budget";
+
+	if (
+		outcome.reason.includes("unavailable") ||
+		outcome.reason.includes("unconfigured")
+	)
+		return "missing_evidence";
+
+	if (outcome.reason === "model_refused") return "provider";
+
+	if (outcome.reason === "review_malformed") return "missing_evidence";
+
+	if (outcome.reason === "review_blocking_or_unverifiable") return "review";
+
+	if (
+		[
+			"visible_tests_failed",
+			"trusted_gates_failed",
+			"forbidden_paths",
+		].includes(outcome.reason) ||
+		/^(?:protected_path_changed|npmrc_changed|runtime_patching|suppression_added|invalid_source_encoding|unauthorized_acceptance|package_swap|replacement_deleted|invalid_dependency_|dependency_integrity|unsafe_tree)/.test(
+			outcome.reason,
+		)
+	)
+		return "candidate";
+
+	return "infrastructure";
+}
+
 function summarize(trials: readonly BenchTrial[]) {
 	const n = trials.length;
 
 	const passed = trials.filter(
 		(trial) => trial.outcome.kind === "passed",
 	).length;
+
+	const failureClasses = Object.fromEntries(
+		FAILURE_CLASSES.map((name) => [name, 0]),
+	);
+
+	let candidateFailures = 0;
+	let harnessFailures = 0;
+	let incomplete = 0;
+
+	for (const trial of trials) {
+		const classified = failureClass(trial);
+
+		if (classified !== null) {
+			failureClasses[classified] = (failureClasses[classified] ?? 0) + 1;
+
+			if (classified === "candidate" || classified === "review")
+				candidateFailures++;
+			else harnessFailures++;
+		} else if (trial.outcome.kind !== "passed") incomplete++;
+	}
 
 	const costs = trials.map((trial) => trial.accounting.cost);
 
@@ -126,9 +186,9 @@ function summarize(trials: readonly BenchTrial[]) {
 	const coverage: CostCoverage["kind"] =
 		known.length === 0
 			? "unavailable"
-			: coverageCounts.uncertain > 0
+			: coverageCounts.uncertain > 0 || known.length !== n
 				? "uncertain"
-				: coverageCounts.exact !== n || known.length !== n
+				: coverageCounts.exact !== n
 					? "lower_bound"
 					: "exact";
 
@@ -136,7 +196,15 @@ function summarize(trials: readonly BenchTrial[]) {
 
 	return {
 		n,
-		passRate: { passed, n, rate: n === 0 ? null : passed / n },
+		passRate: {
+			passed,
+			candidateFailures,
+			harnessFailures,
+			incomplete,
+			n,
+			rate: n === 0 ? null : passed / n,
+		},
+		failureClasses,
 		tokens: distribution(trials.map((trial) => trial.accounting.chargedTokens)),
 		wallMs: distribution(trials.map((trial) => trial.wallMs)),
 		estimate: {
@@ -144,8 +212,8 @@ function summarize(trials: readonly BenchTrial[]) {
 			usdMicros: estimates.median,
 			min: estimates.min,
 			max: estimates.max,
-			n: known.length,
-			total: n,
+			known: known.length,
+			n,
 			coverage,
 			coverageCounts,
 			billedSpend: "unavailable",
@@ -155,8 +223,12 @@ function summarize(trials: readonly BenchTrial[]) {
 
 export type BenchComparison = ReturnType<typeof compareTrials>;
 
-export function compareTrials(trials: readonly BenchTrial[]) {
-	if (trials.length === 0) throw new Error("no_trials");
+export function compareTrials(
+	trials: readonly BenchTrial[],
+	incompleteTrials: readonly string[] = [],
+) {
+	if (trials.length === 0 && incompleteTrials.length === 0)
+		throw new Error("no_trials");
 	const ids = new Set<string>();
 	const tasks = new Map<string, BenchTrial[]>();
 
@@ -196,21 +268,66 @@ export function compareTrials(trials: readonly BenchTrial[]) {
 			`incomparable_trials:${[...incompatible].sort().join(",")}`,
 		);
 
+	const taskSets = new Map(
+		variants.map((name) => [
+			name,
+			new Set(
+				trials.flatMap((trial) =>
+					trial.variant.name === name ? [trial.originalRunId] : [],
+				),
+			),
+		]),
+	);
+
+	const taskNotes = variants.flatMap((name) =>
+		variants.flatMap((other) => {
+			const n = taskSets.get(name)?.size ?? 0;
+			const otherN = taskSets.get(other)?.size ?? 0;
+
+			return n < otherN
+				? [`${name} covers ${n} task(s), fewer than ${other} (${otherN}).`]
+				: [];
+		}),
+	);
+
 	return {
 		version: 1,
 		kind: "factory_benchmark_comparison",
+		excludedIncomplete: {
+			n: incompleteTrials.length,
+			directories: [...incompleteTrials],
+		},
 		method:
 			"paired_by_original_run; differences=right_minus_left; task_local_only",
 		limitations: [
 			"Three trials cannot establish a small improvement.",
 			"Variant totals may cover different tasks. Compare effects only within each task.",
 			"Dates and observed models do not pin a provider backend version.",
+			...taskNotes,
 		],
 		variants: variants.map((name) => {
 			const rows = trials.filter((trial) => trial.variant.name === name);
 
 			return {
 				name,
+				tasks: [...(taskSets.get(name) ?? [])].sort(),
+				commonTasks: Object.fromEntries(
+					variants.flatMap((other) =>
+						other === name
+							? []
+							: [
+									[
+										other,
+										[...(taskSets.get(name) ?? [])].filter((task) =>
+											taskSets.get(other)?.has(task),
+										).length,
+									],
+								],
+					),
+				),
+				mixedPins:
+					new Set(rows.map((trial) => JSON.stringify(trial.variant.pins)))
+						.size > 1,
 				fewerThanThreeTrials: rows.length < 3,
 				summary: summarize(rows),
 			};
@@ -233,6 +350,7 @@ export function compareTrials(trials: readonly BenchTrial[]) {
 							variantDigest: trial.variantDigest,
 							change: trial.variant.change,
 							outcome: trial.outcome,
+							failureClass: failureClass(trial),
 							startedAt: trial.startedAt,
 							endedAt: trial.endedAt,
 							tokens: trial.accounting.chargedTokens,
@@ -258,6 +376,7 @@ export function compareTrials(trials: readonly BenchTrial[]) {
 								left: left.name,
 								right: right.name,
 								status: missing ? "missing" : "paired",
+								passRateCoverage: missing ? "uncertain" : "exact",
 								passRate: delta(
 									left.summary.passRate.rate,
 									right.summary.passRate.rate,
@@ -266,8 +385,28 @@ export function compareTrials(trials: readonly BenchTrial[]) {
 									left.summary.tokens.median,
 									right.summary.tokens.median,
 								),
+								tokensCoverage:
+									!missing &&
+									left.summary.estimate.coverage === "exact" &&
+									right.summary.estimate.coverage === "exact"
+										? "exact"
+										: "uncertain",
+								tokensSpread: {
+									left: left.summary.tokens,
+									right: right.summary.tokens,
+								},
 								estimate: {
 									kind: "api_equivalent_estimate",
+									coverage:
+										!missing &&
+										left.summary.estimate.coverage === "exact" &&
+										right.summary.estimate.coverage === "exact"
+											? "exact"
+											: "uncertain",
+									spread: {
+										left: left.summary.estimate,
+										right: right.summary.estimate,
+									},
 									usdMicros: delta(
 										left.summary.estimate.usdMicros,
 										right.summary.estimate.usdMicros,

@@ -21,6 +21,9 @@ describe("BenchComparison", () => {
 		assert.equal(result.variants.length, 2);
 		assert.deepEqual(result.variants[0]?.summary.passRate, {
 			passed: 2,
+			candidateFailures: 0,
+			harnessFailures: 1,
+			incomplete: 0,
 			n: 3,
 			rate: 2 / 3,
 		});
@@ -101,7 +104,7 @@ describe("BenchComparison", () => {
 		assert.equal(result.tasks[0]?.variants[0]?.fewerThanThreeTrials, true);
 		assert.equal(result.variants[0]?.summary.estimate.usdMicros, null);
 		assert.equal(result.variants[0]?.summary.estimate.coverage, "unavailable");
-		assert.equal(result.variants[0]?.summary.estimate.n, 0);
+		assert.equal(result.variants[0]?.summary.estimate.known, 0);
 	});
 	it("allows the on baseline against one model or skill treatment, but keeps asset pins fixed", () => {
 		const baseline = syntheticTrial({ id: "a" });
@@ -161,16 +164,159 @@ describe("BenchComparison", () => {
 
 		assert.throws(() => compareTrials([baseline, bad]), /pins.assetsDigest/);
 	});
-	it("retains known-estimate n and labels partial-price medians instead of substituting zero", () => {
+	it("H1 labels the known-only median uncertain when two of five estimates are unknown", () => {
+		const trials = [100, 200, 300, 0, 0].map((tokens, i) =>
+			syntheticTrial({ id: `probe-${i}`, tokens, missing: i >= 3 }),
+		);
+
+		const estimate = compareTrials(trials).variants[0]?.summary.estimate;
+		assert.equal(estimate?.usdMicros, 400);
+		assert.equal(estimate?.known, 3);
+		assert.equal(estimate?.n, 5);
+		assert.equal(estimate?.coverage, "uncertain");
+		assert.ok((estimate?.usdMicros ?? 0) > 200);
+	});
+	it("H2 labels each estimate delta exact only when both sides are exact", () => {
+		const left = syntheticTrial({ id: "left" });
+		const right = syntheticTrial({ id: "right", name: "off", value: "off" });
+
+		const partial = syntheticTrial({
+			id: "partial",
+			name: "off",
+			value: "off",
+			missing: true,
+		});
+
+		assert.equal(
+			compareTrials([left, right]).tasks[0]?.differences[0]?.estimate.coverage,
+			"exact",
+		);
+		assert.equal(
+			compareTrials([left, right, partial]).tasks[0]?.differences[0]?.estimate
+				.coverage,
+			"uncertain",
+		);
+
+		const lowerBound = {
+			...right,
+			accounting: {
+				...right.accounting,
+				cost: {
+					...right.accounting.cost,
+					coverage: {
+						...right.accounting.cost.coverage,
+						kind: "lower_bound",
+						missingReceipts: 1,
+					},
+				},
+			},
+		} as const;
+
+		const comparison = compareTrials([left, lowerBound]);
+		assert.equal(
+			comparison.variants[1]?.summary.estimate.coverage,
+			"lower_bound",
+		);
+		assert.equal(
+			comparison.tasks[0]?.differences[0]?.estimate.coverage,
+			"uncertain",
+		);
+		assert.equal(
+			comparison.tasks[0]?.differences[0]?.tokensCoverage,
+			"uncertain",
+		);
+	});
+	it("H3 exposes pooled task sets, pairwise overlap and mixed pins", () => {
+		const trials = ["398", "399", "400", "401", "430", "785", "789"].map(
+			(task) => syntheticTrial({ id: task, task }),
+		);
+
 		const result = compareTrials([
-			syntheticTrial({ id: "a" }),
-			syntheticTrial({ id: "b", missing: true }),
+			...trials,
+			syntheticTrial({ id: "off", name: "off", value: "off" }),
 		]);
 
-		assert.equal(result.variants[0]?.summary.estimate.n, 1);
-		assert.equal(result.variants[0]?.summary.estimate.total, 2);
-		assert.equal(result.variants[0]?.summary.estimate.usdMicros, 200);
-		assert.equal(result.variants[0]?.summary.estimate.coverage, "lower_bound");
+		const baseline = result.variants[0];
+		const off = result.variants[1];
+		assert.equal(baseline?.tasks.length, 7);
+		assert.equal(off?.tasks.length, 1);
+		assert.equal(baseline?.commonTasks.off, 1);
+		assert.equal(off?.commonTasks.baseline, 1);
+		assert.equal(baseline?.mixedPins, true);
+		assert.equal(off?.mixedPins, false);
+		assert.ok(
+			result.limitations.some((note) =>
+				note.includes("off covers 1 task(s), fewer than baseline (7)"),
+			),
+		);
+	});
+	it("H4 keeps candidate, harness, budget and incomplete outcomes separate using factory classes", () => {
+		const failures = [
+			["visible_tests", "visible_tests_failed"],
+			["validation", "trusted_gates_failed"],
+			["validation", "protected_path_changed:AGENTS.md"],
+			["validation", "invalid_dependency_protocol"],
+			["review", "review_malformed"],
+			["review", "review_blocking_or_unverifiable"],
+			["visible_tests", "visible_tests_unavailable"],
+			["validation", "install_failed"],
+			["validation", "baseline_failed"],
+			["build", "model_unavailable"],
+			["build", "budget_exhausted"],
+			["prepare", "trial_incomplete"],
+		].map(([stage = "", reason = ""], i) => ({
+			...syntheticTrial({ id: `failure-${i}` }),
+			outcome: {
+				kind: reason === "budget_exhausted" ? "budget_exhausted" : "failed",
+				stage,
+				reason,
+			} as const,
+		}));
+
+		const summary = compareTrials([syntheticTrial(), ...failures]).variants[0]
+			?.summary;
+
+		assert.deepEqual(summary?.passRate, {
+			passed: 1,
+			candidateFailures: 5,
+			harnessFailures: 6,
+			incomplete: 1,
+			n: 13,
+			rate: 1 / 13,
+		});
+		assert.equal(summary?.failureClasses.candidate, 4);
+		assert.equal(summary?.failureClasses.review, 1);
+		assert.equal(summary?.failureClasses.budget, 1);
+	});
+	it("H5 puts each median delta beside both sides' token and estimate spread", () => {
+		const trials = [100, 200, 600].flatMap((tokens, i) => [
+			syntheticTrial({ id: `a-${i}`, tokens }),
+			syntheticTrial({
+				id: `b-${i}`,
+				name: "off",
+				value: "off",
+				tokens: tokens + 50,
+			}),
+		]);
+
+		const delta = compareTrials(trials).tasks[0]?.differences[0];
+		assert.equal(delta?.tokens, 50);
+		assert.deepEqual(delta?.tokensSpread.left, {
+			n: 3,
+			median: 200,
+			min: 100,
+			max: 600,
+		});
+		assert.deepEqual(delta?.tokensSpread.right, {
+			n: 3,
+			median: 250,
+			min: 150,
+			max: 650,
+		});
+		assert.equal(delta?.estimate.spread.left.min, 200);
+		assert.equal(delta?.estimate.spread.left.max, 1200);
+		assert.equal(delta?.estimate.spread.right.min, 300);
+		assert.equal(delta?.estimate.spread.right.max, 1300);
 	});
 	it("names every changed pin and runtime setting rather than selecting only the first mismatch", () => {
 		const baseline = syntheticTrial({ id: "a" });

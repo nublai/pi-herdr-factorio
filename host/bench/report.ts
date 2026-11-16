@@ -5,7 +5,7 @@ import { regularText } from "../../src/contract/artifacts.ts";
 import { hasDuplicateKey, parseJson } from "../../src/core/json.ts";
 import { digestOf } from "../../src/core/run.ts";
 import { count, digest, literal, record } from "../../src/ledger/schema.ts";
-import { executionCharge } from "../sandbox/receipts.ts";
+import { boundedText, executionCharge } from "../sandbox/receipts.ts";
 
 function directories(paths: readonly string[]) {
 	const dirs = paths.map((path) => realpathSync(path));
@@ -27,8 +27,19 @@ export function readBenchTrial(dir: string): BenchTrial {
 	return parseBenchTrial(raw);
 }
 
-export function readBenchTrials(paths: readonly string[]): BenchTrial[] {
-	return directories(paths).map(readBenchTrial);
+export function readBenchTrials(paths: readonly string[]) {
+	const trials: BenchTrial[] = [];
+	const incompleteTrials: string[] = [];
+
+	for (const dir of directories(paths)) {
+		if (existsSync(join(dir, "trial.json"))) trials.push(readBenchTrial(dir));
+		else {
+			readBinding(dir);
+			incompleteTrials.push(dir);
+		}
+	}
+
+	return { trials, incompleteTrials };
 }
 
 const bindingCodec = record({
@@ -38,6 +49,14 @@ const bindingCodec = record({
 	variantDigest: digest,
 	tokenCap: count,
 });
+
+function readBinding(dir: string) {
+	const raw = regularText(join(dir, "claim/binding.json"), 4096);
+
+	if (hasDuplicateKey(raw)) throw new Error("duplicate_bench_binding_key");
+
+	return bindingCodec(parseJson(raw));
+}
 
 export async function benchSpend(paths: readonly string[]) {
 	const ids = new Set<string>();
@@ -55,14 +74,13 @@ export async function benchSpend(paths: readonly string[]) {
 				status: "completed",
 				chargedTokens: trial.accounting.chargedTokens,
 				uncertain: trial.accounting.cost.coverage.uncertain > 0,
+				coverage: trial.accounting.cost.coverage.kind,
+				unavailableStages: [],
 			});
 			continue;
 		}
 
-		const raw = regularText(join(dir, "claim/binding.json"), 4096);
-
-		if (hasDuplicateKey(raw)) throw new Error("duplicate_bench_binding_key");
-		bindingCodec(parseJson(raw));
+		readBinding(dir);
 		const runtime = join(dir, "runtime");
 
 		const stages = existsSync(runtime)
@@ -75,6 +93,19 @@ export async function benchSpend(paths: readonly string[]) {
 			stages.map((stage) => executionCharge(join(runtime, stage))),
 		);
 
+		const journals = await Promise.all(
+			stages.map((stage) =>
+				boundedText(
+					join(runtime, stage, "egress.requests.jsonl"),
+					16 * 1024 * 1024,
+				),
+			),
+		);
+
+		const unavailableStages = stages
+			.filter((_, i) => charges[i] === null || journals[i] === null)
+			.sort();
+
 		const recorded = charges.filter((charge) => charge !== null);
 		trials.push({
 			directory: dir,
@@ -85,6 +116,15 @@ export async function benchSpend(paths: readonly string[]) {
 					? null
 					: recorded.reduce((sum, charge) => sum + charge.total, 0),
 			uncertain: recorded.some((charge) => charge.uncertain > 0),
+			coverage:
+				recorded.length === 0
+					? "unavailable"
+					: unavailableStages.length > 0
+						? "lower_bound"
+						: recorded.some((charge) => charge.uncertain > 0)
+							? "uncertain"
+							: "exact",
+			unavailableStages,
 		});
 	}
 

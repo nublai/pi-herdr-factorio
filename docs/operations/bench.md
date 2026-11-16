@@ -259,9 +259,11 @@ Both commands print JSON and only read local files. They make no model, GitHub,
 or VM requests. Each argument is a trial state directory, not a task bundle
 or a `trial.json` path. They reject duplicate directory aliases. Completed
 records require a matching `trial.sha256` and strict `parseBenchTrial` validation.
-Unknown or duplicate keys, malformed nested fields, and broken trial, variant,
-token, time, or pin bindings fail. Resume uses the same parser and also checks
-the record against the invocation's claim binding.
+Unknown or duplicate keys, malformed nested fields, coverage kinds inconsistent
+with their counts, unavailable coverage with a numeric estimate, and broken
+trial, variant, token, time, or pin bindings fail. Judge `fallbackRecord` is
+rejected because the bench writer does not emit it. Resume uses the same parser
+and also checks the record against the invocation's claim binding.
 
 ### BenchComparison v1
 
@@ -288,34 +290,63 @@ command never silently excludes an incompatible trial.
 
 The JSON contains `variants` and `tasks`. Reports include:
 
-- The pass count, `n`, and pass rate. Failed and budget-exhausted trials remain
-  in the denominator.
+- The pass count, candidate-failure count, harness-failure count, incomplete
+  count, `n`, and pass rate. Every recorded outcome remains in the denominator.
+  `failureClasses` uses the factory's existing classes. Candidate check and
+  policy failures are `candidate`; blocking or unverifiable review judgments
+  are `review`. Missing or malformed evidence is `missing_evidence`, caps are
+  `budget`, refusals are `provider`, and other execution failures are
+  `infrastructure`. Install and baseline failures are harness failures, not
+  candidate failures. Each trial also reports its class and original reason.
 - Token and wall-time medians, minima, maxima, and counts.
-- A median labelled `api_equivalent_estimate`, its coverage label and coverage
-  counts, the number of known estimates, and the total trial count. Null
-  estimates stay unknown. The median uses only known estimates. Partial
-  coverage is labelled `lower_bound` or `uncertain`, never exact.
-  `billedSpend` stays `unavailable`.
+- A median labelled `api_equivalent_estimate`, minima and maxima, its coverage
+  label and coverage counts, `known` (numeric estimates), and `n` (all trials).
+  Null estimates stay unknown. The median uses only known estimates. If any
+  estimate is unknown, a numeric median is `uncertain`, not a lower bound on
+  the full sample's median. When all estimates are known, partial prices can
+  yield a `lower_bound`; uncertain prices yield `uncertain`. No known estimates
+  means a null median with `unavailable` coverage. `billedSpend` stays
+  `unavailable`.
+- Each variant's task IDs, `commonTasks` counts against every other variant,
+  and `mixedPins` when its pooled trials have differing pins, including bundle
+  pins. A top-level limitation names each variant covering fewer tasks than
+  another. These pooled summaries are not controlled comparisons.
 - `fewerThanThreeTrials` on each variant and each task's variant column.
 
 Each task retains every variant column. An absent side has `status: "missing"`,
 `n: 0`, and null medians, rather than disappearing from the report. Present
 columns include each trial's outcome, dates, model observations, and estimate
 coverage. Differences are right minus left within the same task. Missing sides
-produce null differences. There are no cross-task differences or ratios.
+produce null differences. Each delta has its own coverage label. An estimate
+or token delta is labelled `exact` only when both sides have exact estimate
+coverage; otherwise it is `uncertain`. Token labels conservatively retain
+pricing gaps as well as charge gaps. Pass-rate deltas are exact counts when
+both sides exist. `tokensSpread` and the estimate delta's `spread` put both
+sides' minima, maxima, medians and counts beside the difference, so a gap can
+be compared with run-to-run variation. Estimate ranges cover only `known`
+estimates and carry the same coverage warning as the median. There are no
+cross-task differences or ratios.
 Variant-wide summaries can cover different task sets and are descriptive,
 not evidence of an improvement. Three trials cannot establish a small effect.
 Provider backend versions remain unpinned even when observed model names match.
 
 ### Tally recorded charges
 
-`bench spend` includes incomplete claimed directories that `bench compare`
-refuses. For a completed trial it uses `accounting.chargedTokens` once and does
-not add its runtime receipts again. Copied completed trial IDs are refused.
+`bench compare` leaves incomplete claimed directories out of its statistics
+and names them in `excludedIncomplete.directories`, with their count in `n`.
+It validates their claim bindings first; an arbitrary directory or corrupt
+completed record still fails. An all-incomplete input reports no variants or
+tasks and names every excluded directory. `bench spend` includes these
+incomplete directories in its charge tally. For a completed trial it uses
+`accounting.chargedTokens` once and does not add its runtime receipts again. Copied completed trial IDs are refused.
 For an incomplete trial it reads each runtime execution's receipt, high-water
 usage, request journal, and audit through the production `executionCharge`
 reader. That reader reconciles overlapping charges by maximum, retains
 uncertain dispatch bounds, and avoids adding aggregate receipts to their leaves.
+Each trial reports charge `coverage` and `unavailableStages`. A missing or
+unreadable stage journal makes a numeric charge `lower_bound`, even when
+another stage or a receipt is readable; no recorded charges means `unavailable`.
+Unsettled dispatches also remain visible through `uncertain`.
 
 The output reports `chargedTokens`, completed and incomplete trial counts,
 `uncertainTrials`, and `unavailableTrials`. A directory with no recorded charge

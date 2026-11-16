@@ -237,15 +237,8 @@ const seatCodec = (value: JsonValue | undefined) => {
 
 	if (input === null) throw new Error("invalid_trial_judge");
 
-	const {
-		family,
-		primary,
-		refusal,
-		unconfigured,
-		budgetStopped,
-		fallbackRecord,
-		...required
-	} = input;
+	const { family, primary, refusal, unconfigured, budgetStopped, ...required } =
+		input;
 
 	const seat = record({
 		seat: text,
@@ -301,7 +294,6 @@ const seatCodec = (value: JsonValue | undefined) => {
 		...(budgetStopped === true
 			? { budgetStopped: literalTrue(budgetStopped) }
 			: undefined),
-		...(fallbackRecord === undefined ? undefined : { fallbackRecord }),
 	};
 };
 
@@ -379,7 +371,30 @@ export function parseBenchTrial(raw: string): BenchTrial {
 
 	const coverage = cost.coverage;
 
+	const expectedCoverage =
+		coverage.uncertain > 0
+			? "uncertain"
+			: coverage.priced === 0 && coverage.requests > 0
+				? "unavailable"
+				: coverage.missing +
+							coverage.unpriced +
+							coverage.missingJournals +
+							coverage.missingReceipts >
+							0 || chargedTokens !== cost.tokens.total
+					? "lower_bound"
+					: "exact";
+
 	if (
+		coverage.kind !== expectedCoverage ||
+		(coverage.kind === "unavailable" && cost.estimate.usdMicros !== null) ||
+		coverage.priced + coverage.uncertain + coverage.unpriced >
+			coverage.requests ||
+		coverage.priced +
+			coverage.uncertain +
+			coverage.unpriced +
+			coverage.missing <
+			coverage.requests ||
+		(coverage.priced > 0 && cost.estimate.usdMicros === null) ||
 		new Set(cost.byModel.map((model) => model.model)).size !==
 			cost.byModel.length ||
 		sum(cost.byModel.map((model) => model.inputTokens)) !== cost.tokens.input ||
