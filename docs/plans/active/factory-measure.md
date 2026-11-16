@@ -314,7 +314,7 @@ Each live lane runs at the PR head. Drive the surface with the CLI and viewer re
 
 **Build.**
 
-- [ ] Define a variant in `src/bench/variant.ts`. It names one changed dimension, a stage's model, a stage's thinking, a skill file or the factory revision, and pins everything else.
+- [ ] Define a variant in `src/bench/variant.ts`. It names exactly one declared dimension, a stage's model, one replaced file under `skills/` with its digest, or `buildRevision` set to `on` or `off`, and pins everything else. Stage thinking and arbitrary factory revisions are out of v1.
 - [ ] Add `bench run --bundle <dir> --variant <file> --state-dir <scratch> --token-cap <n>`. It runs build, visible tests, the trusted gates in the pinned image, held-out validation and both review judges against the bundle, with no GitHub access and no markers. It reuses the sandbox, gate and review components and writes a trial record with outcome, tokens, the M1 estimate and wall time.
 - [ ] Refuse to start when the bench host's `factory.service` is present, when the state directory is a production one, or when the cap would be exceeded.
 
@@ -369,7 +369,7 @@ Each live lane runs at the PR head. Drive the surface with the CLI and viewer re
 
 - [ ] Add `bench compare <trials...>`. It pairs trials by task, refuses pairs whose variants differ in an undeclared dimension, and reports per variant the pass rate with its count, the median tokens, the median estimate and the per-task differences. It never reports a ratio for unlike tasks.
 - [ ] Run experiment one, repeatability. Run the baseline variant three times on each of the 7 bundles.
-- [ ] Run experiment two, #813. Run the factory revision before #813 (`d22caaa`) and at #813 (`3183723`) three times each on the #430 bundle.
+- [ ] Run experiment two, #813. Run the #430 bundle with `buildRevision` off and on, three trials each.
 
 **You see.**
 
@@ -383,8 +383,8 @@ Each live lane runs at the PR head. Drive the surface with the CLI and viewer re
 
 - [ ] Lane 1. Regression lane against trunk. Trunk lacks `bench compare`, so record its usage error and gate the head's comparison of experiment one. Save `compare-repeat.txt`. Pass when trunk refuses and the head reports all 7 tasks with three trials each.
 - [ ] Lane 2. Recompute experiment one's pass rates by hand from the trial records. Save `hand-check.txt`. Pass when they match the comparison.
-- [ ] Lane 3. Compare experiment two. Save `compare-813.txt`. Pass when it reports both revisions on the #430 task with counts and per-trial outcomes.
-- [ ] Lane 4. Read experiment two's build receipts. Save `revision-exposure.txt`. Pass when it states how many trials fired the #813 revision, using M2's `draftRuns`.
+- [ ] Lane 3. Compare experiment two. Save `compare-813.txt`. Pass when it reports `buildRevision` off and on for the #430 task with three trials each and per-trial outcomes.
+- [ ] Lane 4. Read experiment two's build receipts. Save `revision-exposure.txt`. Pass when it separates `buildRevision` off and on and states how many on trials fired the #813 revision, using M2's `draftRuns`.
 - [ ] Lane 5. Compare a trial pair with two different changed dimensions. Save `refuse.txt`. Pass when compare refuses and names both dimensions.
 - [ ] Lane 6. Compare with one task missing on one side. Save `missing-task.txt`. Pass when the task is reported missing, not dropped.
 - [ ] Lane 7. Sum the experiments' tokens. Save `spend.txt`. Pass when the total is within the owner's spend grant.
