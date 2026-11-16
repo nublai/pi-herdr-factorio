@@ -1061,7 +1061,7 @@ For a fresh exe.dev VM, use the [commit-pinned, held install](install-exe-dev.md
 
 Installation requires explicit service/VM authority, a drained rollout, and the [owner bootstrap gates](human-review.md#bootstrap-and-enable-protection-as-the-owner). These examples are not an execution grant.
 
-Production is now `nubl-factory`, held at `3ee264c`. `pi-factorio` was retired and deleted on 2026-11-13 (#734), with its state archived. Routine production access is read-only; upgrades, bridge installation, the hold-lift and fixture runs each need Giuseppe's explicit go.
+Production is now `nubl-factory`, held between pilot rounds; `~/factory-state/install-exe-dev.commit` on the VM records the installed commit. `pi-factorio` was retired and deleted on 2026-11-13 (#734), with its state archived. Routine production access is read-only; upgrades, bridge installation, the hold-lift and fixture runs each need Giuseppe's explicit go.
 
 `host/install/factory.service` runs `serve` under systemd. `host/install/provision.sh` does not install it. For an explicitly authorized manual installation on an exe.dev host:
 
