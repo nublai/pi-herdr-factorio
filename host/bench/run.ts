@@ -44,6 +44,7 @@ import {
 	seatPrompt,
 	type ReviewInput,
 	type SeatReceipt,
+	type TrustedEvidence,
 } from "../../src/candidate/review.ts";
 import { parseWorkflow } from "../../src/config/parse.ts";
 import { type EnvLookup, type ModelId } from "../../src/config/schema.ts";
@@ -52,6 +53,7 @@ import {
 	parseStoredContract,
 	regularText,
 } from "../../src/contract/artifacts.ts";
+import { sourceExcerpts } from "../../src/contract/prompt.ts";
 import { objectOf, parseJson } from "../../src/core/json.ts";
 import {
 	parseFamily,
@@ -78,7 +80,7 @@ import {
 	receiptPasses,
 	type CandidateInput,
 } from "../gates/gates.ts";
-import { heldoutDigest } from "../gates/materialize.ts";
+import { heldoutDigest, replacementDigest } from "../gates/materialize.ts";
 import { dockerRunner, type GateRunner } from "../gates/runner.ts";
 import { readUsernsLimit, runPreflight } from "../isolation/preflight.ts";
 import { detectArch } from "../isolation/seccomp.ts";
@@ -239,9 +241,12 @@ export async function runBench(
 			throw new Error("production_or_non_bench_state");
 	}
 
-	const variantFile = resolve(input.variantFile);
-	const variant = parseBenchVariant(regularText(variantFile, 64 * 1024));
 	const bundle = realpathSync(input.bundle);
+	const variantFile = realpathSync(input.variantFile);
+
+	if (variantFile.startsWith(`${bundle}/`))
+		throw new Error("variant_file_inside_bundle");
+	const variant = parseBenchVariant(regularText(variantFile, 64 * 1024));
 	const verified = verifyBundle(bundle);
 	const { task, manifestDigest: bundleDigest } = verified;
 
@@ -295,10 +300,29 @@ export async function runBench(
 	)
 		throw new Error("variant_model_unchanged");
 
-	const replacement =
-		variant.change.kind === "skill"
-			? readFileSync(resolve(dirname(variantFile), variant.change.file))
-			: null;
+	let replacement: Buffer | null = null;
+
+	if (variant.change.kind === "skill") {
+		const file = realpathSync(
+			resolve(dirname(variantFile), variant.change.file),
+		);
+
+		if (file === bundle || file.startsWith(`${bundle}/`))
+			throw new Error("variant_file_inside_bundle");
+
+		for (
+			let path = resolve(assets, variant.change.path);
+			;
+			path = dirname(path)
+		) {
+			if (lstatSync(path).isSymbolicLink())
+				throw new Error("skill_variant_symlink");
+
+			if (dirname(path) === path) break;
+		}
+
+		replacement = readFileSync(file);
+	}
 
 	if (
 		variant.change.kind === "skill" &&
@@ -317,6 +341,11 @@ export async function runBench(
 	);
 
 	if (stored.kind !== "found") throw new Error("bench_contract_invalid");
+
+	const buildTools =
+		stored.contract.files.length > 8
+			? [...BUILD_TOOLS, "subagent"]
+			: BUILD_TOOLS;
 
 	const rawSuite = objectOf(
 		parseJson(regularText(join(bundle, "oracle/suite.json"), 8 * 1024 * 1024)),
@@ -551,7 +580,7 @@ export async function runBench(
 		}
 
 		await (runtime.preflight ?? preflight)(
-			hostConfig("build", join(state, "runtime/build"), workspace, BUILD_TOOLS),
+			hostConfig("build", join(state, "runtime/build"), workspace, buildTools),
 		);
 		mkdirSync(base, { mode: 0o700 });
 		unpackBase(readFileSync(join(bundle, "builder/base.tar")), base);
@@ -565,18 +594,30 @@ export async function runBench(
 			throw new Error("archived_policy_mismatch");
 		cpSync(base, repository, { recursive: true });
 		git(repository, ["init", "-q"]);
-		git(repository, ["add", "."]);
+		git(repository, ["add", "-f", "."]);
 		git(repository, ["commit", "-qm", "Archived benchmark base"]);
 		const gateSha = git(repository, ["rev-parse", "HEAD"]);
 		await prepareRepairTree(base, workspace, "", [], "{}");
 		rmSync(join(workspace, FEEDBACK_FILE));
+
+		const inlined = await sourceExcerpts({
+			files: stored.contract.files,
+			evidence: stored.contract.evidence,
+			checkout: {
+				files: [...fileLines(workspace).keys()],
+				read: (path, cap) => boundedText(join(workspace, path), cap),
+			},
+			identity: `${task.repo}@${task.base.sha}`,
+			repair: false,
+			accept: false,
+		});
 
 		const prompt = await withSkills(
 			bundleDir,
 			buildPrompt({
 				contract: stored.contract,
 				guidance: workflow.guidance,
-				inlined: [],
+				inlined,
 			}),
 			["build"],
 		);
@@ -589,7 +630,7 @@ export async function runBench(
 			stageModel("build"),
 			prompt,
 			workspace,
-			BUILD_TOOLS,
+			buildTools,
 			BUILD_MAX_TOKENS,
 		);
 
@@ -650,7 +691,13 @@ export async function runBench(
 			writeFileSync(join(repository, file.path), file.bytes, { mode: 0o600 });
 		}
 
-		git(repository, ["add", "."]);
+		git(repository, [
+			"add",
+			"-f",
+			"--",
+			...collected.changedPaths,
+			...heldoutFiles.map((file) => file.path),
+		]);
 		git(repository, [
 			"commit",
 			"-qm",
@@ -675,6 +722,9 @@ export async function runBench(
 			output: join(state, "gates"),
 			runner: runtime.gateRunner ?? dockerRunner,
 			replacements: stored.contract.replacesTests ?? [],
+			replacementsDigest: replacementDigest(
+				stored.contract.replacesTests ?? [],
+			),
 			heldoutDir: heldoutFiles.length ? heldoutDir : undefined,
 			heldoutDigest: heldoutFiles.length ? oracleDigest : undefined,
 		};
@@ -716,6 +766,44 @@ export async function runBench(
 			unjudged,
 		};
 
+		const gateReceipt = await boundedText(
+			join(state, "gates/receipt.json"),
+			8 * 1024 * 1024,
+		);
+
+		if (gateReceipt === null) throw new Error("bench_gate_receipt_unavailable");
+
+		const evidence: TrustedEvidence & { readonly run: string } = {
+			source: "trusted-pipeline",
+			run: "bench-local trusted gates, not GitHub CI. No CI run or report exists. ciRunId, ci.runId and ci.reportId are 0 sentinels; ci.conclusion describes the local gates only. Both receipt digests fingerprint the local gate receipt.",
+			candidateSha,
+			gateSha,
+			ciRunId: 0,
+			patchDigest: collected.patchDigest,
+			acceptanceDigest: task.acceptanceDigest,
+			heldoutDigest: oracleDigest,
+			gateReceiptDigest: digestOf(gateReceipt),
+			reportDigest: digestOf(gateReceipt),
+			checks: gate.checks.map(({ name, exitCode, durationMs }) =>
+				name === "baseline_tests" || name === "main_tests"
+					? {
+							name,
+							exitCode,
+							durationMs,
+							testGlobs: gate.testGlobs ?? "globs not recorded",
+						}
+					: { name, exitCode, durationMs },
+			),
+			heldout: {
+				files: Object.keys(gate.heldoutCounts).length,
+				tests: Object.values(gate.heldoutCounts).reduce(
+					(sum, count) => sum + count,
+					0,
+				),
+			},
+			ci: { runId: 0, conclusion: "success", reportId: 0 },
+		};
+
 		const reviewPrompt = candidateReviewPrompt({
 			contract: stored.contract,
 			diff: collected.patch,
@@ -723,6 +811,9 @@ export async function runBench(
 			judges: scenarios,
 			guidance: workflow.guidance.stages.review ?? "",
 			verdict,
+			evidence,
+			owner:
+				"Bench-local replay: the trusted-pipeline-evidence run field identifies local gates, not a trusted CI run. No GitHub CI evidence is available; criteria specifically requiring hosted CI are unverifiable.",
 		});
 
 		if (reviewPrompt.kind !== "ready") throw new Error(reviewPrompt.reason);
@@ -745,7 +836,7 @@ export async function runBench(
 			files: fileLines(reviewTree),
 			scenarios: unjudged,
 			seats,
-			prompt: `${reviewPrompt.prompt}\n\nOffline bench evidence, NOT GitHub CI. ciRunId=0 means no CI run exists. The local trusted pinned-image gates passed on this candidate.\n${JSON.stringify({ runner: gate.runner, checks: gate.checks, heldoutCounts: gate.heldoutCounts, modelCalls: gate.modelCalls })}`,
+			prompt: reviewPrompt.prompt,
 		};
 
 		publishFile(

@@ -100,8 +100,14 @@ judge produces a named failure, never a fabricated independent pass.
 
 ```sh
 node host/cli/index.ts bench run --bundle "$BUNDLE" --variant "$VARIANT" \
-  --state-dir "$HOME/bench/trials/430-01" --token-cap 540000
+  --state-dir "$HOME/bench/trials/430-01" --token-cap 540000 \
+  --assets-dir "$ASSETS"
 ```
+
+`--assets-dir <dir>` selects the installed sandbox assets. Without it, the driver
+locates the bundle under `/var/lib/factory-sandbox`. Its manifest must match
+`pins.assetsDigest`. For skill variants, use the real directory path, not a
+symlink such as `current`.
 
 The command prints BenchTrial v1 JSON and writes the same bytes to `trial.json`
 with `trial.sha256`. Exit 0 means that a trial record exists, not that the task
@@ -126,11 +132,18 @@ Exactly one dimension must be declared. These are the only v1 choices:
 - `{"kind":"skill","path":"skills/build/SKILL.md","file":"./build.md","digest":"<sha256>"}`
   replaces one existing regular file under `skills/` in a trial-local asset copy.
   `file` resolves relative to the variant file. Its bytes must match `digest`
-  and differ from the original. The installed bundle stays unchanged. The trial
-  records the resulting assets digest as well as the original pin.
+  and differ from the original. The driver refuses a variant file or replacement
+  whose real path is inside the task bundle, including `oracle/`. It also refuses
+  symlinks anywhere in the installed skill file's path, including its directories
+  and the assets root. The installed bundle stays unchanged. The trial records
+  the resulting assets digest as well as the original pin.
 - `{"kind":"buildRevision","value":"on"}` or `"off"` selects #813's single
-  in-session build revision. `on` passes the same unrun-test-edit check as the
-  executor. `off` omits `draftCheck` from the build input. `on` is the baseline.
+  in-session build revision. `on` uses `workspaceTestEdits(..., true)` because the
+  driver mounts the sanitized repair tree even for round zero. Production's
+  round-zero check compares its base workspace without that flag. The repair
+  flag excludes published `test/acceptance/` paths removed by sanitization, so
+  both checks identify the same edited existing non-replaceable tests. `off` omits `draftCheck` from the
+  build input. `on` is the baseline.
   The declared selector is required even for that baseline; an absent selector
   is not a variant.
 
@@ -150,8 +163,52 @@ service probe also refuses.
 A write-once claim binds the bundle, variant and cap before preparation.
 The driver reconstructs local Git commits from the archived tree for gates;
 these are not the historical commit or a GitHub CI run. `ciRunId: 0` in private
-review inputs explicitly means no CI exists. Local gate evidence is labelled
-separately, never promoted to hosted-CI proof.
+review inputs explicitly means no CI exists.
+
+### Production parity and remaining differences
+
+Build uses production's `sourceExcerpts` for the contract files and evidence,
+with the recorded repository and base SHA as the checkout identity. The excerpts
+enter the same `buildPrompt` and installed build-skill decorator. As in production,
+contracts naming more than eight files enable the `subagent` tool. Smaller
+contracts do not. The declared variant is the only selected change to those
+pinned inputs, not a claim that today's runtime matches the historical runtime.
+
+The local base commit preserves every archived file, including tracked files
+that `.gitignore` would exclude. Candidate construction stages the collected
+patch's explicit `changedPaths` and the private suite paths with `git add -f`.
+Ignored additions and deletions therefore reach the gates, as they do in
+production's explicit-path Git Data publication. The gate input carries the
+contract's `replacesTests` and its production `replacementDigest`. The same
+`checkCandidate` checks the tree against the archived gate policy in the pinned
+image. Local commit identities and ancestry differ from production publication;
+the gate source and candidate file trees do not depend on `.gitignore`.
+
+Each review seat receives evidence from that successful local gate receipt
+inside `<trusted-pipeline-evidence>`, not from builder output or an appendix.
+It has production's `TrustedEvidence` structure: candidate and gate SHAs, patch,
+acceptance and held-out digests, receipt fingerprints, each check's exit code and
+duration, baseline and main test globs, and held-out file and test totals.
+The `run` field labels the source `bench-local trusted gates` and states that
+there is no GitHub CI run or report. `ciRunId`, `ci.runId` and `ci.reportId` are
+zero sentinels. The schema requires `ci.conclusion: "success"`; here it describes
+only the local gate result. Both `gateReceiptDigest` and `reportDigest` fingerprint
+the exact local gate receipt bytes, because no hosted report exists.
+
+Production binds its evidence to a controller-verified GitHub CI report as well
+as the trusted gate receipt. The bench has no such report and does not fabricate
+one. The prompt explicitly corrects its shared production introduction's CI
+wording. Criteria about local trusted check results have evidence; criteria
+specifically requiring hosted CI remain unverifiable. Neither receipt
+fingerprint claims GitHub provenance.
+
+A trial reuses the accepted contract and suite. It does not rerun specify,
+accept, production's base qualification or tree-disagreement diagnosis, controller
+repair rounds, publication or handoff. Only the selected in-session build revision
+runs. The factory commit, installed assets and workflow are pinned, but provider
+backend drift and unrecorded historical thinking remain replay limits. These
+trials measure the build-to-local-gates-to-review path, not a full historical
+controller run.
 
 Only the sanitized workspace enters the builder sandbox. The bundle root,
 `oracle/`, trial records, local Git repository and trusted receipts are not
@@ -196,7 +253,14 @@ task bundles and a Git bundle of the desired committed factory checkout.
    changed. Enable the user's systemd manager with
    `sudo loginctl enable-linger "$USER"`. Confirm `bwrap --version`,
    `docker info`, and `systemd-run --user --scope --quiet true` succeed.
-2. Clone the transferred Git bundle locally. Use the exact approved commit.
+2. On the source checkout, create the transfer bundle from a branch ref.
+   The canonical `m5-bench-run` branch is one such ref.
+
+   ```sh
+   git bundle create /private/factory-source.bundle refs/heads/m5-bench-run
+   ```
+
+   Clone the transferred Git bundle locally. Use the exact approved commit.
 
    ```sh
    git clone /private/factory-source.bundle "$HOME/factory-bench"
@@ -206,6 +270,18 @@ task bundles and a Git bundle of the desired committed factory checkout.
    bash host/install/provision.sh sandbox
    docker pull node@sha256:6d2c7d5d074bf72f81ddc252b4fbb5d625bc028eeda49cb4b8c2ff8eda1ee617
    ```
+
+   A bundle containing only a ref outside `refs/heads/` clones with an empty
+   worktree. For such a bundle, fetch its exact ref explicitly, then check out
+   `FETCH_HEAD` before installing dependencies:
+
+   ```sh
+   git fetch /private/factory-source.bundle <bundled-ref>
+   git checkout --detach FETCH_HEAD
+   git rev-parse HEAD
+   ```
+
+   Confirm that HEAD equals the approved commit.
 
    `sandbox` builds only assets. Do not run provisioning without that argument
    or run `install-exe-dev.sh`. Installation downloads public runtime assets and

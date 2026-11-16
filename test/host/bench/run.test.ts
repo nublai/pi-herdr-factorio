@@ -5,7 +5,9 @@ import {
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
+	renameSync,
 	rmSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { request } from "node:http";
@@ -36,14 +38,20 @@ import { EXE_DEV_PLATFORM } from "../../../src/trust/platform.ts";
 import { startEchoFixture } from "../gateway/http-fixtures.ts";
 import { benchFixture, put } from "./fixtures.ts";
 
-async function harness(t: TestContext, editExisting = false, builtValue = 1) {
+async function harness(
+	t: TestContext,
+	editExisting = false,
+	builtValue = 1,
+	options: Parameters<typeof benchFixture>[1] = {},
+) {
 	const root = mkdtempSync(join(tmpdir(), "bench-m5-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
-	const f = await benchFixture(root);
+	const f = await benchFixture(root, options);
 	const echo = await startEchoFixture(t, 0, { anthropic: "usage" });
 	t.after(() => echo.close());
 	const calls: string[] = [];
 	const prompts: string[] = [];
+	const buildTools: (readonly string[])[] = [];
 	let service = "not-found";
 	const auditFiles: string[] = [];
 
@@ -114,6 +122,7 @@ async function harness(t: TestContext, editExisting = false, builtValue = 1) {
 			},
 		},
 		createHost(config: SandboxHostConfig) {
+			if (config.stage === "build") buildTools.push([...config.tools]);
 			let gateway: GatewayHandle | null = null;
 			let output = "";
 			let turns = 0;
@@ -246,6 +255,15 @@ async function harness(t: TestContext, editExisting = false, builtValue = 1) {
 														outcome: "pass",
 														reason: "Synthetic judge pass.",
 													},
+													...(options.replacements
+														? [
+																{
+																	scenario: "T1",
+																	outcome: "pass",
+																	reason: "Replacement matches the contract.",
+																},
+															]
+														: []),
 												]
 											: [],
 								});
@@ -361,6 +379,7 @@ async function harness(t: TestContext, editExisting = false, builtValue = 1) {
 		calls,
 		prompts,
 		auditFiles,
+		buildTools,
 		run,
 		service: (value: string) => {
 			service = value;
@@ -369,6 +388,204 @@ async function harness(t: TestContext, editExisting = false, builtValue = 1) {
 }
 
 describe("bench run offline CLI", () => {
+	it("passes the recorded replacements digest to trusted gates", {
+		timeout: 60000,
+	}, async (t) => {
+		const f = await harness(t, false, 1, { replacements: true });
+		const result = await f.run();
+		assert.equal(result.code, 0, result.stderr);
+		assert.equal(
+			result.value().outcome.kind,
+			"passed",
+			JSON.stringify(result.value().outcome),
+		);
+		assert.equal(result.value().judges.length, 4);
+	});
+	it("gives every review seat bench-local gate evidence inside the trusted block", {
+		timeout: 60000,
+	}, async (t) => {
+		const f = await harness(t);
+		const result = await f.run();
+		assert.equal(result.code, 0, result.stderr);
+		assert.equal(
+			result.value().outcome.kind,
+			"passed",
+			JSON.stringify(result.value().outcome),
+		);
+
+		const receipt = readFileSync(
+			join(f.root, "trial/gates/receipt.json"),
+			"utf8",
+		);
+
+		const gate = JSON.parse(receipt);
+		const reviews = f.prompts.slice(1);
+		assert.equal(reviews.length, 4);
+
+		for (const prompt of reviews) {
+			const block = prompt.match(
+				/<trusted-pipeline-evidence>\n(.*?)\n<\/trusted-pipeline-evidence>/s,
+			);
+
+			assert.ok(block?.[1]);
+
+			const evidence = JSON.parse(block[1]);
+			assert.ok(evidence !== null, "trusted gate evidence must not be null");
+			assert.match(evidence.run, /bench-local trusted gates/);
+			assert.equal(evidence.candidateSha, gate.candidateSha);
+			assert.equal(evidence.gateSha, gate.gateSha);
+			assert.equal(evidence.ciRunId, 0);
+			assert.equal(evidence.ci.runId, 0);
+			assert.equal(evidence.ci.reportId, 0);
+			assert.equal(evidence.gateReceiptDigest, digestOf(receipt));
+			assert.equal(evidence.reportDigest, digestOf(receipt));
+			assert.equal(evidence.checks.length, gate.checks.length);
+			assert.ok(
+				evidence.checks.every(
+					(check: { exitCode: number; durationMs: number }) =>
+						check.exitCode === 0 && check.durationMs >= 0,
+				),
+			);
+			assert.deepEqual(
+				evidence.checks.find(
+					(check: { name: string }) => check.name === "main_tests",
+				).testGlobs,
+				gate.testGlobs,
+			);
+			assert.deepEqual(evidence.heldout, { files: 1, tests: 1 });
+			assert.ok(!prompt.includes("Offline bench evidence, NOT GitHub CI."));
+		}
+	});
+	it("retains ignored archived files and explicitly stages ignored patch additions", {
+		timeout: 60000,
+	}, async (t) => {
+		const f = await harness(t, false, 1, { ignored: true });
+		const result = await f.run();
+		assert.equal(result.code, 0, result.stderr);
+		assert.equal(
+			result.value().outcome.kind,
+			"passed",
+			JSON.stringify(result.value().outcome),
+		);
+
+		const gate = JSON.parse(
+			readFileSync(join(f.root, "trial/gates/receipt.json"), "utf8"),
+		);
+
+		const files = (sha: string) =>
+			execFileSync(
+				"git",
+				[
+					"-C",
+					join(f.root, "trial/repository"),
+					"ls-tree",
+					"-r",
+					"--name-only",
+					sha,
+				],
+				{ encoding: "utf8" },
+			).split("\n");
+
+		assert.ok(
+			files(gate.gateSha).includes("src/ignored-base.ts"),
+			"archived tracked files must survive gitignore",
+		);
+		assert.ok(
+			files(gate.candidateSha).includes("test/src/added.test.ts"),
+			"patch additions must survive gitignore",
+		);
+		assert.ok(
+			gate.checks.some(
+				(check: { name: string; exitCode: number; durationMs: number }) =>
+					check.name === "candidate_tests" &&
+					check.exitCode === 0 &&
+					check.durationMs > 0,
+			),
+		);
+	});
+	it("inlines production source excerpts and enables subagent only above eight contract files", {
+		timeout: 60000,
+	}, async (t) => {
+		const small = await harness(t);
+		assert.equal((await small.run()).value().outcome.kind, "passed");
+		assert.ok(small.prompts[0]?.includes("export const value = 0;"));
+		assert.ok(small.buildTools.every((tools) => !tools.includes("subagent")));
+
+		const large = await harness(t, false, 1, { large: true });
+		assert.equal((await large.run()).value().outcome.kind, "passed");
+		assert.ok(large.prompts[0]?.includes("export const value = 0;"));
+		assert.ok(large.buildTools.every((tools) => tools.includes("subagent")));
+	});
+	it("refuses skill variants through symlinked installed directories without touching their targets", {
+		timeout: 60000,
+	}, async (t) => {
+		for (const path of ["assets", "assets/skills", "assets/skills/build"]) {
+			const f = await harness(t);
+			const target = join(f.root, path);
+			const external = join(f.root, "external");
+			renameSync(target, external);
+			symlinkSync(external, target);
+			const replacement = "Replacement must never reach the installed skill.\n";
+			put(f.root, "build.md", replacement);
+			const assetsDigest = await manifestDigest(f.assets);
+			assert.ok(assetsDigest !== null);
+			writeFileSync(
+				f.variantFile,
+				JSON.stringify({
+					...f.variant,
+					pins: { ...f.variant.pins, assetsDigest },
+					change: {
+						kind: "skill",
+						path: "skills/build/SKILL.md",
+						file: "build.md",
+						digest: digestOf(replacement),
+					},
+				}),
+			);
+			const result = await f.run();
+			assert.notEqual(
+				result.code,
+				0,
+				"symlinked installed directory must be refused before trial preparation",
+			);
+			assert.match(result.stderr, /skill_variant_symlink/);
+			assert.equal(f.calls.length, 0);
+			assert.equal(await manifestDigest(f.assets), assetsDigest);
+		}
+	});
+	it("refuses variant files resolving inside the bundle, including oracle checks", {
+		timeout: 60000,
+	}, async (t) => {
+		for (const file of [
+			"bundle/oracle/checks/value.test.ts",
+			"bundle/builder/contract.json",
+		]) {
+			const f = await harness(t);
+			const originalDigest = await manifestDigest(f.assets);
+			symlinkSync(join(f.root, file), join(f.root, "replacement.md"));
+			writeFileSync(
+				f.variantFile,
+				JSON.stringify({
+					...f.variant,
+					change: {
+						kind: "skill",
+						path: "skills/build/SKILL.md",
+						file: "replacement.md",
+						digest: digestOf(readFileSync(join(f.root, file))),
+					},
+				}),
+			);
+			const result = await f.run();
+			assert.notEqual(
+				result.code,
+				0,
+				"bundle bytes must not become skill instructions",
+			);
+			assert.match(result.stderr, /variant_file_inside_bundle/);
+			assert.equal(f.calls.length, 0);
+			assert.equal(await manifestDigest(f.assets), originalDigest);
+		}
+	});
 	it("reuses the real runner, visible tests, trusted gates, held-out checks and both judges with a fake gateway", {
 		timeout: 60000,
 	}, async (t) => {

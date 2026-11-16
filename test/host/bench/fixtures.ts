@@ -31,7 +31,10 @@ export function put(
 	writeFileSync(join(root, path), text, { mode: 0o600 });
 }
 
-export async function benchFixture(root: string) {
+export async function benchFixture(
+	root: string,
+	options: { replacements?: boolean; ignored?: boolean; large?: boolean } = {},
+) {
 	const repository = join(root, "source");
 	mkdirSync(repository, { mode: 0o700 });
 	const repo = "nublai/pi-herdr-factorio";
@@ -69,6 +72,16 @@ export async function benchFixture(root: string) {
 		'{"name":"bench-fixture","version":"1.0.0","lockfileVersion":3,"packages":{"":{"name":"bench-fixture","version":"1.0.0"}}}',
 	);
 	put(repository, "src/value.ts", "export const value = 0;\n");
+
+	if (options.ignored) {
+		put(
+			repository,
+			".gitignore",
+			"src/ignored-base.ts\ntest/src/added.test.ts\n",
+		);
+		put(repository, "src/ignored-base.ts", "export const ignored = true;\n");
+	}
+
 	put(
 		repository,
 		"test/src/value.test.ts",
@@ -98,7 +111,7 @@ export async function benchFixture(root: string) {
 		).trim();
 
 	git("init", "-q");
-	git("add", ".");
+	git("add", "-f", ".");
 	git("commit", "-qm", "synthetic task");
 	const sha = git("rev-parse", "HEAD");
 	assert.ok(isGitSha(sha));
@@ -106,7 +119,7 @@ export async function benchFixture(root: string) {
 	const issue = { title: "Export one", body: "Make value one." };
 	const snapshot = snapshotDigest(issue);
 
-	const contract: Contract = {
+	const baseContract: Contract = {
 		version: 2,
 		runId,
 		issue: 1,
@@ -124,9 +137,27 @@ export async function benchFixture(root: string) {
 		acceptance: [{ id: "A1", kind: "new_behavior", text: "Value is one" }],
 		compatibility: [],
 		limits: [],
-		files: ["src/value.ts"],
+		files: options.large
+			? [
+					"src/value.ts",
+					...Array.from({ length: 8 }, (_, i) => `src/new-${i}.ts`),
+				]
+			: ["src/value.ts"],
 		evidence: [],
 	};
+
+	const contract: Contract = options.replacements
+		? {
+				...baseContract,
+				replacesTests: [
+					{
+						path: "test/src/value.test.ts",
+						test: "base",
+						reason: "Value changes to one.",
+					},
+				],
+			}
+		: baseContract;
 
 	const state = join(root, "production-fixture");
 	const bytes = contractBytes(contract);
