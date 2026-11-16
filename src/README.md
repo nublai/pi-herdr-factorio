@@ -26,7 +26,7 @@ Two matchers keep their own spelling on purpose. They match the gate container's
 
 ## `src/ledger`
 
-`schema.ts` owns the stored ledger formats: run rows versions 1 to 5, score events, run starts and attempt ends, with their codecs and parsers. Stored lines never change, so a codec change must still read every old line to the same bytes. `git.ts` keeps the runs and scores files on `factory/ledger` through the Git Data API, without force. `append.ts` appends one frozen row or proves it is already there. `terminal.ts` turns a finished run into its row. `outbox.ts` holds the controller's private publication queue and its bounded pump. Candidate branches and owner patches belong to `src/github/publish.ts`.
+`schema.ts` owns the stored ledger formats: run rows versions 1 to 6, score events, run starts and attempt ends, with their codecs and parsers. Stored lines never change, so a codec change must still read every old line to the same bytes. `git.ts` keeps the runs and scores files on `factory/ledger` through the Git Data API, without force. `append.ts` appends one frozen row or proves it is already there. `terminal.ts` turns a finished run into its row. `outbox.ts` holds the controller's private publication queue and its bounded pump. Candidate branches and owner patches belong to `src/github/publish.ts`.
 
 ## `src/controller`
 

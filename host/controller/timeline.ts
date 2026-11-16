@@ -41,7 +41,7 @@ export function fileRunTimeline(stateDir: string): RunTimeline {
 
 	function write(
 		runId: Digest,
-		input: Omit<TimelineInput, "kind">,
+		{ repo: controllerRepo, ...input }: Parameters<RunTimeline["point"]>[1],
 		point: boolean,
 	): boolean {
 		try {
@@ -69,7 +69,10 @@ export function fileRunTimeline(stateDir: string): RunTimeline {
 					? readFileSync(join(root, "install-exe-dev.commit"), "utf8").trim()
 					: "";
 
-				if (isGitSha(installed)) revision = installed;
+				const [sha = "", repo] = installed.split(/\s+/);
+
+				if (isGitSha(sha) && (repo === undefined || repo === controllerRepo))
+					revision = sha;
 			}
 
 			const at = Math.max(input.at, records.at(-1)?.at ?? 0);

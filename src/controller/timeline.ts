@@ -1,4 +1,5 @@
 import { STAGE_ORDER } from "../core/stages.ts";
+import type { RepoSlug } from "../trust/platform.ts";
 import { textOf, type JsonValue } from "../core/json.ts";
 import {
 	count,
@@ -55,14 +56,18 @@ export type TimelineInput = Omit<
 	"v" | "runId" | "seq" | "controllerRevision"
 >;
 
+type TimelineWriteInput = Omit<TimelineInput, "kind"> & {
+	readonly repo: RepoSlug;
+};
+
 export interface RunTimeline {
 	transition(
 		runId: TimelineRecord["runId"],
-		input: Omit<TimelineInput, "kind">,
+		input: TimelineWriteInput,
 	): Promise<boolean>;
 	point(
 		runId: TimelineRecord["runId"],
-		input: Omit<TimelineInput, "kind">,
+		input: TimelineWriteInput,
 	): Promise<boolean>;
 }
 

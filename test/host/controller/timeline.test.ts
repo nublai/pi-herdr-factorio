@@ -19,7 +19,12 @@ import {
 	type TimelineInput,
 } from "../../../src/controller/timeline.ts";
 import { digestOf } from "../../../src/core/run.ts";
+import { isRepoSlug } from "../../../src/trust/platform.ts";
 import { readTerminalEvidence } from "../../../host/controller/terminal.ts";
+
+const repo = "nublai/pi-herdr-factorio";
+
+assert.ok(isRepoSlug(repo));
 
 it("appends private timeline intervals, pins the installed revision and resumes without duplicate ends", async (t) => {
 	const dir = mkdtempSync(join(tmpdir(), "factory-timeline-"));
@@ -27,7 +32,10 @@ it("appends private timeline intervals, pins the installed revision and resumes 
 	const run = digestOf("synthetic-run");
 	const revision = "a".repeat(40);
 
-	writeFileSync(join(dir, "install-exe-dev.commit"), `${revision}\n`);
+	writeFileSync(
+		join(dir, "install-exe-dev.commit"),
+		`${revision} nublai/pi-herdr-factorio\n`,
+	);
 	let port = fileRunTimeline(dir);
 
 	const input = (
@@ -35,6 +43,7 @@ it("appends private timeline intervals, pins the installed revision and resumes 
 		at: number,
 		category: TimelineInput["category"] = "controller",
 	) => ({
+		repo,
 		name,
 		at,
 		category,
@@ -50,7 +59,10 @@ it("appends private timeline intervals, pins the installed revision and resumes 
 	const prefix = readFileSync(path);
 
 	port = fileRunTimeline(dir);
-	writeFileSync(join(dir, "install-exe-dev.commit"), `${"b".repeat(40)}\n`);
+	writeFileSync(
+		join(dir, "install-exe-dev.commit"),
+		`${"b".repeat(40)} nublai/pi-herdr-factorio\n`,
+	);
 	assert.equal(await port.transition(run, input("stage", 1300, "model")), true);
 	assert.ok(readFileSync(path).equals(prefix));
 
@@ -107,6 +119,54 @@ it("appends private timeline intervals, pins the installed revision and resumes 
 	assert.equal(statSync(path).mode & 0o777, 0o600);
 });
 
+for (const installedRepo of [
+	"nublai/pi-herdr-factorio",
+	"nublai/another-controller",
+])
+	it(`reads the installer's SHA and repository receipt (${installedRepo})`, async (t) => {
+		const dir = mkdtempSync(join(tmpdir(), "factory-install-timeline-"));
+		t.after(() => rmSync(dir, { recursive: true, force: true }));
+		const run = digestOf("installer-receipt");
+		const revision = "a".repeat(40);
+
+		writeFileSync(
+			join(dir, "install-exe-dev.commit"),
+			`${revision} ${installedRepo}\n`,
+		);
+		const port = fileRunTimeline(dir);
+
+		const input = {
+			repo,
+			at: 1000,
+			category: "controller" as const,
+			stage: null,
+			round: 0,
+			attempt: 0,
+		};
+
+		assert.equal(
+			await port.point(run, { ...input, name: "claim", key: "claim" }),
+			true,
+		);
+		assert.equal(
+			await port.point(run, {
+				...input,
+				at: 2000,
+				name: "terminal",
+				key: "terminal",
+			}),
+			true,
+		);
+		const evidence = await readTerminalEvidence(dir, run, 0, null);
+
+		assert.deepEqual(
+			evidence.controllerRevision,
+			installedRepo === "nublai/pi-herdr-factorio"
+				? { kind: "known", value: revision }
+				: { kind: "unavailable", reason: "receipt_missing" },
+		);
+	});
+
 it("summarizes each build receipt once and never turns absent legacy draft counters into zero", async (t) => {
 	const dir = mkdtempSync(join(tmpdir(), "factory-build-summary-"));
 	t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -114,6 +174,7 @@ it("summarizes each build receipt once and never turns absent legacy draft count
 	const port = fileRunTimeline(dir);
 
 	const point = {
+		repo,
 		at: 1,
 		category: "controller" as const,
 		stage: null,
@@ -198,6 +259,7 @@ it("leaves absent, unfinished and corrupt historical timelines unavailable", asy
 	const port = fileRunTimeline(dir);
 
 	const input = {
+		repo,
 		name: "claim" as const,
 		at: 1000,
 		category: "controller" as const,

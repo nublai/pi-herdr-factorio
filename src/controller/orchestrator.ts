@@ -1751,6 +1751,7 @@ export class Orchestrator {
 				: null;
 
 		const input = {
+			repo: this.#input.repo,
 			name,
 			key,
 			category,
@@ -4007,17 +4008,19 @@ export class Orchestrator {
 
 			if (!(await this.#commitCandidate(run, step.state))) continue;
 
-			if (this.#candidateRecovery.has(run.runId))
-				this.#watchRecovery(
-					run.runId,
-					await recoverCandidate(
-						this.#input,
-						this.#candidateResults,
-						this.#candidateRecovery,
-						run,
-						this.#buildWallMs(),
-					),
+			if (this.#candidateRecovery.has(run.runId)) {
+				const testing = await recoverCandidate(
+					this.#input,
+					this.#candidateResults,
+					this.#candidateRecovery,
+					run,
+					this.#buildWallMs(),
 				);
+
+				if (testing !== null)
+					await this.#timeline(testing, "visible_tests", "check");
+				this.#watchRecovery(run.runId, testing);
+			}
 
 			for (let index = 0; index < this.#candidateResults.length; ) {
 				const queued = this.#candidateResults[index];
