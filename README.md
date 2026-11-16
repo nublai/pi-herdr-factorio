@@ -2,9 +2,9 @@
 
 A ticket-triggered software factory for [Pi](https://github.com/earendil-works/pi), built on [pi-herdr-pstack](https://github.com/giuseppecrj/pi-herdr-pstack).
 
-Status: in development. The controller runs on one exe.dev VM and has opened PRs the owner merged, the first being #562. Production dispatch is held between verification batches, and no production tickets run until the F10c pilots.
+Status: in development. The controller runs on one exe.dev VM, `nubl-factory`, against this repository only. It runs real tickets in owner-approved pilot rounds (#735) and is held between them. Its PRs wait at `factory:review`, and the owner merges them.
 
-A maintainer labels a GitHub issue, and the factory takes it from intake through clarification, research, build, review, merge and follow-up, then files its own improvement tickets on a schedule. Linear support follows GitHub.
+A maintainer labels a GitHub issue. The factory specifies the work, writes hidden acceptance checks, builds a patch in a sandbox, validates it with trusted gates, reviews it, and opens a PR. It never merges. Linear support is planned (#717).
 
 ## Where things live
 
@@ -25,6 +25,12 @@ Each folder has a `README.md` that says what belongs in it and where new files g
 | `research/` | The original design research. Historical. |
 
 `npm run check` runs typecheck, lint, format, both guards and every test.
+
+## Set up
+
+- [Install Factorio on exe.dev](docs/operations/install-exe-dev.md) is the runbook. It covers integrations, the one pinned install command, verification, the hold, upgrades and the Shep bridge.
+- [Factory CLI](docs/operations/factory-cli.md) covers the controller and its commands. [Platform profile](docs/operations/platform.md) covers the host profile. [Review and merge a factory PR](docs/operations/human-review.md) covers the owner's side, including repository rulesets.
+- The factory runs only against `nublai/pi-herdr-factorio` today. Setting it up for another repository on a new VM is not supported yet.
 
 ## Records
 

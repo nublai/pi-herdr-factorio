@@ -2,7 +2,9 @@
 
 Giuseppe creates `nubl-factory` from `boldsoftware/exeuntu` and installs the Shep bridge first. Run Factorio's installer as `exedev` (uid 1000, home `/home/exedev`, passwordless sudo), not as root. This is the default `exe-dev` platform; the installer refuses an existing `/etc/factory/platform.json` and never writes one.
 
-This installs a **held** controller, not a cutover. `pi-factorio` was retired and deleted on 2026-11-13 (#734), with its state archived. Production is now `nubl-factory`, held at `3ee264c`. Routine access is read-only; upgrades, bridge installation, enabling dispatch and fixture runs each need Giuseppe's explicit go. A hold blocks new dispatch, not observation of existing runs.
+This runbook installs the factory for this repository on `nubl-factory`. Installing it for another repository is not supported yet. The platform allowlist names only `nublai/pi-herdr-factorio`, so the installer refuses any other `--repo`.
+
+This installs a **held** controller, not a cutover. `pi-factorio` was retired and deleted on 2026-11-13 (#734), with its state archived. Production is now `nubl-factory`, held between pilot rounds; `~/factory-state/install-exe-dev.commit` on the VM records the installed commit. Routine access is read-only; upgrades, bridge installation, enabling dispatch and fixture runs each need Giuseppe's explicit go. A hold blocks new dispatch, not observation of existing runs.
 
 ## Attach integrations
 
@@ -115,7 +117,7 @@ This selects `exedev@nubl-factory.exe.xyz` and `github.int.exe.xyz`. The doctor 
 
 ## Hold and upgrade
 
-Provisioning installs exactly `NODE_VERSION` through mise, currently Node 26.12.1. An upgrade downgrades a host with a newer Node to `NODE_VERSION`; it does not refuse the newer version before provisioning. `nubl-factory` currently runs Node 26.13.1, so its next upgrade switches it to 26.12.1. Giuseppe must acknowledge that downgrade before the coordinator upgrades production.
+Provisioning installs exactly `NODE_VERSION` through mise, currently Node 26.12.1. An upgrade downgrades a host with a newer Node to `NODE_VERSION`; it does not refuse the newer version before provisioning. `nubl-factory` runs Node 26.12.1.
 
 Only Giuseppe decides when to remove `/home/exedev/factory-state/disabled`, after the old controller is drained/stopped and cutover verification is complete. This installer never removes it and never creates or deletes `factory:enabled`.
 
