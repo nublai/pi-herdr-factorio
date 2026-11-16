@@ -286,16 +286,16 @@ An incompatible input fails before printing a report. The error lists every
 differing undeclared dimension, including pin and runtime field names. The
 command never silently excludes an incompatible trial.
 
-The JSON contains `variants` and `tasks`. Every summary includes:
+The JSON contains `variants` and `tasks`. Reports include:
 
 - The pass count, `n`, and pass rate. Failed and budget-exhausted trials remain
   in the denominator.
 - Token and wall-time medians, minima, maxima, and counts.
 - A median labelled `api_equivalent_estimate`, its coverage label and coverage
   counts, the number of known estimates, and the total trial count. Null
-  estimates stay unknown. The median uses only known estimates and has
-  `lower_bound` coverage when some estimates are missing. `billedSpend` stays
-  `unavailable`.
+  estimates stay unknown. The median uses only known estimates. Partial
+  coverage is labelled `lower_bound` or `uncertain`, never exact.
+  `billedSpend` stays `unavailable`.
 - `fewerThanThreeTrials` on each variant and each task's variant column.
 
 Each task retains every variant column. An absent side has `status: "missing"`,
