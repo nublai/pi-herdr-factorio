@@ -248,6 +248,83 @@ without new calls or charges. Interrupted or concurrent invocations refuse with
 Retain that directory and its journals as incomplete evidence. Do not remove its
 claim to force a restart. Run a new, separately budgeted trial if authorized.
 
+## Compare trial directories
+
+```sh
+node host/cli/index.ts bench compare "$HOME/bench/trials/430-01" "$HOME/bench/trials/430-02"
+node host/cli/index.ts bench spend "$HOME/bench/trials/"*
+```
+
+Both commands print JSON and only read local files. They make no model, GitHub,
+or VM requests. Each argument is a trial state directory, not a task bundle
+or a `trial.json` path. They reject duplicate directory aliases. Completed
+records require a matching `trial.sha256` and strict `parseBenchTrial` validation.
+Unknown or duplicate keys, malformed nested fields, and broken trial, variant,
+token, time, or pin bindings fail. Resume uses the same parser and also checks
+the record against the invocation's claim binding.
+
+### BenchComparison v1
+
+`src/bench/compare.ts` defines the comparison. Variant names identify report
+columns. Use the same name and treatment across repetitions and tasks. Tasks
+are keyed by `originalRunId`, not issue number. Different historical runs of
+one issue are different tasks. Trials of the same task must use the same
+bundle, issue, cap, factory revision, workflow, tariff, original assets, Node
+version, platform, gate runner, and thinking label.
+
+The selected model, skill file digest, or `buildRevision` value is the only
+permitted difference between variants. `buildRevision: on` is the baseline
+and can pair with one model or skill treatment because those treatments also
+leave the revision enabled. An off treatment paired with a model treatment
+changes two dimensions and fails. Different model stages or skill paths also
+fail. Skill treatments may change the resulting runtime assets digest, never
+the original assets pin. The local replacement `file` path is not a treatment
+because its bytes are pinned by digest. Within a named variant, the treatment
+and resulting runtime assets must remain fixed for each task.
+
+An incompatible input fails before printing a report. The error lists every
+differing undeclared dimension, including pin and runtime field names. The
+command never silently excludes an incompatible trial.
+
+The JSON contains `variants` and `tasks`. Every summary includes:
+
+- The pass count, `n`, and pass rate. Failed and budget-exhausted trials remain
+  in the denominator.
+- Token and wall-time medians, minima, maxima, and counts.
+- A median labelled `api_equivalent_estimate`, its coverage label and coverage
+  counts, the number of known estimates, and the total trial count. Null
+  estimates stay unknown. The median uses only known estimates and has
+  `lower_bound` coverage when some estimates are missing. `billedSpend` stays
+  `unavailable`.
+- `fewerThanThreeTrials` on each variant and each task's variant column.
+
+Each task retains every variant column. An absent side has `status: "missing"`,
+`n: 0`, and null medians, rather than disappearing from the report. Present
+columns include each trial's outcome, dates, model observations, and estimate
+coverage. Differences are right minus left within the same task. Missing sides
+produce null differences. There are no cross-task differences or ratios.
+Variant-wide summaries can cover different task sets and are descriptive,
+not evidence of an improvement. Three trials cannot establish a small effect.
+Provider backend versions remain unpinned even when observed model names match.
+
+### Tally recorded charges
+
+`bench spend` includes incomplete claimed directories that `bench compare`
+refuses. For a completed trial it uses `accounting.chargedTokens` once and does
+not add its runtime receipts again. Copied completed trial IDs are refused.
+For an incomplete trial it reads each runtime execution's receipt, high-water
+usage, request journal, and audit through the production `executionCharge`
+reader. That reader reconciles overlapping charges by maximum, retains
+uncertain dispatch bounds, and avoids adding aggregate receipts to their leaves.
+
+The output reports `chargedTokens`, completed and incomplete trial counts,
+`uncertainTrials`, and `unavailableTrials`. A directory with no recorded charge
+has null tokens, not a claimed zero. The total is labelled
+`coverage: "recorded_charges_only"`. It is not evidence that an interrupted
+request incurred no later charge. Retain incomplete directories and reread them
+when late usage settles. Dollar billing remains `unavailable`. This command
+neither grants another trial nor changes a token allowance.
+
 ## Install and run on nubl-bench
 
 Only the coordinator runs this procedure under the bench-host and spend grants.

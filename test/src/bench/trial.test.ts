@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { trialAccounting } from "../../../src/bench/trial.ts";
+import { parseBenchTrial, trialAccounting } from "../../../src/bench/trial.ts";
+import { syntheticTrial } from "../../host/bench/trial-fixtures.ts";
 
 const journal = [
 	{
@@ -22,6 +23,67 @@ const journal = [
 ]
 	.map((line) => JSON.stringify(line))
 	.join("\n");
+
+describe("BenchTrial parser", () => {
+	it("rejects malformed nested records, duplicate keys and broken semantic bindings", () => {
+		const trial = syntheticTrial();
+		const cost = trial.accounting.cost;
+
+		const invalid = [
+			{ ...trial, runtime: { ...trial.runtime, extra: true } },
+			{ ...trial, tokenCap: -1 },
+			{ ...trial, tokenCap: 1.5 },
+			{ ...trial, issue: 0 },
+			{ ...trial, accounting: { ...trial.accounting, chargedTokens: 0 } },
+			{
+				...trial,
+				accounting: { ...trial.accounting, sources: ["build", "build"] },
+			},
+			{
+				...trial,
+				accounting: {
+					...trial.accounting,
+					cost: { ...cost, tokens: { ...cost.tokens, total: 0 } },
+				},
+			},
+			{ ...trial, variantDigest: "0".repeat(64) },
+			{ ...trial, bundleDigest: "0".repeat(64) },
+			{ ...trial, wallMs: 0 },
+			{ ...trial, outcome: { kind: "passed", reason: "not allowed" } },
+			{ ...trial, stages: [{ name: "build", wallMs: -1, outcome: "passed" }] },
+			{ ...trial, judges: [{ seat: "code-review" }] },
+			{
+				...trial,
+				accounting: {
+					...trial.accounting,
+					cost: { ...cost, estimate: { ...cost.estimate, usdMicros: null } },
+				},
+			},
+			{
+				...trial,
+				accounting: {
+					...trial.accounting,
+					cost: { ...cost, coverage: { ...cost.coverage, requests: 0 } },
+				},
+			},
+		];
+
+		for (const value of invalid)
+			assert.throws(() => parseBenchTrial(JSON.stringify(value)));
+		assert.throws(
+			() =>
+				parseBenchTrial(
+					JSON.stringify(trial).replace(
+						'"version":1',
+						'"version":1,"version":1',
+					),
+				),
+			/duplicate_trial_key/,
+		);
+		assert.throws(() => parseBenchTrial("null"));
+		assert.throws(() => parseBenchTrial("{"));
+	});
+});
 
 describe("BenchTrial accounting", () => {
 	it("prices journal requests once, not receipt plus journal or duplicate result lines", () => {
