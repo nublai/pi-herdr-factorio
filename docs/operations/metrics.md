@@ -3,7 +3,9 @@
 `metrics --json` measures outcomes. It does not dispatch work, call a model,
 change GitHub, gate a run or promote a factory revision. The separate
 `replay check` and `replay report` commands compare pinned replay evidence.
-They make no GitHub or model calls.
+They make no GitHub or model calls. The separate `cost --json` command prices
+local request journals as an API-equivalent estimate. It does not report billed
+spend.
 
 ## Run it
 
@@ -310,6 +312,82 @@ request 5815738464). This is not mature seven-day evidence.
 The unit suite includes synthetic clarification chains, defect windows, missing
 receipts, owner heads, intervention unknowns and a two-second computation
 budget for 1,000 landings with 1,000 in-window labeled defects.
+
+## API-equivalent cost estimates
+
+```sh
+node host/cli/index.ts cost --json --state-dir <state>
+node host/cli/index.ts cost --json --state-dir <state> --run <id>
+```
+
+`--json` and `--state-dir` are required. `--run` accepts a full run ID or a
+unique hexadecimal prefix of at least four characters. An absent or ambiguous
+prefix exits 1. Invalid arguments exit 2. An empty state directory prints zero
+runs and exits 0.
+
+The command reads frozen terminal rows from `<state>/ledger/<runId>/row.json`
+and request journals under `<state>/stages/<runId>/`. It makes no GitHub or
+model call and writes nothing, including when the state is read-only. It
+reports only terminal runs with local rows, not active runs, maintenance,
+measurement jobs or the remote ledger's older history. An unreadable or invalid
+terminal row exits 1 instead of omitting a run. Stage receipts supply model
+identities, not additive charges. Aggregate receipts and their leaves are never
+counted together. Agent and retained-session directories are not executions.
+
+Every report, run and stage includes:
+
+- `estimate.kind: api_equivalent_estimate` and `estimate.usdMicros`. Divide
+  micros by 1,000,000 for estimated USD. `null` means unavailable, never a zero
+  estimate for missing work. A partial estimate sums only priced requests.
+- `billedSpend: unavailable` and `cache: not_reported`. Journals combine cached
+  and fresh input, so the estimate applies the full input rate without a cache
+  discount. This is API-equivalent pricing, not an invoice, allocated
+  subscription cost or a monetary budget check.
+- `tariffDigest`, the SHA-256 of `JSON.stringify` of the pinned tariff data.
+  `src/core/tariff.json` pins the rates, tiers and source metadata from
+  `@earendil-works/pi-ai` 1.4.0 provider files, including each source file's
+  SHA-256 and the 2026-11-16 as-of date. It covers the Anthropic limits table
+  and the default OpenAI model. Models absent from that source snapshot stay
+  unpriced. The reader refuses a changed tariff that does not match its pin.
+- `tokens.input`, `tokens.output` and `tokens.total`, the observed journal
+  measurements, counted once per request number within each journal. These
+  sums exclude unknown parts and are not the controller's charged total.
+  Each run and stage also carries `ledgerTokens`, the unchanged charged fact,
+  and `tokenDifference`, charged tokens minus observed journal tokens.
+- `coverage`, with request counts for `priced`, `uncertain`, `missing` usage
+  and `unpriced` models, plus `missingJournals` and `missingReceipts`.
+  Missing journals have an unknown request count. A malformed journal line
+  adds a missing observation. `unpricedModels` names unknown model IDs.
+- `byModel`, with observed tokens and labelled estimates for each model.
+  Run and stage `gaps` name missing evidence and ledger differences.
+
+The formula for each metered request is
+`round(inputTokens * inputRate + outputTokens * outputRate)` USD micros.
+Rates are USD per million tokens. A tier applies to the entire request only
+when its input exceeds the tier threshold. At exactly 272,000 input tokens,
+`openai/gpt-6.1-sol` uses the base rate; 272,001 uses the higher tier.
+The journal's observed model wins. Where OpenAI did not report one, a bound
+execution receipt supplies the requested model for that route. Ambiguous
+same-route fallback requests stay unpriced instead of guessing a model.
+
+`coverage.kind` is `exact` only when the observed requests are priced, receipts
+and journals are present, and charged tokens reconcile exactly. `uncertain`
+means an unsettled request or uncertain ledger charge exists. `lower_bound`
+means other evidence is incomplete but some requests are priced. `unavailable`
+means no estimate can be made for that incomplete group. These labels describe
+coverage, not confidence in billed spend. The no-cache estimate can overstate
+actual API charges. Unknown charges never become zero, and uncertain request
+bounds never enter the estimate. Separate counts remain visible even when
+`uncertain` takes precedence over another coverage gap.
+
+The read-only pilot snapshot from 2026-11-16 contains 13 terminal runs,
+3,610,127 observed input tokens and 101,957 observed output tokens. With the
+pinned tariff it estimates 8,239,824 USD micros, about $8.24. One uncertain
+request is not priced. Its run's 173,435-token difference from the charged
+ledger remains explicit. Three other runs lack an execution receipt and
+journal and retain incomplete coverage even when their observed tokens equal
+the ledger's lower-bound total. This is a partial API-equivalent estimate,
+not billed spend.
 
 ## Replay checks
 
