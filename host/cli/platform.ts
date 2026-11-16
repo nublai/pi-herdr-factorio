@@ -35,8 +35,6 @@ import { computeMetrics } from "../../src/views/metrics.ts";
 
 export const USAGE = `Usage:
   node host/cli/index.ts platform --env
-  node host/cli/index.ts bench export --state-dir <dir> --run <id> --out <dir> [--repository <checkout>]
-  node host/cli/index.ts bench verify <bundle>
   node host/cli/index.ts replay check --json [--corpus <dir>] [--main-sha <sha>] [--previous-sha <sha>] [--candidate-sha <sha>] [--case <id> --production-state-dir <dir> --budget-file <file>]
   node host/cli/index.ts replay report --json --case <id> --previous-row <file> --candidate-row <file> --previous-record <file> --candidate-record <file> --previous-sha <sha> --candidate-sha <sha> [--corpus <dir>] [--previous-assets <digest> --candidate-assets <digest>]
   node host/cli/index.ts metrics --json --repo <owner/name> [--ledger-file <path>] [--state-dir <dir>] [--now <instant>] [--cohort production] [--offline] [--intervention-file <fixture>]
