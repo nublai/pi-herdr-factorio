@@ -343,6 +343,12 @@ export async function runCli(
 
 	if (argv[0] === "replay") return runReplayCli(argv.slice(1), io, platform);
 
+	if (argv[0] === "cost") {
+		const { runCostCli } = await import("./cost.ts");
+
+		return runCostCli(argv.slice(1), io);
+	}
+
 	if (argv[0] === "metrics") return runMetricsCli(argv.slice(1), io, platform);
 
 	if (argv[0] === "owner-feed")

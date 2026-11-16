@@ -59,6 +59,36 @@
 				"from": [],
 				"since": "M4"
 			},
+			"host/cli/cost.ts": {
+				"owner": "host/cli",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "M1"
+			},
+			"src/core/tariff.ts": {
+				"owner": "src/core",
+				"seats": ["code-review", "security-review", "simplify", "ultrareview"],
+				"from": [],
+				"since": "M1"
+			},
+			"src/core/tariff.json": {
+				"owner": "src/core",
+				"seats": ["code-review", "security-review", "simplify", "ultrareview"],
+				"from": [],
+				"since": "M1"
+			},
+			"test/host/cli/cost.test.ts": {
+				"owner": "test/host/cli",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "M1"
+			},
+			"test/src/core/tariff.test.ts": {
+				"owner": "test/src/core",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "M1"
+			},
 			"test/fixtures/candidate/stored-books-69e1494.json": {
 				"owner": "src/candidate",
 				"seats": [
