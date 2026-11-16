@@ -31,6 +31,7 @@ import {
 } from "../controller/state.ts";
 import { runGatesCli } from "../gates/gates.ts";
 import { runViewerCli } from "../viewer/server.ts";
+import { runBenchCli } from "./bench.ts";
 import { runCadenceCli } from "./cadence.ts";
 import { runMeasurementCli } from "./measurement.ts";
 import { runMetricsCli } from "./metrics.ts";
@@ -335,6 +336,8 @@ export async function runCli(
 
 	if (argv[0] === "score" || argv[0] === "explain")
 		return runMeasurementCli(argv[0], argv.slice(1), io, platform);
+
+	if (argv[0] === "bench") return runBenchCli(argv.slice(1), io, platform);
 
 	if (argv[0] === "cadence") return runCadenceCli(argv.slice(1), io, platform);
 
