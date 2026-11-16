@@ -34,7 +34,7 @@ import {
 } from "../../../src/ledger/terminal.ts";
 import { digestOf, runIdOf } from "../../../src/core/run.ts";
 import { unknownEfficiency } from "../../../src/core/execution.ts";
-import { objectOf } from "../../../src/core/json.ts";
+import { objectOf, type JsonValue } from "../../../src/core/json.ts";
 import { isGitSha, type GitSha } from "../../../src/config/schema.ts";
 import { isRepoSlug } from "../../../src/trust/platform.ts";
 import { LedgerGit, repo } from "../../ledger-git.ts";
@@ -215,6 +215,16 @@ function landedInput(issue: number): V1Input {
 const SHIPPED_V1_ROW =
 	'{"v":1,"runId":"48df48b3c37af62da81e8a19411d48c0fd70de8cc1dd1d8576ea9f2d6997a7f3","repo":"giuseppecrj/pi-herdr-factorio-fixture","issue":41,"eventId":"4100","eventAt":"2026-11-04T11:00:00Z","previousRunId":{"kind":"known","value":null},"snapshotDigest":"a10fc1ad41fab5aaf0c3b526637806a62b0e6edefb619c0e6eb009f8f6b37593","originalBase":"1111111111111111111111111111111111111111","startedAt":{"kind":"known","value":"2026-11-04T11:00:05.000Z"},"terminalObservedAt":"2026-11-04T11:05:00.000Z","provenance":{"kind":"production","policy":{"workflowSha":"1111111111111111111111111111111111111111","workflowDigest":"da7f739f627198465eeab537a6f7a435dc4a0c332f9e4a8462293eb3f4ab7ee0","gates":{"kind":"known","value":{"sourceSha":"1111111111111111111111111111111111111111","digest":"7a3b3573cac24bf3922c7294de56c9f17013da092bfcdb33fc663de934e9546e"}},"autonomy":{"approveMerge":"always","land":"propose","digest":"d4bf357348c1219d00252a80cd797e4a9477a6e8dd3a54918efb6f2ed8633fa3"}}},"terminalMarker":{"seq":5,"digest":"b22595e4dfdf22937adda7583fd64cd550228e5556b2c39243388aac12a04252"},"outcome":{"kind":"failed","stage":"accept","cause":{"kind":"unavailable","reason":"not_instrumented"}},"pr":null,"artifacts":{"kind":"pre_build_stop","contractDigest":{"kind":"unavailable","reason":"not_instrumented"},"acceptanceDigest":{"kind":"unavailable","reason":"not_instrumented"}},"repairRounds":{"kind":"unavailable","reason":"not_instrumented"},"stages":{"kind":"unavailable","reason":"receipt_missing"},"models":{"kind":"unavailable","reason":"receipt_missing"},"usage":{"tokens":{"kind":"lower_bound","unit":"tokens","total":1234,"reason":"not_instrumented"},"parentTokens":{"kind":"unavailable","reason":"not_instrumented"},"childTokens":{"kind":"unavailable","reason":"not_instrumented"},"unattributedTokens":{"kind":"unavailable","reason":"not_instrumented"},"money":{"kind":"unavailable","reason":"provider_not_reported"}},"interruptedAttempts":{"kind":"known","value":0},"contextPressure":{"kind":"unavailable","reason":"not_instrumented"},"redactedReceiptDigests":[],"evidence":{"issueUrl":"https://github.com/giuseppecrj/pi-herdr-factorio-fixture/issues/41","ciUrls":[]},"gaps":["not_instrumented","provider_not_reported","receipt_missing"]}';
 
+function preV6(snapshot: JsonValue) {
+	const fields = { ...objectOf(snapshot) };
+
+	delete fields.controllerRevision;
+	delete fields.timeline;
+	delete fields.buildDrafts;
+
+	return fields;
+}
+
 const pending = (row: FrozenRow) => ({
 	runId: row.row.runId,
 	bytes: row.bytes,
@@ -262,6 +272,81 @@ async function probeHistory(fake: LedgerGit): Promise<GitSha> {
 
 	return d.sha;
 }
+
+describe("ledger v6 measurement facts", () => {
+	it("reads authored landed terminal facts for versions 5 and 6", () => {
+		const landed = landedInput(42).outcome;
+
+		assert.ok(
+			landed.kind === "landed" && landed.assurance.kind === "factory_verified",
+		);
+
+		const outcome = {
+			...landed,
+			assurance: { ...landed.assurance, authored: "factory" },
+		};
+
+		for (const v of [5, 6])
+			assert.deepEqual(terminalFailureOf({ v, outcome, failure: null }), {
+				outcome,
+				failure: null,
+			});
+	});
+	it("parses and round-trips controller revision and a partitioned timeline", () => {
+		const base = rowInput(7);
+		assert.ok(base.provenance.kind === "production");
+		const { policy } = base.provenance;
+
+		const row = ledgerRowOf({
+			...base,
+			v: 6,
+			buildDrafts: {
+				kind: "known",
+				value: {
+					draftRuns: 1,
+					draftRevisionTokens: 123,
+					draftSkips: { tokens: 0, wall: 0 },
+				},
+			},
+			stages:
+				base.stages.kind === "known"
+					? {
+							kind: "known",
+							value: base.stages.value.map((s) => ({
+								...s,
+								efficiency: unknownEfficiency(),
+							})),
+						}
+					: base.stages,
+			runContext: { kind: "production", policy, trustedCap: TRUSTED_RUN_CAP },
+			terminalWorkflowObservation: {
+				kind: "known",
+				value: {
+					workflowSha: policy.workflowSha,
+					workflowDigest: policy.workflowDigest,
+				},
+			},
+			failure: null,
+			acceptAttempts: { kind: "known", value: [] },
+			efficiency: unknownEfficiency(),
+			controllerRevision: { kind: "known", value: sha("6") },
+			timeline: {
+				kind: "known",
+				value: {
+					elapsedMs: 3000,
+					modelMs: 1000,
+					checkMs: 500,
+					ciWaitMs: 500,
+					ownerWaitMs: 500,
+					controllerMs: 500,
+				},
+			},
+		});
+
+		assert.equal(row.row.v, 6);
+		assert.ok(frozenRowOf(row.bytes)?.bytes.equals(row.bytes));
+	});
+});
 
 describe("immutable run context", () => {
 	const dirs: string[] = [];
@@ -361,8 +446,8 @@ describe("immutable run context", () => {
 			assert.deepEqual(rows[0]?.row.provenance, rows[1]?.row.provenance);
 
 			for (const row of rows) {
-				assert.equal(row.row.v, 5);
-				assert.ok(row.row.v === 5);
+				assert.equal(row.row.v, 6);
+				assert.ok(row.row.v === 6);
 				assert.deepEqual(row.row.runContext, context);
 				assert.equal(row.row.provenance.kind, context.kind);
 				assert.ok(frozenRowOf(row.bytes)?.bytes.equals(row.bytes));
@@ -426,7 +511,7 @@ describe("immutable run context", () => {
 		});
 
 		assert.equal(row.row.provenance.kind, "legacy_import");
-		assert.ok(row.row.v === 5);
+		assert.ok(row.row.v === 6);
 		assert.deepEqual(row.row.runContext, context);
 	});
 
@@ -509,7 +594,7 @@ describe("ledger row codec", () => {
 		});
 
 		const v4 = ledgerRowOf({
-			...objectOf(snapshot),
+			...preV6(snapshot),
 			v: 4,
 			terminalMarker: base.terminalMarker,
 			outcome: base.outcome,
@@ -599,14 +684,14 @@ describe("ledger row codec", () => {
 			});
 
 			assert.ok(
-				row.row.v === 5 &&
+				row.row.v === 6 &&
 					row.row.outcome.kind === "landed" &&
 					row.row.outcome.assurance.kind === "factory_verified",
 			);
 			assert.equal(row.row.outcome.assurance.authored, authored);
 		}
 	});
-	it("F10-3 v5 records authorship, keeps v1-v4 canonical bytes and rejects version 6 as unknown", () => {
+	it("F10-3 v5 records authorship, keeps v1-v5 canonical bytes and rejects version 7 as unknown", () => {
 		const legacy = rowInput(42);
 		assert.ok(legacy.provenance.kind === "production");
 
@@ -629,17 +714,18 @@ describe("ledger row codec", () => {
 		});
 
 		assert.ok(objectOf(snapshot));
-		assert.equal(objectOf(snapshot)?.v, 5);
+		assert.equal(objectOf(snapshot)?.v, 6);
 
 		const v5 = ledgerRowOf({
-			...objectOf(snapshot),
+			...preV6(snapshot),
+			v: 5,
 			terminalMarker: legacy.terminalMarker,
 		});
 
 		assert.equal(v5.row.v, 5);
 
 		const old4 = ledgerRowOf({
-			...objectOf(snapshot),
+			...preV6(snapshot),
 			v: 4,
 			terminalMarker: legacy.terminalMarker,
 		});
@@ -680,7 +766,7 @@ describe("ledger row codec", () => {
 		}
 
 		assert.equal(
-			parseLedger(Buffer.from('{"v":6}\n'))[0]?.kind,
+			parseLedger(Buffer.from('{"v":7}\n'))[0]?.kind,
 			"unknown_version",
 		);
 	});
@@ -909,7 +995,7 @@ describe("ledger row codec", () => {
 
 		const lines = [
 			good.bytes,
-			Buffer.from('{"v":6,"future":true}\n'),
+			Buffer.from('{"v":7,"future":true}\n'),
 			Buffer.from("{not json\n"),
 			Buffer.from(
 				`${good.bytes.toString().slice(0, -1).replace('"v":1,', "")}\n`,

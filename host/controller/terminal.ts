@@ -13,6 +13,7 @@ import {
 	readStoredContract,
 } from "../../src/contract/artifacts.ts";
 import {
+	arrayOf,
 	countOf,
 	fieldOf as jsonField,
 	objectOf,
@@ -39,6 +40,8 @@ import { readStageReceipt } from "../sandbox/receipts.ts";
 import { measurementCharges } from "./measurement.ts";
 import { validLedgerInstant } from "./outbox.ts";
 import { fileRunAccounting, parseClaim } from "./state.ts";
+import { readRunTimeline } from "./timeline.ts";
+import { timelineFacts } from "../../src/controller/timeline.ts";
 
 const EXECUTION_NAME =
 	/^(specify|accept|build|review)(?:-r[0-9]+)?-[1-9][0-9]*(?:\.[1-9][0-9]*)?$/;
@@ -162,6 +165,13 @@ export async function readTerminalEvidence(
 		children = 0;
 
 	let splitComplete = true;
+	let buildDraftsComplete = true;
+
+	const buildDrafts = {
+		draftRuns: 0,
+		draftRevisionTokens: 0,
+		draftSkips: { tokens: 0, wall: 0 },
+	};
 
 	const stageOf = (stage: Stage) => {
 		let value = stages.get(stage);
@@ -220,6 +230,38 @@ export async function readTerminalEvidence(
 			jsonField(receipt.record, "runId") === runId &&
 			jsonField(receipt.record, "stage") === stageName &&
 			jsonField(receipt.record, "version") === 1;
+
+		if (stageName === "build") {
+			const runs = valid
+				? countOf(jsonField(receipt.record, "draftRuns"))
+				: null;
+
+			const revisionTokens = valid
+				? countOf(jsonField(receipt.record, "draftRevisionTokens"))
+				: null;
+
+			const skips = valid
+				? arrayOf(jsonField(receipt.record, "draftSkips"))
+				: null;
+
+			if (
+				runs === null ||
+				revisionTokens === null ||
+				skips === null ||
+				!skips.every((s) => s === "tokens" || s === "wall")
+			)
+				buildDraftsComplete = false;
+			else {
+				buildDrafts.draftRuns += runs;
+				buildDrafts.draftRevisionTokens += revisionTokens;
+
+				for (const skip of skips) {
+					if (skip === "tokens") buildDrafts.draftSkips.tokens++;
+
+					if (skip === "wall") buildDrafts.draftSkips.wall++;
+				}
+			}
+		}
 
 		if (valid) {
 			summary.wall += receipt.wallMs;
@@ -501,6 +543,9 @@ export async function readTerminalEvidence(
 					redactedReceiptDigests: [...digests].sort(),
 				};
 
+	const timeline = readRunTimeline(stateDir, runId);
+	const measurement = timeline === null ? null : timelineFacts(timeline);
+
 	const generationGates: Record<string, Digest> = {};
 
 	const admittedPolicy = start == null ? null : contextPolicy(start.context);
@@ -649,6 +694,25 @@ export async function readTerminalEvidence(
 
 	return {
 		...evidence,
+		buildDrafts:
+			measurement !== null &&
+			buildDraftsComplete &&
+			coverage.readable &&
+			coverage.stages.get("build") !== false
+				? known(buildDrafts)
+				: { kind: "unavailable", reason: "not_instrumented" },
+		repairRounds:
+			measurement === null
+				? { kind: "unavailable", reason: "not_instrumented" }
+				: known(measurement.repairRounds),
+		timeline:
+			measurement === null
+				? { kind: "unavailable", reason: "not_instrumented" }
+				: known(measurement.summary),
+		controllerRevision:
+			measurement?.controllerRevision == null
+				? missing
+				: known(measurement.controllerRevision),
 		generationGates,
 		mergedAt,
 		efficiency: {

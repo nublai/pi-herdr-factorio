@@ -57,6 +57,12 @@ export type ChildRunSummary = {
 	readonly byModel: Readonly<Record<string, number>>;
 };
 
+export type DraftProgress = {
+	readonly runs: number;
+	readonly revisionStart: number | null;
+	readonly skips: readonly ("tokens" | "wall")[];
+};
+
 /**
  * The host-side record of one stage attempt, written under the run's stage
  * directory and never into a marker. It holds only numbers, enums, model

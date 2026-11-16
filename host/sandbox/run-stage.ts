@@ -21,7 +21,12 @@ import {
 	unknownEfficiency,
 } from "../../src/core/execution.ts";
 import { requestSettlements, settlementReply } from "../../src/core/journal.ts";
-import type { JsonValue } from "../../src/core/json.ts";
+import {
+	countOf,
+	fieldOf,
+	objectOf,
+	type JsonValue,
+} from "../../src/core/json.ts";
 import {
 	type FamilyInput,
 	familyFromJournal,
@@ -45,6 +50,7 @@ import { LineSplitter } from "./lines.ts";
 import { OUTPUT_MAX_BYTES } from "./receipts.ts";
 import {
 	type ChildRunSummary,
+	type DraftProgress,
 	type FallbackRecord,
 	type OutputRecord,
 	type PinnedVersions,
@@ -134,7 +140,9 @@ export interface StageHost {
 		| null
 	>;
 	readUsage?(): JsonValue | undefined;
-	writeUsage?(usage: ExecutionUsage): boolean;
+	writeUsage?(
+		usage: ExecutionUsage & { readonly draft?: DraftProgress },
+	): boolean;
 	writeReceipt(receipt: StageReceipt): Promise<boolean>;
 	writeOutput(text: string): Promise<boolean>;
 	stderrLog(session: number): Promise<StderrRecord | null>;
@@ -558,12 +566,12 @@ async function runSession(
 				if (tokens >= reserveTokens && wall >= DRAFT_RESERVE_MS) return true;
 
 				ledger.draftSkips.push(tokens < reserveTokens ? "tokens" : "wall");
-				end("settled");
+				end(stage.checkpoint() ? "settled" : CRASHED);
 
 				return false;
 			};
 
-			if (!hasReserve()) return;
+			if (input.stage === "accept" && !hasReserve()) return;
 
 			const wall = stage.deadline - host.now();
 
@@ -622,7 +630,15 @@ async function runSession(
 				return;
 			}
 
-			ledger.draftRuns++;
+			if (input.stage === "accept") {
+				ledger.draftRuns++;
+
+				if (!stage.checkpoint()) {
+					end(CRASHED);
+
+					return;
+				}
+			}
 
 			if (
 				feedback.verdict !== "unrun_test_edits" &&
@@ -635,7 +651,16 @@ async function runSession(
 
 			if (input.stage === "build" && !hasReserve()) return;
 
+			if (input.stage === "build") ledger.draftRuns++;
+
 			if (ledger.revisionStart === null) ledger.revisionStart = ledger.total;
+
+			if (!stage.checkpoint()) {
+				end(CRASHED);
+
+				return;
+			}
+
 			finalText = null;
 			const id = `factory-draft-${run}`;
 			tracker.expect(id);
@@ -1029,6 +1054,14 @@ export async function runStage(
 		ledger.turns = restored.turns;
 		ledger.unreadChildren = restored.usage.unreadChildren;
 		ledger.add(new Map(Object.entries(restored.usage.byModel)));
+		const draft = objectOf(fieldOf(objectOf(saved), "draft"));
+
+		ledger.draftRuns = countOf(draft?.runs) ?? 0;
+		ledger.revisionStart = countOf(draft?.revisionStart);
+
+		if (Array.isArray(draft?.skips))
+			for (const skip of draft.skips)
+				if (skip === "tokens" || skip === "wall") ledger.draftSkips.push(skip);
 	}
 
 	const checkpoint = () =>
@@ -1042,6 +1075,11 @@ export async function runStage(
 			turns: ledger.turns,
 			usage: ledger.usage(true),
 			efficiency: ledger.efficiency,
+			draft: {
+				runs: ledger.draftRuns,
+				revisionStart: ledger.revisionStart,
+				skips: [...ledger.draftSkips],
+			},
 		}) ?? true;
 
 	const tokenCap = Math.min(
@@ -1138,7 +1176,7 @@ export async function runStage(
 		);
 
 		const complete: StageReceipt & { diagnostic?: AcceptDiagnostic } =
-			input.stage === "accept"
+			input.stage === "accept" || input.stage === "build"
 				? {
 						...record,
 						draftRuns: ledger.draftRuns,
@@ -1148,9 +1186,7 @@ export async function runStage(
 								: Math.max(0, ledger.total - ledger.revisionStart),
 						draftSkips: ledger.draftSkips,
 					}
-				: input.stage === "build" && ledger.draftSkips.length > 0
-					? { ...record, draftSkips: ledger.draftSkips }
-					: record;
+				: record;
 
 		if (diagnostic !== undefined) complete.diagnostic = diagnostic;
 

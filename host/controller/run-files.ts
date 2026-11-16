@@ -45,6 +45,7 @@ import {
 	writeOnce,
 } from "./state.ts";
 import { readTerminalEvidence } from "./terminal.ts";
+import { fileRunTimeline } from "./timeline.ts";
 
 function parseAnswer(value: JsonValue): Answer | null {
 	const commentId = textList(fieldOf(value, "commentId"));
@@ -223,6 +224,7 @@ export function fileRunFiles(
 		artifacts: fileArtifacts(root),
 		ledger: fileLedgerOutbox(root),
 		accounting: fileRunAccounting(root),
+		timeline: fileRunTimeline(root),
 		terminalEvidence: (runId, floor, candidate) =>
 			readTerminalEvidence(root, runId, floor, candidate),
 		prepareRun:

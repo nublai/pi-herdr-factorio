@@ -442,7 +442,7 @@ describe("private build stage", () => {
 			await once(restarted);
 			await restarted.tick();
 			const row = (await outbox.scan())?.[0]?.row?.row;
-			assert.ok(row?.v === 5);
+			assert.ok(row?.v === 6);
 			assert.equal(row.outcome.kind, "failed");
 
 			const failure = {

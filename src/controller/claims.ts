@@ -32,6 +32,7 @@ import type { Unsettled } from "./accounting.ts";
 import type { Effects } from "./effects.ts";
 import type { StageEnd, StageInputs, StageOutput } from "./launch.ts";
 import type { OrchestratorInput } from "./orchestrator.ts";
+import type { RunTimeline } from "./timeline.ts";
 
 /**
  * A local record that a run holds a claim, so a restart finds it even after
@@ -93,6 +94,7 @@ export interface RunFiles {
 	/** The private ledger outbox. A terminal snapshot is kept before its marker is posted. */
 	readonly ledger?: LedgerOutbox;
 	accounting?: RunAccounting;
+	readonly timeline?: RunTimeline;
 	/** Native admission policy must be durable before the first claim or dispatch. */
 	prepareRun?(input: {
 		runId: Digest;

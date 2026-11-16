@@ -1,0 +1,190 @@
+import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { it } from "node:test";
+import { fileRunFiles } from "../../host/controller/run-files.ts";
+import { readRunTimeline } from "../../host/controller/timeline.ts";
+import { timelineFacts } from "../../src/controller/timeline.ts";
+import { AUTONOMY_DIGEST } from "../../src/ledger/schema.ts";
+import { digestOf } from "../../src/core/run.ts";
+import {
+	classifiedCase,
+	failingVerdict,
+	storedAssessment,
+} from "../helpers.ts";
+import {
+	labeled,
+	once,
+	runOf,
+	settle,
+	sha,
+	world,
+} from "../src/controller/orchestrator-fixtures.ts";
+
+it("records a controller repair round and a v6 timeline through restart and terminal freeze", {
+	timeout: 30_000,
+}, async (t) => {
+	const dir = mkdtempSync(join(tmpdir(), "factory-measure-controller-"));
+	t.after(() => rmSync(dir, { recursive: true, force: true }));
+	const revision = "e".repeat(40);
+
+	writeFileSync(join(dir, "install-exe-dev.commit"), `${revision}\n`);
+	const f = world();
+	const native = fileRunFiles(dir);
+	const accounting = native.accounting;
+
+	assert.ok(accounting && native.ledger);
+	Object.assign(f.files, {
+		ledger: native.ledger,
+		accounting,
+		timeline: native.timeline,
+		terminalEvidence: native.terminalEvidence,
+		prepareRun: async (
+			input: Parameters<NonNullable<typeof native.prepareRun>>[0],
+		) =>
+			accounting.begin({
+				v: 2,
+				runId: input.runId,
+				startedAt: input.startedAt,
+				context: {
+					kind: "production",
+					trustedCap: 800_000,
+					policy: {
+						workflowSha: input.workflowSha,
+						workflowDigest: input.workflowDigest,
+						gates: {
+							kind: "known",
+							value: {
+								sourceSha: input.workflowSha,
+								digest: digestOf("synthetic-gates"),
+							},
+						},
+						autonomy: {
+							approveMerge: "always",
+							land: "propose",
+							digest: AUTONOMY_DIGEST,
+						},
+					},
+				},
+			}),
+	});
+	f.github.add(labeled(14));
+	f.executor.behaviors = [{ kind: "pass", usage: 10 }];
+	f.executor.acceptBehavior = { kind: "pass", usage: 7 };
+	f.executor.buildBehavior = { kind: "pass", usage: 12 };
+
+	let waited = false;
+
+	f.executor.validate = async (input) => {
+		const round = input.round ?? 0;
+
+		const state = input.state ?? {
+			version: 1,
+			startedAt: input.now,
+			deadline: input.now + input.wallMs,
+			round,
+			originalBase: input.baseSha,
+			baseSha: input.baseSha,
+			baseResolved: true,
+			publication: {
+				branch: `factory/run/14-${input.runId.slice(0, 12)}-r${round}`,
+				patchSha: sha("b".repeat(40)),
+				candidateSha: sha("c".repeat(40)),
+			},
+			dispatchTry: 1,
+			dispatchedAt: input.now,
+			ciRunId: 123 + round,
+			counters: {},
+		};
+
+		await input.save(state);
+
+		if (!waited) {
+			waited = true;
+
+			return { kind: "waiting", state };
+		}
+
+		const verdict = failingVerdict(
+			digestOf(round === 0 ? "patch" : "patch-r1"),
+		);
+
+		const { text, read } = storedAssessment({
+			runId: input.runId,
+			round,
+			generation: input.generation?.generation ?? 0,
+			verdict,
+			assessment: {
+				kind: "failed",
+				failure: classifiedCase(
+					round === 0 ? "candidate_load_error" : "tree_disagreement",
+				),
+			},
+		});
+
+		f.executor.assessments.set(
+			`${input.runId}/${round}/${input.generation?.generation ?? 0}`,
+			text,
+		);
+
+		return { kind: "finished", state, verdict, assessment: read };
+	};
+
+	let controller = f.start();
+
+	await once(controller);
+	f.clock.t += 1000;
+	await once(controller);
+	f.clock.t += 1000;
+	await once(controller);
+	assert.equal(waited, true);
+	const prefix = readFileSync(join(dir, "timeline", `${runOf(14)}.jsonl`));
+
+	Object.assign(f.files, { timeline: fileRunFiles(dir).timeline });
+	controller = f.start();
+
+	for (let tick = 0; tick < 12; tick++) {
+		f.clock.t += 1000;
+		await controller.tick();
+		await settle();
+	}
+
+	const row = (await native.ledger.scan())?.[0]?.row?.row;
+
+	assert.ok(row?.v === 6);
+	assert.deepEqual(row.controllerRevision, { kind: "known", value: revision });
+	assert.deepEqual(row.repairRounds, {
+		kind: "known",
+		value: { authorized: 1, started: 1, completed: 1 },
+	});
+	const records = readRunTimeline(dir, runOf(14));
+
+	assert.ok(records);
+	assert.ok(
+		readFileSync(join(dir, "timeline", `${runOf(14)}.jsonl`))
+			.subarray(0, prefix.length)
+			.equals(prefix),
+	);
+	assert.deepEqual(row.timeline, {
+		kind: "known",
+		value: timelineFacts(records)?.summary,
+	});
+	assert.ok(records.some((r) => r.name === "visible_tests"));
+	assert.ok(records.some((r) => r.name === "validation"));
+	assert.ok(records.some((r) => r.name === "ci_wait"));
+	assert.ok(row.timeline.kind === "known");
+	assert.equal(
+		row.timeline.value.elapsedMs,
+		Date.parse(row.terminalObservedAt) -
+			Date.parse(row.startedAt.kind === "known" ? row.startedAt.value : ""),
+	);
+	const ends = records.filter((r) => r.kind === "end" && r.name === "stage");
+
+	assert.equal(new Set(ends.map((r) => r.key)).size, ends.length);
+	assert.equal(
+		f.executor.launches.filter((l) => l.stage === "build" && l.round === 1)
+			.length,
+		1,
+	);
+});

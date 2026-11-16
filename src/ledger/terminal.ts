@@ -22,13 +22,14 @@ import {
 	failureFact,
 	known,
 	nullable,
-	outcome,
+	ledgerOutcomeOf,
 	provenanceOf,
 	runContext,
 	unavailable,
 	type AttemptEnd,
 	type FailureClassName,
 	type LedgerRow,
+	type LedgerRowV6,
 	type RunContextV2,
 	type RunStart,
 	type RunStartRecord,
@@ -104,6 +105,9 @@ export type TerminalEvidence = Partial<
 	readonly efficiency?: EfficiencyFacts;
 	readonly contextPressure?: LedgerRow["contextPressure"];
 	readonly generationGates?: Readonly<Record<string, Digest>>;
+	readonly controllerRevision?: LedgerRowV6["controllerRevision"];
+	readonly timeline?: LedgerRowV6["timeline"];
+	readonly buildDrafts?: LedgerRowV6["buildDrafts"];
 };
 
 function outcomeOf(facts: TerminalFacts): JsonValue {
@@ -328,12 +332,16 @@ export function candidateCause(
 export function terminalFailureOf(value: JsonValue | undefined): JsonValue {
 	try {
 		const object = objectOf(value) ?? fail("invalid_object");
-		const stopped = outcome(object.outcome);
+		const stopped = ledgerOutcomeOf(object.outcome, object.v);
 
 		return {
 			outcome: stopped,
 			failure:
-				object.v === 2 || object.v === 3 || object.v === 4 || object.v === 5
+				object.v === 2 ||
+				object.v === 3 ||
+				object.v === 4 ||
+				object.v === 5 ||
+				object.v === 6
 					? nullable(failureFact)(object.failure)
 					: stopped.kind === "failed" || stopped.kind === "budget_exhausted"
 						? unavailable("legacy_not_recorded")
@@ -443,7 +451,11 @@ export function terminalSnapshot(facts: TerminalFacts): JsonValue {
 			: [];
 
 	return {
-		v: 5,
+		v: 6,
+		controllerRevision:
+			facts.evidence?.controllerRevision ?? unavailable("receipt_missing"),
+		timeline: facts.evidence?.timeline ?? unavailable("not_instrumented"),
+		buildDrafts: facts.evidence?.buildDrafts ?? unavailable("not_instrumented"),
 		runId: facts.runId,
 		repo: facts.repo,
 		issue: facts.issue,
