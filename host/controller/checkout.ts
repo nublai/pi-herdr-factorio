@@ -366,11 +366,13 @@ function parseCheckoutRecord(
 export function checkoutOf(
 	workspace: string,
 	files: readonly string[],
+	readBase?: Checkout["readBase"],
 ): Checkout {
 	const listed = new Set(files);
 
 	return {
 		files,
+		readBase,
 		async read(path, capBytes) {
 			if (!listed.has(path)) return null;
 
@@ -457,6 +459,31 @@ type CheckoutInput = {
 	readonly deadline?: number;
 };
 
+function baseReader(
+	input: CheckoutInput,
+	entries?: readonly TarEntry[],
+): NonNullable<Checkout["readBase"]> {
+	let source: Promise<readonly TarEntry[] | null> | undefined =
+		entries === undefined ? undefined : Promise.resolve(entries);
+
+	return async (path, capBytes) => {
+		source ??= boundedFetch(input).then((gz) => {
+			if (!Buffer.isBuffer(gz)) return null;
+			const read = readTarball(gz);
+
+			return read.kind === "ok" ? read.entries : null;
+		});
+		const entries = await source;
+
+		if (entries === null) return { kind: "unavailable" };
+		const entry = entries.find((entry) => entry.path === path);
+
+		return entry?.kind === "file" && entry.data.length <= capBytes
+			? entry.data.toString("utf8")
+			: null;
+	};
+}
+
 export async function checkoutWorkspace(
 	input: CheckoutInput,
 ): Promise<CheckoutResult> {
@@ -487,7 +514,7 @@ export async function checkoutTree(
 		return {
 			kind: "ready",
 			omitted: listed.omitted,
-			checkout: checkoutOf(workspace, listed.paths),
+			checkout: checkoutOf(workspace, listed.paths, baseReader(input)),
 		};
 
 	const gz = await boundedFetch(input);
@@ -551,7 +578,7 @@ export async function checkoutTree(
 	return {
 		kind: "ready",
 		omitted: read.omitted,
-		checkout: checkoutOf(workspace, files),
+		checkout: checkoutOf(workspace, files, baseReader(input, read.entries)),
 	};
 }
 
@@ -590,6 +617,10 @@ export async function checkoutBuildWorkspace(
 
 	return {
 		...result,
-		checkout: checkoutOf(input.workspace, result.checkout.files),
+		checkout: checkoutOf(
+			input.workspace,
+			result.checkout.files,
+			result.checkout.readBase,
+		),
 	};
 }

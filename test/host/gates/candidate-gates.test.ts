@@ -3670,6 +3670,75 @@ export default eslintCompatPlugin({
 	return { ...f, gateSha: f.commit() };
 }
 
+test("837c runs candidate-added Agents suffix-less glob tests using only main policy", async (t) => {
+	const f = agentsRepo(t);
+	f.put(
+		GATE_POLICY,
+		JSON.stringify({
+			...agentsPolicy(),
+			testGlobs: ["test/test.ts", "test/**/worker.ts"],
+		}),
+	);
+	f.put(
+		"test/maestro/worker.ts",
+		'import { test } from "node:test";\ntest("base worker", () => {});\n',
+	);
+	const gateSha = f.commit();
+	f.put(
+		"test/maestro/new/worker.ts",
+		'import { test } from "node:test";\ntest("new worker", () => {});\n',
+	);
+	f.put("test/helper.ts", 'throw new Error("NOT_A_TEST");\n');
+	f.put(
+		GATE_POLICY,
+		JSON.stringify({
+			...agentsPolicy(),
+			testGlobs: ["test/test.ts", "test/helper.ts"],
+		}),
+	);
+	const candidateSha = f.commit();
+	const observed: string[][] = [];
+
+	const runner: GateRunner = {
+		kind: "test-process",
+		async run(input) {
+			observed.push([...input.argv]);
+
+			return toolingRunner.run(input);
+		},
+	};
+
+	const receipt = await checkCandidate({
+		...gateInput(f, candidateSha),
+		gateSha,
+		runner,
+	});
+
+	assert.equal(receipt.status, "passed", JSON.stringify(receipt));
+	assert.equal(
+		observed.filter((argv) => argv.includes("test/maestro/new/worker.ts"))
+			.length,
+		1,
+	);
+	assert.ok(!observed.some((argv) => argv.includes("test/helper.ts")));
+	f.put(
+		"test/maestro/new/worker.ts",
+		'import { test } from "node:test";\ntest("new worker", () => {\n\tthrow new Error("NEW_TEST_FAILURE");\n});\n',
+	);
+
+	const failed = await checkCandidate({
+		...gateInput(f, f.commit()),
+		gateSha,
+		runner,
+	});
+
+	assert.equal(
+		failed.checks.find((check) => check.name === "candidate_tests")?.exitCode,
+		1,
+	);
+	assert.equal(failed.status, "failed");
+});
+
 test("R4 materializes an empty replacement list without expanding the test inventory", async (t) => {
 	const f = repo(t);
 	const path = "test/value.test.ts";

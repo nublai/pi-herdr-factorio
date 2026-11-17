@@ -4544,7 +4544,10 @@
 			"kind": "paths",
 			"reader": "test/host/controller/host-controller.test.ts",
 			"tokens": {
-				"new URL(\"../../../host/controller/run-files.ts\", import.meta.url)": 1,
+				"new URL(\"../../../host/controller/run-files.ts\", import.meta.url)": 2,
+				"new URL(\"../../../host/controller/checkout.ts\", import.meta.url)": 1,
+				"new URL(\"../../../src/controller/launch.ts\", import.meta.url)": 1,
+				"new URL(\"../../../src/controller/effects.ts\", import.meta.url)": 1,
 				"new URL(\"../../../host/controller/outbox.ts\", import.meta.url)": 1,
 				"new URL(\"../../../host/controller/terminal.ts\", import.meta.url)": 1
 			},
@@ -4571,6 +4574,30 @@
 					"via": {
 						"from": "reader",
 						"path": "../../../host/controller/terminal.ts"
+					}
+				},
+				{
+					"path": "host/controller/checkout.ts",
+					"type": "file",
+					"via": {
+						"from": "reader",
+						"path": "../../../host/controller/checkout.ts"
+					}
+				},
+				{
+					"path": "src/controller/launch.ts",
+					"type": "file",
+					"via": {
+						"from": "reader",
+						"path": "../../../src/controller/launch.ts"
+					}
+				},
+				{
+					"path": "src/controller/effects.ts",
+					"type": "file",
+					"via": {
+						"from": "reader",
+						"path": "../../../src/controller/effects.ts"
 					}
 				}
 			]
@@ -5619,7 +5646,7 @@
 				},
 				{
 					"file": "host/gates/materialize.ts",
-					"expression": "additional && /\\.(?:test|cases)\\.[cm]?[jt]s$/.test(path) && !path.startsWith(ACCEPTANCE_SUITE_PREFIX) ) newTests.push(path);"
+					"expression": "additional && (input.pinToolConfig ? input.testGlobs.some((glob) => matchesGlob(path, glob)) && !path.startsWith(\"test/fixtures/\") : /\\.(?:test|cases)\\.[cm]?[jt]s$/.test(path)) && !path.startsWith(ACCEPTANCE_SUITE_PREFIX) ) newTests.push(path);"
 				},
 				{
 					"file": "host/gates/gates.ts",

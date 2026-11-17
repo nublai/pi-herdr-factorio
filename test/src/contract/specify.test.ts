@@ -1372,6 +1372,33 @@ describe("accept source and existing-test pack", () => {
 		assert.ok(sourceFacts(shown).bytes <= 16 * 1024);
 	});
 
+	it("837c inlines an Agents suffix-less inventory test and its local harness", async () => {
+		const lines = Array.from({ length: 500 }, () => "// padding");
+		lines[180] = "function workerHarness() { return 'AGENTS_HARNESS'; }";
+		lines[399] = "test('cited', () => workerHarness());";
+
+		const tree = new Map([
+			["test/test.ts", lines.join("\n")],
+			["test/helper.ts", "throw new Error('NOT_INVENTORY');"],
+		]);
+
+		const shown = await sourceExcerpts({
+			files: ["test/test.ts"],
+			evidence: [{ path: "test/test.ts", start: 400, end: 400, fact: "cited" }],
+			checkout: {
+				files: [...tree.keys()],
+				read: async (path) => tree.get(path) ?? null,
+			},
+			identity: "agents@base",
+			accept: true,
+			testFiles: new Set(["test/test.ts"]),
+		});
+
+		assert.ok(shown.some((file) => file.excerpt?.selection === "test_harness"));
+		assert.match(shown.map(renderInlined).join("\n"), /AGENTS_HARNESS/);
+		assert.ok(!shown.some((file) => file.path === "test/helper.ts"));
+	});
+
 	it("resolves direct helper calls only in the same eligible test file", async () => {
 		const lines = Array.from({ length: 500 }, () => "// padding");
 		lines[180] = "function member() { return 'NOT_A_DIRECT_CALL'; }";

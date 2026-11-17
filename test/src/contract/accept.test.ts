@@ -263,6 +263,66 @@ describe("held-out test-path dependencies", () => {
 			),
 		});
 
+	it("837c refuses a held-out read of an Agents inventory file without a suffix, not its helpers", () => {
+		const files = new Set(["test/test.ts", "test/helper.ts"]);
+		const preserved = new Set(["test/test.ts"]);
+
+		const text = output(
+			"import { readFileSync } from 'node:fs'; readFileSync('test/test.ts');",
+		);
+
+		const parsed = writeAcceptance(text, contract, files, preserved);
+		assert.ok(
+			"reason" in parsed && parsed.reason === "heldout_reads_preserved_test",
+		);
+		assert.ok("path" in parsed && parsed.path === "test/test.ts");
+		assert.equal(
+			writeAcceptance(
+				text.replaceAll("test/test.ts", "test/helper.ts"),
+				contract,
+				files,
+				preserved,
+			).kind,
+			"suite",
+		);
+		assert.equal(
+			writeAcceptance(
+				text,
+				{
+					...contract,
+					replacesTests: [
+						{ path: "test/test.ts", test: "changed", reason: "Ticket" },
+					],
+				},
+				files,
+				preserved,
+			).kind,
+			"suite",
+		);
+	});
+
+	it("837c v1 explicit inventory equals the existing suffix preservation rule", () => {
+		const preserved = new Set(
+			[...existing].filter(
+				(path) =>
+					path.startsWith("test/") &&
+					/\.(?:test|cases)\.[cm]?[jt]s$/.test(path),
+			),
+		);
+
+		for (const path of existing) {
+			const text = output(
+				`import { readFileSync } from 'node:fs'; readFileSync('${path}');`,
+			);
+
+			assert.ok(
+				JSON.stringify(writeAcceptance(text, contract, existing)) ===
+					JSON.stringify(writeAcceptance(text, contract, existing, preserved)),
+				path,
+			);
+		}
+	});
+
 	it("refuses the real #430 check with its existing non-replaceable test path", {
 		timeout: 30000,
 	}, () => {
