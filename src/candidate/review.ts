@@ -88,9 +88,26 @@ const TRUSTED_CHECKS_MAX = 32;
 const TRUSTED_TEST_GLOBS_MAX = 32;
 
 export function isTrustedTestGlob(glob: string): boolean {
-	return /^test\/(?!(?:acceptance|fixtures)\/)(?:[a-zA-Z0-9_-][a-zA-Z0-9_.-]*\/)*(?:\*\*\/)?(?:\*\.(?:test|cases)|[a-zA-Z0-9_-][a-zA-Z0-9_.-]*)\.[cm]?[jt]s$/.test(
-		glob,
+	return (
+		glob.length < 512 &&
+		/^test\/(?!(?:acceptance|fixtures)\/)(?:[a-zA-Z0-9_-][a-zA-Z0-9_.-]*\/)*(?:\*\*\/)?(?:\*\.(?:test|cases)|[a-zA-Z0-9_-][a-zA-Z0-9_.-]*)\.[cm]?[jt]s$/.test(
+			glob,
+		)
 	);
+}
+
+export function trustedTestGlobsOf(
+	value: JsonValue | undefined,
+): readonly string[] | null {
+	const globs = textsOf(value);
+
+	return globs !== null &&
+		globs.length > 0 &&
+		globs.length <= TRUSTED_TEST_GLOBS_MAX &&
+		new Set(globs).size === globs.length &&
+		globs.every(isTrustedTestGlob)
+		? globs
+		: null;
 }
 
 function trustedChecks(
@@ -101,17 +118,11 @@ function trustedChecks(
 	const items = arrayOf(value);
 
 	const globs =
-		rawGlobs === undefined ? "globs not recorded" : textsOf(rawGlobs);
+		rawGlobs === undefined
+			? "globs not recorded"
+			: trustedTestGlobsOf(rawGlobs);
 
-	if (
-		globs === null ||
-		(globs !== "globs not recorded" &&
-			(globs.length === 0 ||
-				globs.length > TRUSTED_TEST_GLOBS_MAX ||
-				new Set(globs).size !== globs.length ||
-				globs.some((glob) => !isTrustedTestGlob(glob))))
-	)
-		return null;
+	if (globs === null) return null;
 
 	if (
 		items === null ||

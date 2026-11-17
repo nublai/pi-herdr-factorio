@@ -2384,6 +2384,11 @@ test("visible tests run an unlisted changed test from its base bytes as the gate
 	);
 	put(base, "src/value.js", 'export const value = "old";\n');
 	put(base, "test/value.test.js", pinned("old"));
+	put(
+		base,
+		".github/factory/gates/gates.json",
+		readFileSync(".github/factory/gates/gates.json", "utf8"),
+	);
 
 	const listed: readonly ReplacedTest[] = [
 		{
@@ -2459,7 +2464,9 @@ const AGENTS_TESTS = [
 	"test/test.ts",
 ];
 
-const AGENTS_LINTED = ["pi-extension", "maestro", "plugins", "scripts"];
+const AGENTS_TYPECHECKED = ["pi-extension", "maestro", "plugins", "scripts"];
+
+const AGENTS_LINTED = ["pi-extension", "test", "maestro", "plugins", "scripts"];
 
 function agentsPolicy() {
 	return {
@@ -2546,7 +2553,7 @@ export default eslintCompatPlugin({
 		"tsconfig.json",
 		JSON.stringify({
 			compilerOptions: { target: "esnext", strict: true, types: [] },
-			include: AGENTS_LINTED,
+			include: AGENTS_TYPECHECKED,
 		}),
 	);
 	f.put(GATE_POLICY, JSON.stringify(agentsPolicy()));
@@ -2683,6 +2690,51 @@ test("a pi-herdr-agents gate policy overlays its source roots and deletions, kee
 	}
 });
 
+test("replay materialization refuses a missing or invalid gate policy exactly as the gate does", async (t) => {
+	const f = agentsRepo(t);
+	const gateTree = join(f.root, "gate-tree");
+	const candidateTree = join(f.root, "candidate-tree");
+	await exportTree(f.root, f.gateSha, gateTree);
+	await exportTree(f.root, f.gateSha, candidateTree);
+	const policy = join(gateTree, GATE_POLICY);
+
+	for (const [label, text] of [
+		["missing", null],
+		["not JSON", "gate"],
+		["unknown version", JSON.stringify({ ...agentsPolicy(), version: 3 })],
+		["version 1 with roots", JSON.stringify({ ...agentsPolicy(), version: 1 })],
+		[
+			"unsafe roots",
+			JSON.stringify({ ...agentsPolicy(), sourceRoots: ["../escape"] }),
+		],
+	] as const) {
+		if (text === null) rmSync(policy);
+		else writeFileSync(policy, text);
+
+		let gateError = "";
+
+		try {
+			manifestOf(gateTree);
+		} catch (error) {
+			gateError = error instanceof Error ? error.message : String(error);
+		}
+
+		assert.notEqual(gateError, "", label);
+		assert.throws(
+			() =>
+				materializeFromDirectories({
+					gateTree,
+					candidateTree,
+					dest: join(f.root, `out-${label}`),
+					replacements: [],
+				}),
+			(error) => error instanceof Error && error.message === gateError,
+			label,
+		);
+		assert.equal(existsSync(join(f.root, `out-${label}`)), false, label);
+	}
+});
+
 test("a pi-herdr-agents gate policy runs its real checks and test inventory with main's TypeScript lint config", async (t) => {
 	const f = agentsRepo(t);
 	f.put("maestro/value.ts", 'export const value = "candidate";\n');
@@ -2726,6 +2778,33 @@ test("a pi-herdr-agents gate policy runs its real checks and test inventory with
 		});
 
 		assert.equal(failed.status, "failed", name);
+		assert.deepEqual(
+			failed.checks.filter((c) => c.exitCode !== 0).map((c) => c.name),
+			[name],
+		);
+	}
+
+	f.put("maestro/value.ts", 'export const value = "candidate";\n');
+
+	for (const [name, bad] of [
+		[
+			"lint",
+			'import { test } from "node:test";\ntest("added", () => {});\ndebugger;\n',
+		],
+		[
+			"format",
+			'import { test } from "node:test";\ntest("added",    () => {});\n',
+		],
+	] as const) {
+		f.put("test/added.test.ts", bad);
+
+		const failed = await checkCandidate({
+			...gateInput(f, f.commit()),
+			runner: toolingRunner,
+			output: join(f.root, `failed-test-${name}`),
+		});
+
+		assert.equal(failed.status, "failed", `test ${name}`);
 		assert.deepEqual(
 			failed.checks.filter((c) => c.exitCode !== 0).map((c) => c.name),
 			[name],
@@ -2930,6 +3009,46 @@ test("Factorio's gate policy yields today's checks, source roots, test inventory
 	assert.equal(receiptPasses(receipt), true);
 });
 
+const CHECK_SCRIPT = "/g/tooling/scripts/check.mjs";
+
+const NODE_CODE_ARGV = [
+	["node", "--import=data:text/javascript,process.exit(0)", CHECK_SCRIPT],
+	["node", "--require=/w/src/evil.js", CHECK_SCRIPT],
+	["node", "--require=/g/tooling/../../w/src/evil.js", CHECK_SCRIPT],
+	...[
+		"--import",
+		"--require",
+		"-r",
+		"--loader",
+		"--experimental-loader",
+		"-e",
+		"--eval",
+		"-p",
+		"--print",
+	].flatMap((flag) => [
+		["node", `${flag}=/g/tooling/scripts/exit.mjs`, CHECK_SCRIPT],
+		["node", flag, "/g/tooling/scripts/exit.mjs", CHECK_SCRIPT],
+		[
+			"node",
+			"--no-warnings",
+			flag,
+			"/g/tooling/scripts/exit.mjs",
+			CHECK_SCRIPT,
+		],
+	]),
+	...[
+		"--import",
+		"--require",
+		"--loader",
+		"--experimental-loader",
+		"--eval",
+		"--print",
+	].flatMap((flag) => [
+		[CHECK_SCRIPT, `${flag}=/g/tooling/scripts/exit.mjs`],
+		["node", CHECK_SCRIPT, flag, "/g/tooling/scripts/exit.mjs"],
+	]),
+];
+
 type PolicyChange = {
 	readonly version?: number;
 	readonly sourceRoots?: readonly string[] | null;
@@ -2994,7 +3113,7 @@ test("a repository gate policy refuses unsafe roots, test globs and checks, and 
 					...policy.checks,
 					...Array.from({ length: 10 }, (_, i) => ({
 						name: `extra${i}`,
-						argv: [tooling, "--version"],
+						argv: [tooling, "check", "pi-extension"],
 					})),
 				],
 			},
@@ -3012,7 +3131,12 @@ test("a repository gate policy refuses unsafe roots, test globs and checks, and 
 			"",
 		].map((name) =>
 			refuse(
-				{ checks: [...policy.checks, { name, argv: [tooling, "--version"] }] },
+				{
+					checks: [
+						...policy.checks,
+						{ name, argv: [tooling, "check", "pi-extension"] },
+					],
+				},
 				"invalid_gate_manifest",
 			),
 		),
@@ -3030,10 +3154,45 @@ test("a repository gate policy refuses unsafe roots, test globs and checks, and 
 			["/g/tooling/../../bin/true"],
 			["/w/node_modules/.bin/oxlint"],
 			[tooling, "nul\0"],
+			...NODE_CODE_ARGV,
+			[tooling, "check", ".."],
+			[tooling, "check", "--config-path=/g/tooling/../../w/maestro"],
+			[tooling, "check", "--config-path", "/g/tooling/../../etc"],
+			...[
+				"/w/pi-extension/biome.json",
+				"/w//maestro/biome.json",
+				"/w/./tools/biome.json",
+				"/w/.pi/skills/biome.json",
+				"/w/test/biome.json",
+				"/w/plugins",
+			].flatMap((path) => [
+				[tooling, "check", "--config-path", path],
+				[tooling, "check", `--config-path=${path}`],
+			]),
 		].map((argv) =>
 			refuse(
 				{ checks: [{ ...lint, argv }, typecheck, format] },
 				"invalid_gate_manifest",
+			),
+		),
+		...["typecheck", "lint", "format", "layout"].flatMap((name) =>
+			["--version", "-v", "--help", "-h"].flatMap((flag) =>
+				[
+					[tooling, flag],
+					[tooling, "format", "pi-extension", flag],
+					["node", "/g/tooling/node_modules/typescript/bin/tsc", flag],
+					["node", flag, "/g/tooling/node_modules/typescript/bin/tsc"],
+				].map((argv) =>
+					refuse(
+						{
+							checks: [
+								...policy.checks.filter((c) => c.name !== name),
+								{ name, argv },
+							],
+						},
+						"invalid_gate_manifest",
+					),
+				),
 			),
 		),
 	];
@@ -3065,6 +3224,16 @@ test("a repository gate policy refuses unsafe roots, test globs and checks, and 
 		},
 		{ testGlobs: ["test/**/*.test.ts"] },
 		{ sourceRoots: ["pi-extension", "pi-extension-two", ".pi/skills"] },
+		{
+			checks: [
+				typecheck,
+				lint,
+				{
+					...format,
+					argv: [tooling, "format", "--config-path=/w/biome.json", "test"],
+				},
+			],
+		},
 	]) {
 		f.put(GATE_POLICY, JSON.stringify({ ...policy, ...change }));
 		assert.doesNotThrow(() => manifestOf(f.root), JSON.stringify(change));

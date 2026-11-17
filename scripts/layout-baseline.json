@@ -5487,8 +5487,8 @@
 			"accepts": "/^test\\/(?:(?:src|host)\\/\\*\\*\\/\\*\\.test\\.ts|integration\\/\\*\\.test\\.ts)$/",
 			"predicates": [
 				{
-					"file": "host/gates/manifest.ts",
-					"expression": "new Set(testGlobs).size !== testGlobs.length"
+					"file": "src/candidate/review.ts",
+					"expression": "new Set(globs).size === globs.length"
 				},
 				{
 					"file": "host/gates/manifest.ts",

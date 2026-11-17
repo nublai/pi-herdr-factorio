@@ -158,12 +158,18 @@ test("L13 pins materialization roots, held-out exclusion and immutable main test
 		writeFileSync(file, text);
 	};
 
+	const policy = readFileSync(".github/factory/gates/gates.json", "utf8");
+
 	try {
 		for (const tree of ["gate", "candidate"]) {
 			put(tree, "host/value.ts", tree);
 			put(tree, "test/value.test.ts", tree);
 			put(tree, "tsconfig.json", tree);
-			put(tree, ".github/factory/gates/gates.json", tree);
+			put(
+				tree,
+				".github/factory/gates/gates.json",
+				tree === "gate" ? policy : tree,
+			);
 			put(tree, "test/acceptance/old/checks/a.test.ts", "frozen");
 		}
 
@@ -184,7 +190,10 @@ test("L13 pins materialization roots, held-out exclusion and immutable main test
 			"tsconfig.json",
 			".github/factory/gates/gates.json",
 		])
-			assert.equal(readFileSync(join(root, "out", path), "utf8"), "gate");
+			assert.equal(
+				readFileSync(join(root, "out", path), "utf8"),
+				path === ".github/factory/gates/gates.json" ? policy : "gate",
+			);
 		assert.deepEqual(result, {
 			ignoredChanges: [
 				".github/factory/gates/gates.json",

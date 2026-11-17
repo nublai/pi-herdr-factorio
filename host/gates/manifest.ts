@@ -1,5 +1,6 @@
-import { existsSync, globSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { globSync, readFileSync } from "node:fs";
+import { join, posix } from "node:path";
+import { trustedTestGlobsOf } from "../../src/candidate/review.ts";
 import {
 	arrayOf,
 	fieldOf,
@@ -42,8 +43,10 @@ const RESERVED_CHECKS = [
 const LEGACY_TEST_GLOB =
 	/^test\/(?:(?:src|host)\/\*\*\/\*\.test\.ts|integration\/\*\.test\.ts)$/;
 
-export const TEST_GLOB =
-	/^test\/(?!(?:acceptance|fixtures)\/)(?:[a-zA-Z0-9_-][a-zA-Z0-9_.-]*\/)*(?:\*\*\/)?(?:\*\.(?:test|cases)|[a-zA-Z0-9_-][a-zA-Z0-9_.-]*)\.[cm]?[jt]s$/;
+const NODE_CODE_FLAG =
+	/^--(?:import|require|loader|experimental-loader|eval|print)(?:=|$)/;
+
+const NO_CHECK_FLAGS = ["--version", "-v", "--help", "-h"];
 
 export type Dependency = {
 	readonly path: string;
@@ -256,31 +259,50 @@ function sourceRootsOf(value: JsonValue | undefined): readonly string[] {
 	return roots;
 }
 
-function runsTooling(argv: readonly string[]): boolean {
+function candidatePath(arg: string, roots: readonly string[]): boolean {
+	return arg.split(/[=,:]/).some((part) => {
+		if (!part.startsWith("/w/")) return false;
+		const path = posix.normalize(part.slice(3)).replace(/^\/+/, "");
+
+		return ["test", ...roots].some(
+			(root) => path === root || path.startsWith(`${root}/`),
+		);
+	});
+}
+
+function runsTooling(
+	argv: readonly string[],
+	roots: readonly string[],
+): boolean {
 	const [program, ...rest] = argv;
 	const at = program === "node" ? rest.findIndex((a) => !a.startsWith("-")) : 0;
 	const script = program === "node" ? rest[at] : program;
+	const nodeFlags = program === "node" ? rest.slice(0, at) : [];
 
 	return (
 		script !== undefined &&
 		script.startsWith("/g/tooling/") &&
-		!script.split("/").includes("..") &&
-		(program !== "node" ||
-			rest
-				.slice(0, at)
-				.every(
-					(flag) =>
-						flag.startsWith("--") && !/^--(?:eval|print)(?:=|$)/.test(flag),
-				))
+		nodeFlags.every((flag) => flag.startsWith("--")) &&
+		argv.every(
+			(arg) =>
+				!NODE_CODE_FLAG.test(arg) &&
+				!NO_CHECK_FLAGS.includes(arg) &&
+				!arg.split(/[/=,:]/).includes("..") &&
+				!candidatePath(arg, roots),
+		)
 	);
 }
 
-function policyCheck(name: string, argv: readonly string[]): boolean {
+function policyCheck(
+	name: string,
+	argv: readonly string[],
+	roots: readonly string[],
+): boolean {
 	return (
 		/^[a-z][a-z0-9_]{0,63}$/.test(name) &&
 		!RESERVED_CHECKS.includes(name) &&
 		!name.endsWith("_deadline_control") &&
-		runsTooling(argv)
+		runsTooling(argv, roots)
 	);
 }
 
@@ -293,17 +315,13 @@ export function gatePolicyOf(tree: string): GatePolicy {
 
 	const version = fieldOf(value, "version");
 	const rawChecks = arrayOf(fieldOf(value, "checks"));
-	const testGlobs = textsOf(fieldOf(value, "testGlobs"));
-	const accepted = version === 1 ? LEGACY_TEST_GLOB : TEST_GLOB;
+	const testGlobs = trustedTestGlobsOf(fieldOf(value, "testGlobs"));
 
 	if (
 		(version !== 1 && version !== 2) ||
 		rawChecks === null ||
 		testGlobs === null ||
-		testGlobs.length === 0 ||
-		testGlobs.length > 32 ||
-		new Set(testGlobs).size !== testGlobs.length ||
-		testGlobs.some((p) => p.length >= 512 || !accepted.test(p)) ||
+		(version === 1 && testGlobs.some((p) => !LEGACY_TEST_GLOB.test(p))) ||
 		(version === 1 && fieldOf(value, "sourceRoots") !== undefined)
 	)
 		throw new Error("invalid_gate_manifest");
@@ -320,7 +338,9 @@ export function gatePolicyOf(tree: string): GatePolicy {
 			argv === null ||
 			argv.length === 0 ||
 			argv.some((a) => a.includes("\0")) ||
-			(version === 1 ? !CHECK_NAMES.includes(name) : !policyCheck(name, argv))
+			(version === 1
+				? !CHECK_NAMES.includes(name)
+				: !policyCheck(name, argv, sourceRoots))
 		)
 			throw new Error("invalid_gate_manifest");
 
@@ -341,15 +361,7 @@ export function gatePolicyOf(tree: string): GatePolicy {
 }
 
 export function sourceRootsIn(tree: string): readonly string[] {
-	const path = join(tree, ".github/factory/gates/gates.json");
-
-	const value = existsSync(path)
-		? objectOf(parseJson(readFileSync(path, "utf8")))
-		: null;
-
-	return fieldOf(value, "version") === 2
-		? gatePolicyOf(tree).sourceRoots
-		: SOURCE;
+	return gatePolicyOf(tree).sourceRoots;
 }
 
 export function manifestOf(tree: string) {

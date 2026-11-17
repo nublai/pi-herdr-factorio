@@ -88,7 +88,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileRunFiles } from "../../../host/controller/run-files.ts";
-import { TEST_GLOB } from "../../../host/gates/manifest.ts";
+import { gatePolicyOf } from "../../../host/gates/manifest.ts";
 import { sandboxExecutor } from "../../../host/sandbox/executor.ts";
 import {
 	collectPatch,
@@ -1421,8 +1421,45 @@ describe("trusted pipeline evidence for review (#735)", () => {
 		assert.deepEqual(manifest.testGlobs, testGlobs);
 	});
 
-	it("accepts exactly the test globs a repository gate policy may configure", () => {
+	const gateAccepts = (globs: readonly string[]) => {
+		const tree = mkdtempSync(join(tmpdir(), "review-gate-globs-"));
+
+		try {
+			mkdirSync(join(tree, ".github/factory/gates"), { recursive: true });
+			writeFileSync(
+				join(tree, ".github/factory/gates/gates.json"),
+				JSON.stringify({
+					version: 2,
+					sourceRoots: ["src"],
+					testGlobs: globs,
+					checks: ["typecheck", "lint", "format"].map((name) => ({
+						name,
+						argv: ["/g/tooling/node_modules/.bin/biome", "check", "src"],
+					})),
+				}),
+			);
+			gatePolicyOf(tree);
+
+			return true;
+		} catch (error) {
+			if (error instanceof Error && error.message === "invalid_gate_manifest")
+				return false;
+			throw error;
+		} finally {
+			rmSync(tree, { recursive: true, force: true });
+		}
+	};
+
+	it("accepts exactly the test globs and glob lists the trusted gate accepts", () => {
+		const long = (length: number) =>
+			`test/${"a".repeat(length - "test/.test.ts".length)}.test.ts`;
+
+		assert.equal(long(511).length, 511);
+
 		for (const glob of [
+			long(511),
+			long(512),
+			long(600),
 			...testGlobs,
 			"test/test.ts",
 			"test/*.test.ts",
@@ -1442,7 +1479,25 @@ describe("trusted pipeline evidence for review (#735)", () => {
 			"test/*.test.ts\n",
 			"candidate-controlled",
 		])
-			assert.equal(isTrustedTestGlob(glob), TEST_GLOB.test(glob), glob);
+			assert.equal(isTrustedTestGlob(glob), gateAccepts([glob]), glob);
+
+		for (const globs of [
+			[],
+			[long(511)],
+			[long(512)],
+			["test/test.ts", "test/test.ts"],
+			Array.from({ length: 32 }, (_, i) => `test/t${i}.test.ts`),
+			Array.from({ length: 33 }, (_, i) => `test/t${i}.test.ts`),
+		]) {
+			const evidence = trustedEvidence({
+				binding,
+				verdict,
+				gateReceipt: gateReceiptText(verdict, { testGlobs: globs }),
+				report: reportText(verdict),
+			});
+
+			assert.equal(evidence !== null, gateAccepts(globs), globs.join(","));
+		}
 	});
 
 	it("accepts a bound repository-owned test inventory beyond Factorio's three globs", () => {
