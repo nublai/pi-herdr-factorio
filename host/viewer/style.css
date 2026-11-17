@@ -758,6 +758,45 @@ footer {
 		color: var(--color-text-secondary);
 	}
 }
+.scoreboard {
+	min-width: 0;
+}
+.scoreboard > details > summary {
+	min-height: var(--space-hit-target);
+	padding-block: var(--space-s);
+	cursor: pointer;
+}
+.scoreboard-table {
+	margin-block: var(--space-m);
+	max-width: 100%;
+}
+.scoreboard-table table {
+	display: table;
+	min-width: 60rem;
+}
+.scoreboard-table thead {
+	position: static;
+	width: auto;
+	height: auto;
+	overflow: visible;
+	clip-path: none;
+}
+.scoreboard-table tbody {
+	display: table-row-group;
+}
+.scoreboard-table tr {
+	display: table-row;
+}
+.scoreboard-table td {
+	display: table-cell;
+	padding: var(--space-s) var(--space-m);
+}
+.scoreboard-table td::before {
+	content: none;
+}
+.scoreboard-table :is(td, th) {
+	font-variant-numeric: tabular-nums;
+}
 @media (max-width: 360px) {
 	.stats {
 		grid-template-columns: minmax(0, 1fr);

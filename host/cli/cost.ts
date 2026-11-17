@@ -1,45 +1,15 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-import {
-	fieldOf,
-	objectOf,
-	parseJson,
-	textOf,
-	type JsonObject,
-} from "../../src/core/json.ts";
-import { requestSettlements, settlementReply } from "../../src/core/journal.ts";
-import { MODEL_STAGES } from "../../src/core/stages.ts";
+import { costOf } from "../../src/core/cost-evidence.ts";
 import {
 	estimateCost,
 	PINNED_TARIFF,
-	type CostRequest,
 	type CostEstimate,
 } from "../../src/core/tariff.ts";
 import { frozenRowOf, type LedgerRow } from "../../src/ledger/schema.ts";
-import { SPECIFY_SESSIONS } from "../sandbox/receipts.ts";
+import { readRunCostEvidence } from "./cost-evidence.ts";
 import { EXIT, type CliIo } from "./platform.ts";
-
-type Evidence = {
-	requests: CostRequest[];
-	missingJournals: number;
-	missingReceipts: number;
-	invalidLines: number;
-};
-
-const emptyEvidence = (): Evidence => ({
-	requests: [],
-	missingJournals: 0,
-	missingReceipts: 0,
-	invalidLines: 0,
-});
-
-function addEvidence(target: Evidence, source: Evidence) {
-	target.requests.push(...source.requests);
-	target.missingJournals += source.missingJournals;
-	target.missingReceipts += source.missingReceipts;
-	target.invalidLines += source.invalidLines;
-}
 
 async function optionalRead(path: string): Promise<string | null> {
 	try {
@@ -62,154 +32,6 @@ async function directories(path: string): Promise<string[]> {
 			return [];
 		throw error;
 	}
-}
-
-function routeModel(model: string | null, route: string | null): string | null {
-	const provider =
-		route === "model-openai"
-			? "openai"
-			: route === "model-anthropic"
-				? "anthropic"
-				: null;
-
-	if (provider === null || model === null) return null;
-
-	return model.includes("/")
-		? model.startsWith(`${provider}/`)
-			? model
-			: null
-		: `${provider}/${model}`;
-}
-
-function modelOf(
-	request: CostRequest["settlement"],
-	receipt: JsonObject | null,
-): string | null {
-	const observed = textOf(settlementReply(request)?.observedModel);
-
-	if (observed !== null) return routeModel(observed, request.route);
-	const models = objectOf(fieldOf(receipt, "models"));
-
-	const primary = routeModel(
-		textOf(fieldOf(models, "requested")),
-		request.route,
-	);
-
-	const fallback = objectOf(fieldOf(receipt, "fallback"));
-
-	const alternative = routeModel(
-		textOf(fieldOf(fallback, "requested")),
-		request.route,
-	);
-
-	// Same-route fallback journals do not say which request used which model.
-	if (primary !== null && alternative !== null && primary !== alternative)
-		return null;
-
-	return alternative ?? primary;
-}
-
-async function executionEvidence(
-	dir: string,
-	runId: string,
-	stage: string,
-): Promise<Evidence> {
-	const evidence = emptyEvidence();
-	const rawReceipt = await optionalRead(join(dir, "receipt.json"));
-	const receipt = rawReceipt === null ? null : objectOf(parseJson(rawReceipt));
-
-	const validReceipt =
-		fieldOf(receipt, "version") === 1 &&
-		fieldOf(receipt, "runId") === runId &&
-		fieldOf(receipt, "stage") === stage;
-
-	if (!validReceipt) evidence.missingReceipts += 1;
-
-	const leaves: readonly string[] = [
-		...SPECIFY_SESSIONS,
-		"code-review",
-		"security-review",
-		"simplify",
-		"ultrareview",
-		"second-judge",
-	];
-
-	const children = (await directories(dir)).filter((name) =>
-		leaves.includes(name),
-	);
-
-	if (children.length > 0) {
-		for (const child of children)
-			addEvidence(
-				evidence,
-				await executionEvidence(join(dir, child), runId, stage),
-			);
-
-		return evidence;
-	}
-
-	const journal = await optionalRead(join(dir, "egress.requests.jsonl"));
-
-	if (journal !== null) {
-		for (const line of journal.split("\n")) {
-			if (line.trim() !== "" && objectOf(parseJson(line)) === null)
-				evidence.invalidLines += 1;
-		}
-
-		evidence.requests.push(
-			...requestSettlements(journal).requests.map((settlement) => ({
-				settlement,
-				model: modelOf(settlement, validReceipt ? receipt : null),
-			})),
-		);
-	} else evidence.missingJournals += 1;
-
-	return evidence;
-}
-
-type LedgerTokens = LedgerRow["usage"]["tokens"];
-
-function costOf(evidence: Evidence, ledgerTokens: LedgerTokens | null) {
-	const cost = estimateCost(evidence.requests, PINNED_TARIFF);
-	const coverage = cost.coverage;
-	coverage.missing += evidence.invalidLines;
-	coverage.missingJournals = evidence.missingJournals;
-	coverage.missingReceipts = evidence.missingReceipts;
-
-	const tokenDifference =
-		ledgerTokens !== null ? ledgerTokens.total - cost.tokens.total : null;
-
-	const gaps: string[] = [];
-
-	if (evidence.missingJournals > 0) gaps.push("journal_missing");
-
-	if (evidence.missingReceipts > 0) gaps.push("receipt_missing");
-
-	if (coverage.missing > 0) gaps.push("request_usage_missing");
-
-	if (coverage.unpriced > 0) gaps.push("model_unpriced");
-
-	if (coverage.uncertain > 0) gaps.push("request_uncertain");
-
-	if (ledgerTokens === null) gaps.push("ledger_tokens_unavailable");
-	else if (ledgerTokens.kind !== "exact")
-		gaps.push(`ledger_${ledgerTokens.kind}`);
-
-	if (tokenDifference !== null && tokenDifference !== 0)
-		gaps.push("ledger_token_difference");
-
-	if (gaps.length > 0) {
-		coverage.kind =
-			coverage.uncertain > 0 || ledgerTokens?.kind === "uncertain"
-				? "uncertain"
-				: coverage.priced === 0
-					? "unavailable"
-					: "lower_bound";
-
-		if (coverage.priced === 0) cost.estimate.usdMicros = null;
-	}
-
-	return { ...cost, ledgerTokens, tokenDifference, gaps };
 }
 
 function totalOf(costs: readonly CostEstimate[]): CostEstimate {
@@ -276,41 +98,30 @@ function totalOf(costs: readonly CostEstimate[]): CostEstimate {
 }
 
 async function runCost(stateDir: string, row: LedgerRow) {
-	const root = join(stateDir, "stages", row.runId);
-	const attempts = await directories(root);
-	const stages = [];
-	const all = emptyEvidence();
+	const evidence = await readRunCostEvidence(
+		{ text: optionalRead, directories },
+		stateDir,
+		row,
+	);
 
-	for (const stage of MODEL_STAGES) {
-		const names = attempts.filter((name) =>
-			new RegExp(`^${stage}-(?:r[0-9]+-)?[0-9]+(?:\\.[0-9]+)?$`).test(name),
-		);
-
+	const stages = evidence.stages.map(({ stage, ...retained }) => {
 		const summary =
 			row.stages.kind === "known"
-				? row.stages.value.find((summary) => summary.stage === stage)
+				? row.stages.value.find((entry) => entry.stage === stage)
 				: undefined;
 
-		if (names.length === 0 && summary === undefined) continue;
-		const evidence = emptyEvidence();
-
-		if (names.length === 0) evidence.missingJournals += 1;
-
-		for (const name of names)
-			addEvidence(
-				evidence,
-				await executionEvidence(join(root, name), row.runId, stage),
-			);
-		addEvidence(all, evidence);
-		stages.push({ stage, ...costOf(evidence, summary?.tokens ?? null) });
-	}
+		return {
+			stage,
+			...costOf(retained, summary?.tokens ?? null, PINNED_TARIFF),
+		};
+	});
 
 	return {
 		runId: row.runId,
 		repo: row.repo,
 		issue: row.issue,
 		outcome: row.outcome.kind,
-		...costOf(all, row.usage.tokens),
+		...costOf(evidence.all, row.usage.tokens, PINNED_TARIFF),
 		stages,
 	};
 }

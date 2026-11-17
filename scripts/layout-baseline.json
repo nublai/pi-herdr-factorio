@@ -71,6 +71,48 @@
 				"from": [],
 				"since": "M5"
 			},
+			"host/cli/cost-evidence.ts": {
+				"owner": "host/cli",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": ["host/cli/cost.ts", "host/cli/scoreboard.ts"],
+				"since": "M3"
+			},
+			"src/core/cost-evidence.ts": {
+				"owner": "src/core",
+				"seats": ["code-review", "security-review", "simplify", "ultrareview"],
+				"from": ["host/cli/cost.ts", "src/views/scoreboard.ts"],
+				"since": "M3"
+			},
+			"src/views/scoreboard.ts": {
+				"owner": "src/views",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "M3"
+			},
+			"host/cli/scoreboard.ts": {
+				"owner": "host/cli",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "M3"
+			},
+			"host/viewer/scoreboard.ts": {
+				"owner": "host/viewer",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "M3"
+			},
+			"test/src/views/scoreboard.test.ts": {
+				"owner": "src/views",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "M3"
+			},
+			"test/host/viewer/scoreboard.test.ts": {
+				"owner": "host/viewer",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "M3"
+			},
 			"src/bench/bundle.ts": {
 				"owner": "src/bench",
 				"seats": ["code-review", "security-review", "simplify"],
@@ -3700,6 +3742,32 @@
 					"type": "file"
 				}
 			]
+		},
+		{
+			"id": "test-reads-scoreboard-unit",
+			"kind": "paths",
+			"reader": "test/src/views/scoreboard.test.ts",
+			"tokens": {
+				"new URL(\"../../fixtures/metrics/runs-2026-11-08.jsonl\", import.meta.url)": 1
+			},
+			"targets": [{
+				"path": "test/fixtures/metrics/runs-2026-11-08.jsonl",
+				"type": "file",
+				"via": { "from": "reader", "path": "../../fixtures/metrics/runs-2026-11-08.jsonl" }
+			}]
+		},
+		{
+			"id": "test-reads-scoreboard-viewer",
+			"kind": "paths",
+			"reader": "test/host/viewer/scoreboard.test.ts",
+			"tokens": {
+				"new URL(\"../../fixtures/metrics/runs-2026-11-08.jsonl\", import.meta.url)": 1
+			},
+			"targets": [{
+				"path": "test/fixtures/metrics/runs-2026-11-08.jsonl",
+				"type": "file",
+				"via": { "from": "reader", "path": "../../fixtures/metrics/runs-2026-11-08.jsonl" }
+			}]
 		},
 		{
 			"id": "test-reads-dashboard",

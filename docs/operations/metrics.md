@@ -394,6 +394,65 @@ journal and retain incomplete coverage even when their observed tokens equal
 the ledger's lower-bound total. This is a partial API-equivalent estimate,
 not billed spend.
 
+## Factory scoreboard
+
+`scoreboard --json --state-dir <dir> [--since YYYY-MM-DD] [--by revision|stage|failure|model]`
+reads frozen local terminal rows, request journals and retained timeline facts.
+It makes no GitHub or model calls and writes nothing. `--since` includes runs
+whose recorded start is at or after midnight UTC on that date. Runs with an
+unknown start are excluded and counted in `filter.excludedUnknownStart`.
+Invalid dates or grouping names exit 2. Unreadable or invalid rows exit 1.
+
+`summary` and `groups` use the same `ScoreboardReport` v1 shape. Groups cover
+controller revision, ticket, stage, model and terminal failure class.
+`--by` selects `selectedGroups`; all breakdowns and per-run evidence remain
+in the report. Versions 1 to 5 group under revision `unknown`. Failure `none`
+means a non-failed outcome, not an inferred failure cause.
+
+Rates count runs, including failed and released runs. `landed` counts all
+recorded landings, including owner overrides. `readyPr` counts a retained
+`ready_for_review` timeline event or a factory-certified landing. A complete
+timeline without that event establishes no readiness. Otherwise readiness is
+unknown, even if a PR exists or no PR pointer survives. A rate with unknown
+members is null, with its positive count, total and unknown count retained.
+This is not the seven-day clean-landing ticket metric.
+
+Every dollar field is `api_equivalent_estimate`, using the pinned M1 tariff.
+`billedSpend` is always `unavailable`. Per-run cost divides all included
+estimates by run count. Per-landed-PR cost divides those same estimates,
+including failed runs, by landed count. No landings means null, not zero.
+Partial estimates retain `lower_bound` or `uncertain` coverage, with missing
+journals and receipts counted. Journal token totals remain separate from
+charged ledger tokens and retain the same coverage warnings as cost.
+Both commands share execution discovery, model selection and cost reconciliation.
+Model groups inherit the run's reconciliation gaps before attributing requests,
+so their coverage cannot be stronger than the run's coverage.
+
+Scoreboard reads are bounded per run, not across the retained history.
+Each run allows 10,000 directory entries and 48 MiB of source reads, with an
+8 MiB cap per file. A skipped source appears in `runs[].evidenceGaps`, with
+its path and reason, and the summary counts these gaps. Skipped journals leave
+cost coverage incomplete, never a zero-cost observation. The ledger index is
+not subject to the per-run entry cap. An unreadable frozen row fails the report.
+
+Stage time uses complete v6 timeline intervals when present, otherwise exact
+ledger stage receipt wall time. These are different measurements, identified
+by `wallMs.source` per run and stage. Aggregate time also reports its source.
+A sum combining timeline intervals and receipt wall time has `wallMs.kind`
+and `wallMs.source` set to `mixed`, never `exact`. Its known and missing counts
+remain visible. When no time is known, the source is `none` and the kind is
+`unavailable`.
+Total elapsed and model, check, CI wait, owner wait and controller time require
+v6 facts. Unrecorded values are null.
+Model groups price only that model's requests; model-specific time is unknown.
+Stage and model groups count participating runs, so their outcome counts must
+not be added together. An empty report has zero runs, unavailable ratios,
+and unavailable cost, token and time coverage. On the page, USD/landed PR is
+`none` when nothing landed. Positive sub-cent estimates display as `<$0.01`.
+
+The [viewer scoreboard](viewer.md#scoreboard) renders the same projection.
+It does not alter OwnerFeed v1 or require a Shep bridge change.
+
 ## Replay checks
 
 `replay check --json` reads the local pinned corpus and Git objects. It never

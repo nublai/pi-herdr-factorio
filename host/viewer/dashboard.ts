@@ -211,7 +211,7 @@ export function renderHeader(
 	const held = feed.controller.localSwitch === "disabled";
 	const live = `${running ? "Running" : "Stopped"} · last tick ${lastTick === null ? "unknown" : `${duration(lastTick)} ago`}`;
 
-	return `<header><div class="heading"><a class="${home ? "brand" : ""}" href="${base}/">Factory</a><span class="local">${esc(live)}</span></div><div class="hold"><span class="hold-state">${held ? "On hold" : "Taking new tickets"}</span><form method="post" action="${base}/hold"><input type="hidden" name="token" value="${esc(token)}"><input type="hidden" name="hold" value="${held ? "off" : "on"}"><button type="submit">${held ? "Resume factory" : "Hold factory"}</button></form></div></header>`;
+	return `<header><div class="heading"><a class="${home ? "brand" : ""}" href="${base}/">Factory</a><span class="local">${esc(live)}</span><a href="${base}/scoreboard">Scoreboard</a></div><div class="hold"><span class="hold-state">${held ? "On hold" : "Taking new tickets"}</span><form method="post" action="${base}/hold"><input type="hidden" name="token" value="${esc(token)}"><input type="hidden" name="hold" value="${held ? "off" : "on"}"><button type="submit">${held ? "Resume factory" : "Hold factory"}</button></form></div></header>`;
 }
 
 export function renderSteps(entry: FeedEntry): string {

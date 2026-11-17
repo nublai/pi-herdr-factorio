@@ -257,6 +257,32 @@ export async function startViewer(options: ViewerOptions) {
 				return;
 			}
 
+			if (path === "/scoreboard" || path === "/scoreboard.json") {
+				const { readScoreboard } = await import("../cli/scoreboard.ts");
+				const report = await readScoreboard(stateDir);
+
+				if (path.endsWith(".json"))
+					send(
+						200,
+						`${JSON.stringify(report, null, 2)}\n`,
+						"application/json; charset=utf-8",
+					);
+				else {
+					const { renderScoreboard } = await import("./scoreboard.ts");
+					send(
+						200,
+						renderScoreboard(
+							report,
+							base,
+							renderHeader(await readOwnerHeader(stateDir), base, holdToken),
+						),
+						"text/html; charset=utf-8",
+					);
+				}
+
+				return;
+			}
+
 			if (path === "/owner-feed.json") {
 				send(
 					200,

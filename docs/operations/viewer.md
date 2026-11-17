@@ -16,6 +16,28 @@ The clean-landing panel reads only `metrics.json`. The controller refreshes it a
 
 `GET /owner-feed.json` returns **OwnerFeed v1**, the same local projection as `node host/cli/index.ts owner-feed --json --state-dir "$STATE"`. It has seven attention counts, a separate working-run count and `durableUsage: {kind, total}`. Only status `budget_exhausted` has kind `budget`; a published token-cap hold stays `blocked`, with “On hold: token cap reached”. The golden example for clients is `test/fixtures/owner-feed/feed-v1.json`.
 
+## Scoreboard
+
+The header's **Scoreboard** link opens `/scoreboard`. `/scoreboard.json`
+returns byte-identical JSON to `scoreboard --json --state-dir "$STATE"`,
+including the default `by: revision` and `selectedGroups`.
+The page covers all retained terminal rows rather than the dashboard's recent
+per-ticket cards. It shows outcomes, ready-PR and landed rates with counts,
+API-equivalent estimates per run and per landed PR, stage tokens and time,
+and coverage. Native disclosures group by controller revision, ticket, stage,
+model and failure class. Tables scroll horizontally on phones.
+Time cells show their source and mark mixed sources as `mixed`. Evidence gaps
+list missing, refused and skipped sources, including per-run read limits.
+The scoreboard resets the 10,000-entry and 48 MiB budgets for each run rather
+than sharing them across history.
+
+All dollar values are labelled `api_equivalent_estimate`. Billed spend stays
+`unavailable`. Unknown readiness, controller revision, time and cost remain
+unknown. See [scoreboard method and denominators](metrics.md#factory-scoreboard).
+Issue titles render as escaped text, not HTML. Both routes use the existing
+Host, Origin, GET-only, CSP and no-store guards. The server still binds only
+to loopback; this page grants no permission to expose private state.
+
 ## Hold or resume the factory
 
 The header has one form, **Hold factory** or **Resume factory**. It creates or removes only `$STATE/disabled`, the existing controller switch. It does not cancel work, reset a budget, restart a terminal run, or act as your GitHub identity. Ticket actions go to GitHub for answering, labeling, reviewing, merging and closing. The controller observes the local switch on its next tick.
