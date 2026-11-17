@@ -77,6 +77,7 @@ export async function benchFixture(
 		'{"name":"bench-fixture","version":"1.0.0","lockfileVersion":3,"packages":{"":{"name":"bench-fixture","version":"1.0.0"}}}',
 	);
 	put(repository, "src/value.ts", "export const value = 0;\n");
+	put(repository, "README.md", "# Synthetic task\nExport the value.\n");
 
 	if (options.ignored) {
 		put(

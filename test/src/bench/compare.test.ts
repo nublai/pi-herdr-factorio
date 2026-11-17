@@ -341,6 +341,27 @@ describe("BenchComparison", () => {
 			),
 		);
 	});
+	it("classifies specify questions as needs-info input, not a harness failure", () => {
+		const trial = {
+			...syntheticTrial(),
+			outcome: {
+				kind: "failed",
+				stage: "specify",
+				reason: "specify_questions",
+			} as const,
+		};
+
+		const result = compareTrials([trial]);
+
+		assert.equal(
+			result.tasks[0]?.variants[0]?.trials[0]?.failureClass,
+			"input",
+		);
+		assert.equal(result.variants[0]?.summary.failureClasses.input, 1);
+		assert.equal(result.variants[0]?.summary.passRate.candidateFailures, 1);
+		assert.equal(result.variants[0]?.summary.passRate.harnessFailures, 0);
+	});
+
 	it("H4 keeps candidate, harness, budget and incomplete outcomes separate using factory classes", () => {
 		const failures = [
 			["visible_tests", "visible_tests_failed"],

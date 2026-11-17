@@ -679,6 +679,8 @@ export async function runBench(
 		rmSync(join(workspace, FEEDBACK_FILE));
 
 		if (respec !== undefined) {
+			const authoring = join(state, "respec/authoring");
+
 			const archive = execFileSync(
 				"git",
 				[
@@ -711,8 +713,7 @@ export async function runBench(
 			const fresh = await respecBench({
 				bundle,
 				state,
-				workspace,
-				files: [...fileLines(workspace).keys()],
+				workspace: authoring,
 				task,
 				id,
 				assets: bundleDir,
@@ -738,7 +739,7 @@ export async function runBench(
 					});
 
 					return (runtime.createHost ?? sandboxHost)(
-						hostConfig(stage, join(state, "runtime", name), workspace, tools),
+						hostConfig(stage, join(state, "runtime", name), authoring, tools),
 					);
 				},
 				stage: async (name, run) => {

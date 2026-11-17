@@ -33,8 +33,10 @@ import {
 	namedFiles,
 	sourceExcerpts,
 	sourceFacts,
+	specifySourceFacts,
 	specifyPrompt,
 } from "../../src/contract/prompt.ts";
+import { renderSummary } from "../../src/contract/render.ts";
 import type { StageLaunchInput } from "../../src/controller/launch.ts";
 import { fieldOf, objectOf, parseJson, textOf } from "../../src/core/json.ts";
 import { digestOf, type Digest } from "../../src/core/run.ts";
@@ -46,6 +48,7 @@ import {
 } from "../controller/checkout.ts";
 import { runHeldoutBase } from "../gates/base.ts";
 import { localRunner } from "../gates/runner.ts";
+import { scopeOwner, scopeUnit } from "../isolation/scope.ts";
 import { withSkills } from "../sandbox/executor.ts";
 import { boundedText, publishFile } from "../sandbox/receipts.ts";
 import { runStage, type StageHost } from "../sandbox/run-stage.ts";
@@ -78,7 +81,6 @@ export async function respecBench(input: {
 	readonly bundle: string;
 	readonly state: string;
 	readonly workspace: string;
-	readonly files: readonly string[];
 	readonly task: TaskBundle;
 	readonly id: Digest;
 	readonly assets: string;
@@ -94,7 +96,7 @@ export async function respecBench(input: {
 	) => StageHost;
 	readonly stage: <T>(name: string, run: () => Promise<T>) => Promise<T>;
 }) {
-	const { task, metadata, files } = input;
+	const { task, metadata } = input;
 
 	const frozen = parseJson(
 		regularText(join(input.bundle, "original/admission.json"), 1024 * 1024),
@@ -127,6 +129,23 @@ export async function respecBench(input: {
 	)
 		throw new Error("respec_snapshot_binding_mismatch");
 
+	const privateDir = join(input.state, "respec");
+	mkdirSync(privateDir, { recursive: true, mode: 0o700 });
+	mkdirSync(input.workspace, { recursive: true, mode: 0o700 });
+	const fetch = offlineArchiveFetch(task, input.archive);
+
+	const authoring = await checkoutWorkspace({
+		stateDir: privateDir,
+		runId: input.id,
+		workspace: input.workspace,
+		repo: task.repo,
+		sha: task.base.sha,
+		fetch,
+	});
+
+	if (authoring.kind !== "ready")
+		throw new Error("respec_authoring_checkout_unavailable");
+	const { files } = authoring.checkout;
 	const shown: InlinedFile[] = [];
 	const set = new Set(files);
 	const readme = files.find((path) => /^readme\.md$/i.test(path));
@@ -150,13 +169,11 @@ export async function respecBench(input: {
 		shown.push(file);
 	}
 
-	const privateDir = join(input.state, "respec");
-	mkdirSync(privateDir, { recursive: true, mode: 0o700 });
 	const specify = input.config.stages.specify;
 
 	const prompt = await withSkills(
 		input.assets,
-		specifyPrompt({
+		`${specifyPrompt({
 			repo: task.repo,
 			baseSha: task.base.sha,
 			guidance: input.guidance,
@@ -165,7 +182,7 @@ export async function respecBench(input: {
 			title,
 			body,
 			answers: null,
-		}),
+		})}\n`,
 		SPECIFY_SKILLS,
 	);
 
@@ -177,7 +194,7 @@ export async function respecBench(input: {
 		attempt: 1,
 		workspace: input.workspace,
 		prompt,
-		source: sourceFacts(shown),
+		source: specifySourceFacts(shown),
 		specify: { title, body, answers: null, files },
 		tools: SPECIFY_TOOLS,
 		skills: SPECIFY_SKILLS,
@@ -237,6 +254,11 @@ export async function respecBench(input: {
 
 	const bytes = contractBytes(contract);
 	const digest = contractDigestOf(bytes);
+
+	if (
+		renderSummary({ runId: input.id, contract: parsed.draft, digest }) === null
+	)
+		throw new Error("specify_too_large_to_post");
 	metadata.contractDigest = digest;
 	keep(join(privateDir, "contract.json"), bytes);
 	keep(
@@ -252,7 +274,6 @@ export async function respecBench(input: {
 	const acceptStarted = Date.now();
 	const deadline = acceptStarted + accept.budget.wallMs;
 	const stageDir = join(input.state, "runtime/accept");
-	const fetch = offlineArchiveFetch(task, input.archive);
 
 	const accepted = await input.stage("accept", async () => {
 		const excerpts = await sourceExcerpts({
@@ -269,12 +290,12 @@ export async function respecBench(input: {
 
 		const prompt = await withSkills(
 			input.assets,
-			acceptancePrompt({
+			`${acceptancePrompt({
 				contract,
 				files,
 				inlined: excerpts,
 				guidance: input.guidance,
-			}),
+			})}\n`,
 			ACCEPTANCE_SKILLS,
 		);
 
@@ -390,6 +411,13 @@ export async function respecBench(input: {
 			startedAt,
 			deadline: boundedDeadline,
 			signal,
+			scope: scopeUnit(
+				scopeOwner(input.state),
+				input.id,
+				"basecheck",
+				1,
+				randomBytes(4).toString("hex"),
+			),
 			runner: localRunner,
 			refused:
 				checked.kind === "unavailable"

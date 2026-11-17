@@ -108,7 +108,6 @@ describe("offline respec authoring", () => {
 					bundle: f.bundle,
 					state: f.root,
 					workspace: f.repository,
-					files: [],
 					task,
 					id: digestOf("new trial"),
 					assets: f.assets,

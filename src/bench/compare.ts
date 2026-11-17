@@ -137,6 +137,8 @@ function failureClass(trial: BenchTrial): FailureClassName | null {
 	)
 		return "missing_evidence";
 
+	if (outcome.reason === "specify_questions") return "input";
+
 	if (outcome.reason === "model_refused") return "provider";
 
 	if (outcome.reason === "review_malformed") return "missing_evidence";
@@ -179,7 +181,11 @@ function summarize(trials: readonly BenchTrial[]) {
 		if (classified !== null) {
 			failureClasses[classified] = (failureClasses[classified] ?? 0) + 1;
 
-			if (classified === "candidate" || classified === "review")
+			if (
+				classified === "candidate" ||
+				classified === "review" ||
+				classified === "input"
+			)
 				candidateFailures++;
 			else harnessFailures++;
 		} else if (trial.outcome.kind !== "passed") incomplete++;

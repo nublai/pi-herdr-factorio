@@ -168,7 +168,12 @@ An absent replacement list is valid, including for #789's build-only scope.
 This mode uses production's `runSpecify`: draft, separate critique, optional
 revision, and exact named-test declaration checks. Unknown or ambiguous test
 names refuse. Questions end the trial locally; nothing is posted. The generated
-draft is wrapped unchanged in a new trial-bound contract envelope.
+draft is wrapped unchanged in a new trial-bound contract envelope. As in
+production, its rendered summary must fit the GitHub comment limit even though
+the bench does not post it. Specify and accept share a fresh authoring checkout
+from the offline archive adapter, with production's complete file list, including
+`.github/` and published `test/acceptance/` paths. Build and review still use
+separate sanitized trees.
 
 Accept uses `runStage`, the frozen workflow's model, fallback, budget and accept
 reasoning effort, and `controllerDraftChecker`. Its archive adapter serves only
@@ -183,7 +188,11 @@ no load, runtime, skip, todo, cancellation or tamper failure. Draft and final
 base checks use production's `localRunner` (bubblewrap), including dependency
 and detail-reporter mounts; candidate gates still use the pinned Docker image.
 Final qualification has at most 180 seconds and only the remaining accept wall
-time. The build and visible-test deadline starts separately at build start.
+time. It uses production's systemd scope with 2G memory, 512 tasks, 100% CPU,
+and stop-on-abort through `localRunner`. The build and visible-test deadline
+starts separately at build start. This deadline change also applies to baseline,
+model and skill trials; their visible-test allowance no longer starts at trial
+start.
 
 The fresh contract, suite, canary-bearing check bytes and digests flow through
 visible tests, replacement policy, gates and review. The old oracle is verified
@@ -362,7 +371,9 @@ The JSON contains `variants` and `tasks`. Reports include:
   count, `n`, and pass rate. Every recorded outcome remains in the denominator.
   `failureClasses` uses the factory's existing classes. Candidate check and
   policy failures are `candidate`; blocking or unverifiable review judgments
-  are `review`. Missing or malformed evidence is `missing_evidence`, caps are
+  are `review`. Specify questions are `input`, a specification needs-info outcome
+  counted with candidate failures, never a harness failure. Missing or malformed
+  evidence is `missing_evidence`, caps are
   `budget`, refusals are `provider`, and other execution failures are
   `infrastructure`. Install and baseline failures are harness failures, not
   candidate failures. Each trial also reports its class and original reason.
