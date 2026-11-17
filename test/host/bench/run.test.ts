@@ -15,7 +15,15 @@ import { request } from "node:http";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { PassThrough } from "node:stream";
-import { describe, it, type TestContext } from "node:test";
+import {
+	after,
+	before,
+	describe,
+	it,
+	mock,
+	type SuiteContext,
+	type TestContext,
+} from "node:test";
 import { runBenchCli } from "../../../host/cli/bench.ts";
 import { dockerRunner, localRunner } from "../../../host/gates/runner.ts";
 import { compareTrials } from "../../../src/bench/compare.ts";
@@ -82,7 +90,7 @@ const PI_140_FIRST_REQUEST = {
 };
 
 async function harness(
-	t: TestContext,
+	t: TestContext | SuiteContext,
 	editExisting = false,
 	builtValue = 1,
 	options: Parameters<typeof benchFixture>[1] & {
@@ -103,13 +111,15 @@ async function harness(
 			| "missing-base"
 			| "failed-base";
 	} = {},
+	suiteCleanup: (run: () => void) => void = after,
 ) {
+	const cleanup = "after" in t ? t.after.bind(t) : suiteCleanup;
 	const root = mkdtempSync(join(tmpdir(), "bench-m5-"));
-	t.after(() => rmSync(root, { recursive: true, force: true }));
+	cleanup(() => rmSync(root, { recursive: true, force: true }));
 	const f = await benchFixture(root, options);
 
 	const echo = await startEchoFixture(t, 0, { anthropic: "usage" });
-	t.after(() => echo.close());
+	cleanup(() => echo.close());
 
 	const baseRequests: Parameters<typeof localRunner.run>[0][] = [];
 	const workspaces: { stage: string; path: string; published: boolean }[] = [];
@@ -123,7 +133,7 @@ async function harness(
 				change: { kind: "respec", value: "on" },
 			}),
 		);
-		t.mock.method(
+		("mock" in t ? t.mock : mock).method(
 			localRunner,
 			"run",
 			async (input: Parameters<typeof localRunner.run>[0]) => {
@@ -638,12 +648,45 @@ async function harness(
 	};
 }
 
-describe("bench run offline CLI", () => {
+async function runHappyRespec(
+	t: SuiteContext,
+	cleanup: (run: () => void) => void,
+) {
+	const f = await harness(t, false, 1, { respec: "github-path" }, cleanup);
+	const bin = join(f.root, "bin");
+	const ghCalls = join(f.root, "gh-calls");
+	put(bin, "gh", `#!/bin/sh\nprintf '%s\\n' "$*" >> '${ghCalls}'\nexit 91\n`);
+	chmodSync(join(bin, "gh"), 0o700);
+	const previous = process.env.PATH;
+	process.env.PATH = `${bin}:${previous}`;
+
+	try {
+		return { f, result: await f.run(), ghCalls };
+	} finally {
+		process.env.PATH = previous;
+		mock.restoreAll();
+	}
+}
+
+describe("bench run offline CLI", (suite) => {
+	let happyRespec: Awaited<ReturnType<typeof runHappyRespec>>;
+	const cleanups: (() => void)[] = [];
+	after(() => {
+		for (const cleanup of cleanups) cleanup();
+	});
+	before(
+		async () => {
+			happyRespec = await runHappyRespec(suite, (cleanup) =>
+				cleanups.push(cleanup),
+			);
+		},
+		{ timeout: 30000 },
+	);
+
 	it("respec accepts GitHub evidence with production's complete authoring checkout and file list", {
-		timeout: 60000,
-	}, async (t) => {
-		const f = await harness(t, false, 1, { respec: "github-path" });
-		const result = await f.run();
+		timeout: 30000,
+	}, () => {
+		const { f, result } = happyRespec;
 		assert.equal(result.code, 0, result.stderr);
 		const trial = parseBenchTrial(result.stdout);
 
@@ -674,10 +717,9 @@ describe("bench run offline CLI", () => {
 	});
 
 	it("respec final base qualification passes production's scope and abort bounds to every runner call", {
-		timeout: 60000,
-	}, async (t) => {
-		const f = await harness(t, false, 1, { respec: "on" });
-		const result = await f.run();
+		timeout: 30000,
+	}, () => {
+		const { f, result } = happyRespec;
 		const trial = parseBenchTrial(result.stdout);
 		assert.equal(trial.outcome.kind, "passed", JSON.stringify(trial.outcome));
 
@@ -706,19 +748,9 @@ describe("bench run offline CLI", () => {
 	});
 
 	it("respec never invokes gh for draft checking or final base qualification", {
-		timeout: 60000,
-	}, async (t) => {
-		const f = await harness(t, false, 1, { respec: "on" });
-		const bin = join(f.root, "bin");
-		const calls = join(f.root, "gh-calls");
-		put(bin, "gh", `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 91\n`);
-		chmodSync(join(bin, "gh"), 0o700);
-		const previous = process.env.PATH;
-		process.env.PATH = `${bin}:${previous}`;
-		t.after(() => {
-			process.env.PATH = previous;
-		});
-		const result = await f.run();
+		timeout: 30000,
+	}, () => {
+		const { f, result, ghCalls: calls } = happyRespec;
 		assert.equal(
 			existsSync(calls),
 			false,
@@ -732,10 +764,9 @@ describe("bench run offline CLI", () => {
 	});
 
 	it("respec adds production's newline before skills to both authoring prompts", {
-		timeout: 60000,
-	}, async (t) => {
-		const f = await harness(t, false, 1, { respec: "on" });
-		await f.run();
+		timeout: 30000,
+	}, () => {
+		const { f } = happyRespec;
 
 		for (const stage of ["specify", "accept"]) {
 			const prompt = f.prompts.find((prompt) =>
@@ -750,10 +781,9 @@ describe("bench run offline CLI", () => {
 	});
 
 	it("respec records specifySourceFacts for the inlined README", {
-		timeout: 60000,
-	}, async (t) => {
-		const f = await harness(t, false, 1, { respec: "on" });
-		await f.run();
+		timeout: 30000,
+	}, () => {
+		const { f } = happyRespec;
 
 		const receipt = JSON.parse(
 			readFileSync(
@@ -793,10 +823,9 @@ describe("bench run offline CLI", () => {
 	});
 
 	it("respec runs real authoring and final base qualification before the unchanged build-to-review path", {
-		timeout: 60000,
+		timeout: 30000,
 	}, async (t) => {
-		const f = await harness(t, false, 1, { respec: "on" });
-		const result = await f.run();
+		const { f, result } = happyRespec;
 		assert.equal(result.code, 0, result.stderr);
 		const trial = parseBenchTrial(result.stdout);
 		assert.equal(trial.outcome.kind, "passed", JSON.stringify(trial.outcome));
