@@ -3408,7 +3408,7 @@
 			"kind": "paths",
 			"reader": "host/controller/checkers.ts",
 			"tokens": {
-				"gateMaterializerIdentity(gate)": 1,
+				"gateMaterializerIdentity(gate, repo)": 1,
 				"fileURLToPath(new URL(\"../..\", import.meta.url))": 1,
 				"identity.equals(materializerIdentity(product))": 1,
 				"identity.equals(productMaterializerIdentity(product))": 1
@@ -3842,7 +3842,7 @@
 			"reader": "test/host/gates/candidate-gates.test.ts",
 			"tokens": {
 				"readFileSync(\".github/factory/gates/freeze.mjs\"": 1,
-				"readFileSync(\".github/factory/gates/reporter.mjs\"": 1,
+				"readFileSync(\".github/factory/gates/reporter.mjs\"": 2,
 				"readFileSync(\".github/factory/gates/scan-rules.json\"": 1,
 				"new URL(\"../../../.github/factory/gates/freeze.mjs\", import.meta.url)": 1,
 				"join(root, \".github/factory/gates/gates.json\")": 2,
