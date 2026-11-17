@@ -267,6 +267,12 @@ function repository(
 	git("init", "-q");
 	git("config", "user.name", "Diagnosis test");
 	git("config", "user.email", "diagnosis@example.invalid");
+	git(
+		"remote",
+		"add",
+		"origin",
+		"https://github.com/nublai/pi-herdr-factorio.git",
+	);
 	put("package.json", '{"name":"mini","version":"1.0.0","type":"module"}');
 	put(
 		"package-lock.json",
@@ -344,7 +350,7 @@ async function drive(t: { after(fn: () => void): void }, raw: Entry) {
 	const f = repository(t, baseFiles);
 	const gateSha = f.gateSha;
 	assert.ok(isGitSha(gateSha));
-	const repo = "owner/repo";
+	const repo = "nublai/pi-herdr-factorio";
 	assert.ok(isRepoSlug(repo));
 
 	const [first, ...rest] = criteria;
@@ -416,6 +422,7 @@ async function drive(t: { after(fn: () => void): void }, raw: Entry) {
 
 	const ci = await checkCandidate({
 		repository: f.repo,
+		targetRepository: contract.base.repo,
 		gateSha: f.gateSha,
 		candidateSha,
 		nonce,
@@ -1923,7 +1930,7 @@ async function jobWorld(
 	});
 
 	const gateSha = f.gateSha;
-	const repo = "owner/repo";
+	const repo = "nublai/pi-herdr-factorio";
 	assert.ok(isGitSha(gateSha) && isRepoSlug(repo));
 	const state = join(f.root, "state");
 	mkdirSync(state, { mode: 0o700 });
@@ -2123,6 +2130,7 @@ async function jobWorld(
 
 	const ci = await checkCandidate({
 		repository: f.repo,
+		targetRepository: binding.repo,
 		gateSha: ciGate,
 		candidateSha,
 		nonce,

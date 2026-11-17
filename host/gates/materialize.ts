@@ -185,8 +185,33 @@ function pinnedMaterializerIdentity(tree: string): Buffer | null {
 	}
 }
 
-export function gateMaterializerIdentity(tree: string): Buffer {
-	return pinnedMaterializerIdentity(tree) ?? materializerIdentity(tree);
+export function gateMaterializerIdentity(
+	tree: string,
+	targetRepository: string | null,
+	selfHosted: "presence" | "running-product" = "running-product",
+): Buffer {
+	const pinned = pinnedMaterializerIdentity(tree);
+
+	if (pinned !== null) return pinned;
+
+	if (targetRepository !== "nublai/pi-herdr-factorio")
+		throw new Error("unsupported_materializer");
+
+	if (selfHosted === "running-product") {
+		const files = [
+			...MATERIALIZER_FILES,
+			...TARGET_GATE_FILES.map((name) => `.github/factory/gates/${name}`),
+		];
+
+		if (
+			!materializerIdentity(tree, files).equals(
+				materializerIdentity(PRODUCT_ROOT, files),
+			)
+		)
+			throw new Error("unsupported_materializer");
+	}
+
+	return materializerIdentity(tree);
 }
 
 function isDocumentation(
@@ -379,47 +404,18 @@ export function replacementsOf(text: string): readonly GateReplacement[] {
 
 type Inventory = ReadonlyMap<string, { mode: string; blob: string }>;
 
-function typescriptTargets(tree: string, base: Inventory): ReadonlySet<string> {
-	const found = new Set<string>();
-
-	const queue = [...base.keys()].filter((path) =>
-		/^[jt]sconfig.*\.json$/.test(posix.basename(path)),
-	);
-
-	for (let path = queue.pop(); path !== undefined; path = queue.pop())
-		for (const [, ref] of readFileSync(join(tree, path), "utf8").matchAll(
-			/"(\.\.?\/[^"]*)"/g,
-		)) {
-			const target = posix.join(posix.dirname(path), ref ?? "");
-
-			for (const file of [target, `${target}.json`])
-				if (file.endsWith(".json") && base.has(file) && !found.has(file)) {
-					found.add(file);
-					queue.push(file);
-				}
-		}
-
-	return found;
-}
-
 function mainToolConfig(
 	tree: string,
 	base: Inventory,
 	sourceRoots: readonly string[],
 ): ReadonlyMap<string, Buffer> {
-	const targets = typescriptTargets(tree, base);
-
 	return new Map(
 		[...base.keys()].flatMap((path): [string, Buffer][] => {
 			const name = posix.basename(path);
 
 			if (
 				!sourceRoots.some((dir) => path.startsWith(`${dir}/`)) ||
-				!(
-					TOOL_CONFIG.test(name) ||
-					name === "package.json" ||
-					targets.has(path)
-				)
+				!(TOOL_CONFIG.test(name) || name === "package.json")
 			)
 				return [];
 			const bytes = readFileSync(join(tree, path));
@@ -670,6 +666,7 @@ function overlay(input: {
 
 export async function materializeCandidate(input: {
 	readonly repository: string;
+	readonly targetRepository?: string;
 	readonly gateSha: string;
 	readonly candidateSha: string;
 	readonly dest: string;
@@ -694,9 +691,10 @@ export async function materializeCandidate(input: {
 		try {
 			if (
 				pinnedMaterializerIdentity(input.dest) === null &&
-				!materializerIdentity(input.dest).equals(
-					materializerIdentity(PRODUCT_ROOT),
-				)
+				!gateMaterializerIdentity(
+					input.dest,
+					input.targetRepository ?? null,
+				).equals(materializerIdentity(PRODUCT_ROOT))
 			)
 				throw new Error("unsupported_materializer");
 		} catch {

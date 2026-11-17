@@ -229,9 +229,15 @@ async function harness(
 			kind: "synthetic-process",
 			async run(input) {
 				const argv = input.argv.map((arg) =>
-					arg
-						.replaceAll("/g/", `${input.gates}/`)
-						.replaceAll("/w/", `${input.tree}/`),
+					arg.startsWith("/g/tooling/node_modules/")
+						? join(
+								process.cwd(),
+								"node_modules",
+								arg.slice("/g/tooling/node_modules/".length),
+							)
+						: arg
+								.replaceAll("/g/", `${input.gates}/`)
+								.replaceAll("/w/", `${input.tree}/`),
 				);
 
 				try {

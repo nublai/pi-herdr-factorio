@@ -59,13 +59,15 @@ jobs:
           CANDIDATE_SHA: ${{ inputs.candidate_sha }}
           GATE_SHA: ${{ github.sha }}
           NONCE: ${{ inputs.nonce }}
+          TARGET_REPO: ${{ github.repository }}
           REPLACEMENTS: ${{ inputs.replacements }}
           REPLACEMENTS_DIGEST: ${{ inputs.replacements_digest }}
           HELDOUT_DIR: ${{ inputs.heldout_dir }}
           HELDOUT_DIGEST: ${{ inputs.heldout_digest }}
         run: |
           node --experimental-strip-types host/cli/index.ts gates \
-            --repository "$PWD" --gate-sha "$GATE_SHA" --candidate-sha "$CANDIDATE_SHA" \
+            --repository "$PWD" --target-repo "$TARGET_REPO" \
+            --gate-sha "$GATE_SHA" --candidate-sha "$CANDIDATE_SHA" \
             --nonce "$NONCE" --output "$RUNNER_TEMP/gate-results" \
             --replacements "$REPLACEMENTS" --replacements-digest "$REPLACEMENTS_DIGEST" \
             --heldout-dir "$HELDOUT_DIR" --heldout-digest "$HELDOUT_DIGEST"

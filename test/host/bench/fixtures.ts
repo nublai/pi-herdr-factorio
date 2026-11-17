@@ -58,10 +58,37 @@ export async function benchFixture(
 						version: 2,
 						sourceRoots: ["src"],
 						testGlobs: ["test/src/**/*.test.ts"],
-						checks: ["typecheck", "lint", "format"].map((name) => ({
-							name,
-							argv: ["node", "/g/tooling/tools/check.mjs"],
-						})),
+						checks: [
+							{
+								name: "typecheck",
+								argv: [
+									"node",
+									"/g/tooling/node_modules/typescript/bin/tsc",
+									"--noEmit",
+									"-p",
+									"/w/tsconfig.json",
+								],
+							},
+							{
+								name: "lint",
+								argv: [
+									"/g/tooling/node_modules/.bin/oxlint",
+									"-c",
+									"/g/tooling/.oxlintrc.json",
+									"src",
+								],
+							},
+							{
+								name: "format",
+								argv: [
+									"/g/tooling/node_modules/.bin/biome",
+									"format",
+									"--config-path",
+									"/w/biome.json",
+									"src",
+								],
+							},
+						],
 					}
 				: {
 						version: 1,
@@ -73,8 +100,15 @@ export async function benchFixture(
 		),
 	);
 
-	if (options.repositoryGatePolicy)
-		put(repository, "tools/check.mjs", "process.exit(0);\n");
+	if (options.repositoryGatePolicy) {
+		put(
+			repository,
+			"tsconfig.json",
+			'{"compilerOptions":{"types":[]},"include":["src/**/*.ts"]}',
+		);
+		put(repository, "biome.json", "{}");
+	}
+
 	const checkout = fileURLToPath(new URL("../../..", import.meta.url));
 
 	for (const file of ["freeze.mjs", "reporter.mjs", "scan-rules.json"])

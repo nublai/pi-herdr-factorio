@@ -398,7 +398,7 @@ export async function baseFixture(
 		writeFileSync(join(cached, "READY"), digestOf(lock));
 	}
 
-	const repo = "owner/repo",
+	const repo = "nublai/pi-herdr-factorio",
 		sha = "a".repeat(40);
 
 	assert.ok(isRepoSlug(repo) && isGitSha(sha));
@@ -827,7 +827,7 @@ async function controllerWorld(
 	git(source, "add", ".");
 	git(source, "commit", "-qm", "base");
 	const sha = git(source, "rev-parse", "HEAD").trim();
-	const repo = "owner/repo";
+	const repo = "nublai/pi-herdr-factorio";
 	assert.ok(isGitSha(sha) && isRepoSlug(repo));
 	const state = join(root, "state");
 	mkdirSync(state, { mode: 0o700 });
@@ -1885,7 +1885,7 @@ async function replay(
 		'{"name":"base","version":"1.0.0","lockfileVersion":3,"packages":{"":{"name":"base","version":"1.0.0"}}}',
 	);
 
-	const repo = "owner/repo",
+	const repo = "nublai/pi-herdr-factorio",
 		sha = manifest.baseSha;
 
 	assert.ok(isRepoSlug(repo) && isGitSha(sha));
