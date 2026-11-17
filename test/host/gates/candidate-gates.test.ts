@@ -2599,7 +2599,7 @@ function weakerPolicy() {
 		checks: [
 			{
 				name: "typecheck",
-				argv: ["/g/tooling/node_modules/.bin/biome", "--version"],
+				argv: ["/g/tooling/node_modules/.bin/biome", "format", "pi-extension"],
 			},
 			{
 				name: "lint",
@@ -2612,7 +2612,7 @@ function weakerPolicy() {
 			},
 			{
 				name: "format",
-				argv: ["/g/tooling/node_modules/.bin/biome", "--version"],
+				argv: ["/g/tooling/node_modules/.bin/biome", "format", "pi-extension"],
 			},
 		],
 	};
@@ -2815,6 +2815,7 @@ test("a pi-herdr-agents gate policy runs its real checks and test inventory with
 test("a candidate cannot weaken, skip or redirect a pi-herdr-agents gate policy or its lint config", async (t) => {
 	const f = agentsRepo(t);
 	f.put(GATE_POLICY, JSON.stringify(weakerPolicy()));
+	assert.doesNotThrow(() => manifestOf(f.root));
 	f.put("oxlint.config.ts", "export default {};\n");
 	f.put("tools/oxlint/anti-slop/index.ts", "export default {};\n");
 	f.put("maestro/value.ts", 'export const value = "candidate";\ndebugger;\n');
@@ -2863,14 +2864,19 @@ test("a candidate cannot weaken, skip or redirect Factorio's gate policy", async
 		GATE_POLICY,
 		JSON.stringify({
 			version: 2,
-			sourceRoots: ["extension"],
+			sourceRoots: ["src"],
 			testGlobs: ["test/src/example/value.test.ts"],
 			checks: ["typecheck", "lint", "format"].map((name) => ({
 				name,
-				argv: ["/g/tooling/node_modules/.bin/biome", "--version"],
+				argv: [
+					"/g/tooling/node_modules/.bin/oxlint",
+					"--disable-nested-config",
+					"src",
+				],
 			})),
 		}),
 	);
+	assert.doesNotThrow(() => manifestOf(f.root));
 	f.put("src/value.ts", 'export const value = "main";\n// candidate\n');
 
 	const receipt = await checkCandidate({
@@ -2893,6 +2899,238 @@ test("a candidate cannot weaken, skip or redirect Factorio's gate policy", async
 	assert.equal(receipt.checks.find((c) => c.name === "layout")?.exitCode, 3);
 	assert.deepEqual(receipt.testGlobs, ["test/src/**/*.test.ts"]);
 	assert.deepEqual(receipt.ignoredChanges, [GATE_POLICY]);
+});
+
+const OXLINT = "/g/tooling/node_modules/.bin/oxlint";
+
+const BIOME = "/g/tooling/node_modules/.bin/biome";
+
+function permissiveAgentsRepo(
+	t: { after(fn: () => void): void },
+	change: { readonly [name: string]: readonly string[] },
+) {
+	const f = agentsRepo(t);
+	const policy = agentsPolicy();
+
+	f.put(
+		GATE_POLICY,
+		JSON.stringify({
+			...policy,
+			checks: policy.checks.map((c) => ({
+				...c,
+				argv: change[c.name] ?? c.argv,
+			})),
+		}),
+	);
+
+	return f;
+}
+
+async function nestedAttack(
+	f: ReturnType<typeof agentsRepo>,
+	gateSha: string,
+	label: string,
+) {
+	const receipt = await checkCandidate({
+		...gateInput(f, f.commit()),
+		gateSha,
+		runner: toolingRunner,
+		output: join(f.root, `attack-${label}`),
+	});
+
+	return {
+		status: receipt.status,
+		failed: receipt.checks.filter((c) => c.exitCode !== 0).map((c) => c.name),
+		ignoredChanges: receipt.ignoredChanges,
+	};
+}
+
+test("a candidate's nested oxlint config cannot turn off main's lint rule under a version 2 policy", async (t) => {
+	for (const [nested, text] of [
+		["maestro/.oxlintrc.json", '{ "rules": { "no-debugger": "off" } }\n'],
+		[
+			"maestro/oxlint.config.ts",
+			'export default { rules: { "no-debugger": "off" } };\n',
+		],
+	] as const) {
+		const f = permissiveAgentsRepo(t, {
+			lint: [OXLINT, "--ignore-path", "/dev/null", ...AGENTS_LINTED],
+		});
+
+		f.git("rm", "-q", "oxlint.config.ts");
+		f.put(".oxlintrc.json", '{"rules":{"no-debugger":"error"}}\n');
+		const gateSha = f.commit();
+		f.put(nested, text);
+		f.put("maestro/value.ts", 'export const value = "candidate";\ndebugger;\n');
+
+		assert.deepEqual(await nestedAttack(f, gateSha, "oxlint"), {
+			status: "failed",
+			failed: ["lint"],
+			ignoredChanges: [nested],
+		});
+	}
+});
+
+test("a candidate's nested Biome config cannot turn off main's formatter under a version 2 policy", async (t) => {
+	for (const nested of ["maestro/biome.json", "maestro/biome.jsonc"]) {
+		const f = permissiveAgentsRepo(t, {
+			format: [BIOME, "format", ...AGENTS_LINTED],
+		});
+
+		const gateSha = f.commit();
+		f.put(
+			nested,
+			'{"root":false,"extends":"//","formatter":{"enabled":false}}\n',
+		);
+		f.put("maestro/value.ts", 'export const value    =    "candidate"\n');
+
+		assert.deepEqual(await nestedAttack(f, gateSha, "biome"), {
+			status: "failed",
+			failed: ["format"],
+			ignoredChanges: [nested],
+		});
+	}
+});
+
+test("a candidate cannot weaken main's TypeScript config through a nested tsconfig or an extends target inside a source root", async (t) => {
+	for (const base of ["maestro/base.json", "maestro/tsconfig.base.json"]) {
+		const f = permissiveAgentsRepo(t, {});
+		f.put(base, '{ "compilerOptions": { "strict": true } }\n');
+		f.put(
+			"tsconfig.json",
+			JSON.stringify({
+				extends: `./${base.replace(/\.json$/, "")}`,
+				compilerOptions: { target: "esnext", types: [] },
+				include: AGENTS_TYPECHECKED,
+			}),
+		);
+		const gateSha = f.commit();
+		f.put(base, '{ "compilerOptions": { "strict": false } }\n');
+		f.put(
+			"maestro/tsconfig.json",
+			'{ "compilerOptions": { "strict": false } }\n',
+		);
+		f.put(
+			"maestro/value.ts",
+			'export const value = "candidate";\nexport function same(x) {\n\treturn x;\n}\n',
+		);
+
+		assert.deepEqual(await nestedAttack(f, gateSha, "tsc"), {
+			status: "failed",
+			failed: ["typecheck"],
+			ignoredChanges: [base, "maestro/tsconfig.json"].sort(),
+		});
+	}
+});
+
+test("a version 2 overlay keeps main's nested Prettier, ESLint, oxlint, Biome, TypeScript, env and Node version files and package.json tool keys", async (t) => {
+	const f = agentsRepo(t);
+	f.put("pi-extension/.prettierrc", '{"semi":true}\n');
+	f.put("maestro/.prettierrc", '{"semi":true}\n');
+	f.put(
+		"maestro/package.json",
+		'{"name":"m","version":"1.0.0","prettier":{"semi":true}}\n',
+	);
+	const gateSha = f.commit();
+
+	const added = [
+		"maestro/.oxlintrc.json",
+		"maestro/oxlint.config.mjs",
+		"plugins/.eslintrc",
+		"plugins/.eslintrc.json",
+		"plugins/eslint.config.js",
+		"scripts/.prettierrc.yaml",
+		"scripts/prettier.config.mjs",
+		"scripts/.prettierignore",
+		"scripts/package.yaml",
+		"skills/biome.jsonc",
+		"skills/.biome.json",
+		"skills/.ignore",
+		"skills/nested/biome.json",
+		"tools/tsconfig.json",
+		"tools/tsconfig.build.json",
+		"tools/jsconfig.json",
+		".pi/skills/.env",
+		".pi/skills/.env.local",
+		"pi-extension/.node-version",
+		"pi-extension/.nvmrc",
+		"test/.oxlintrc.json",
+		"test/maestro/.prettierrc",
+	];
+
+	for (const path of added) f.put(path, "{}\n");
+	f.put("pi-extension/.prettierrc", '{"semi":false}\n');
+	f.put("pi-extension/value.ts", 'export const value = "candidate";\n');
+	f.git("rm", "-q", "maestro/.prettierrc");
+	f.put(
+		"maestro/package.json",
+		'{"name":"m","version":"2.0.0","prettier":{"semi":false},"eslintConfig":{},"eslintIgnore":["*"],"oxlint":{}}\n',
+	);
+	f.put("plugins/package.json", '{"name":"p","eslintConfig":{"rules":{}}}\n');
+	f.put("scripts/package.json", '{"name":"s","type":"module"}\n');
+	const candidateSha = f.commit();
+	const gateTree = join(f.root, "gate-tree");
+	const candidateTree = join(f.root, "candidate-tree");
+	await exportTree(f.root, gateSha, gateTree);
+	await exportTree(f.root, candidateSha, candidateTree);
+
+	for (const [dest, material] of [
+		[
+			join(f.root, "from-git"),
+			(dest: string) =>
+				materializeCandidate({
+					repository: f.root,
+					gateSha,
+					candidateSha,
+					dest,
+					replacements: [],
+				}),
+		],
+		[
+			join(f.root, "from-directories"),
+			async (dest: string) =>
+				materializeFromDirectories({
+					gateTree,
+					candidateTree,
+					dest,
+					replacements: [],
+				}),
+		],
+	] as const) {
+		const r = await material(dest);
+
+		for (const path of added)
+			assert.equal(existsSync(join(dest, path)), false, path);
+
+		for (const path of ["pi-extension/.prettierrc", "maestro/.prettierrc"])
+			assert.equal(readFileSync(join(dest, path), "utf8"), '{"semi":true}\n');
+		assert.deepEqual(
+			JSON.parse(readFileSync(join(dest, "maestro/package.json"), "utf8")),
+			{ name: "m", version: "2.0.0", prettier: { semi: true } },
+		);
+		assert.deepEqual(
+			JSON.parse(readFileSync(join(dest, "plugins/package.json"), "utf8")),
+			{ name: "p" },
+		);
+		assert.equal(
+			readFileSync(join(dest, "scripts/package.json"), "utf8"),
+			'{"name":"s","type":"module"}\n',
+		);
+		assert.match(
+			readFileSync(join(dest, "pi-extension/value.ts"), "utf8"),
+			/candidate/,
+		);
+		assert.deepEqual(
+			r.ignoredChanges,
+			[
+				...added,
+				"pi-extension/.prettierrc",
+				"maestro/.prettierrc",
+				"maestro/package.json",
+				"plugins/package.json",
+			].sort(),
+		);
+	}
 });
 
 test("Factorio's gate policy yields today's checks, source roots, test inventory and receipt", async (t) => {
@@ -3066,6 +3304,7 @@ test("a repository gate policy refuses unsafe roots, test globs and checks, and 
 	const [typecheck, lint, format] = policy.checks;
 	assert.ok(typecheck && lint && format);
 	const tooling = "/g/tooling/node_modules/.bin/biome";
+	f.put("pi-extension-two/value.ts", "export const two = 2;\n");
 
 	const refused: [PolicyChange, string][] = [
 		[{ version: 3 }, "invalid_gate_manifest"],
@@ -3087,6 +3326,12 @@ test("a repository gate policy refuses unsafe roots, test globs and checks, and 
 			["pi-extension", "pi-extension/nested"],
 			["pi-extension\\nested"],
 			Array.from({ length: 33 }, (_, i) => `root${i}`),
+			["tsconfig.json"],
+			["package.json"],
+			["biome.json"],
+			["pi-extension/value.ts"],
+			["missing"],
+			["pi-extension", "missing"],
 		].map((sourceRoots) => refuse({ sourceRoots }, "invalid_gate_manifest")),
 		...[
 			[],
@@ -3165,10 +3410,32 @@ test("a repository gate policy refuses unsafe roots, test globs and checks, and 
 				"/w/.pi/skills/biome.json",
 				"/w/test/biome.json",
 				"/w/plugins",
+				"//w/pi-extension",
+				"/./w/pi-extension",
+				"/w/./pi-extension/biome.json",
+				"file:///w/pi-extension/x.mjs",
+				"file:/w/maestro/biome.json",
+				"file://localhost/w/maestro",
+				"file:///%77/maestro",
+				"FILE:////w/test",
 			].flatMap((path) => [
 				[tooling, "check", "--config-path", path],
 				[tooling, "check", `--config-path=${path}`],
 			]),
+			...[
+				"--env-file=pi-extension/x.env",
+				"--env-file-if-exists=pi-extension/x.env",
+				"--experimental-config-file=pi-extension/node.config.json",
+				"--test-reporter=./pi-extension/r.mjs",
+				"--test-reporter-destination=stdout",
+				"--test-global-setup=pi-extension/setup.mjs",
+				"--conditions=development",
+				"--stack-size=1",
+				"--",
+			].map((flag) => ["node", flag, CHECK_SCRIPT]),
+			["node", "--env-file", "pi-extension/x.env", CHECK_SCRIPT],
+			["node", "-C", "development", CHECK_SCRIPT],
+			["node", "--no-warnings", "--conditions", "development", CHECK_SCRIPT],
 		].map((argv) =>
 			refuse(
 				{ checks: [{ ...lint, argv }, typecheck, format] },
@@ -3218,6 +3485,24 @@ test("a repository gate policy refuses unsafe roots, test globs and checks, and 
 						"/g/tooling/scripts/check-layout.mjs",
 						"--root",
 						"/w",
+					],
+				},
+			],
+		},
+		{
+			checks: [
+				typecheck,
+				lint,
+				format,
+				{
+					name: "layout",
+					argv: [
+						"node",
+						"--no-warnings",
+						"--experimental-strip-types",
+						"/g/tooling/scripts/check-layout.mjs",
+						"--root=/w",
+						"pi-extension",
 					],
 				},
 			],

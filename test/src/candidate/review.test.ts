@@ -1426,6 +1426,7 @@ describe("trusted pipeline evidence for review (#735)", () => {
 
 		try {
 			mkdirSync(join(tree, ".github/factory/gates"), { recursive: true });
+			mkdirSync(join(tree, "src"));
 			writeFileSync(
 				join(tree, ".github/factory/gates/gates.json"),
 				JSON.stringify({

@@ -1,5 +1,6 @@
-import { globSync, readFileSync } from "node:fs";
+import { globSync, lstatSync, readFileSync } from "node:fs";
 import { join, posix } from "node:path";
+import { fileURLToPath } from "node:url";
 import { trustedTestGlobsOf } from "../../src/candidate/review.ts";
 import {
 	arrayOf,
@@ -48,6 +49,8 @@ const NODE_CODE_FLAG =
 
 const NO_CHECK_FLAGS = ["--version", "-v", "--help", "-h"];
 
+const NODE_FLAGS = ["--experimental-strip-types", "--no-warnings"];
+
 export type Dependency = {
 	readonly path: string;
 	readonly version: string;
@@ -57,6 +60,7 @@ export type Dependency = {
 };
 
 type GatePolicy = {
+	readonly version: 1 | 2;
 	readonly sourceRoots: readonly string[];
 	readonly testGlobs: readonly string[];
 	readonly checks: readonly { name: string; argv: readonly string[] }[];
@@ -234,7 +238,10 @@ export function readDependencies(tree: string) {
 	);
 }
 
-function sourceRootsOf(value: JsonValue | undefined): readonly string[] {
+function sourceRootsOf(
+	value: JsonValue | undefined,
+	tree: string,
+): readonly string[] {
 	const roots = textsOf(value);
 
 	if (
@@ -250,7 +257,10 @@ function sourceRootsOf(value: JsonValue | undefined): readonly string[] {
 					)) ||
 				/^test(?:\/|$)/.test(root) ||
 				root.split("/").includes("node_modules") ||
-				roots.some((other) => other !== root && root.startsWith(`${other}/`)),
+				roots.some((other) => other !== root && root.startsWith(`${other}/`)) ||
+				lstatSync(join(tree, root), {
+					throwIfNoEntry: false,
+				})?.isDirectory() !== true,
 		) ||
 		new Set(roots).size !== roots.length
 	)
@@ -259,13 +269,27 @@ function sourceRootsOf(value: JsonValue | undefined): readonly string[] {
 	return roots;
 }
 
+function pathPieces(arg: string): readonly string[] {
+	return arg.split(/[=,]/).flatMap((piece) => {
+		if (!/^file:/i.test(piece)) return piece.split(":");
+
+		try {
+			return [fileURLToPath(piece)];
+		} catch {
+			return [piece.slice("file:".length)];
+		}
+	});
+}
+
 function candidatePath(arg: string, roots: readonly string[]): boolean {
-	return arg.split(/[=,:]/).some((part) => {
-		if (!part.startsWith("/w/")) return false;
-		const path = posix.normalize(part.slice(3)).replace(/^\/+/, "");
+	return pathPieces(arg).some((piece) => {
+		const path = posix.normalize(piece);
+
+		if (!path.startsWith("/w/")) return false;
+		const inTree = path.slice("/w/".length);
 
 		return ["test", ...roots].some(
-			(root) => path === root || path.startsWith(`${root}/`),
+			(root) => inTree === root || inTree.startsWith(`${root}/`),
 		);
 	});
 }
@@ -282,7 +306,7 @@ function runsTooling(
 	return (
 		script !== undefined &&
 		script.startsWith("/g/tooling/") &&
-		nodeFlags.every((flag) => flag.startsWith("--")) &&
+		nodeFlags.every((flag) => NODE_FLAGS.includes(flag)) &&
 		argv.every(
 			(arg) =>
 				!NODE_CODE_FLAG.test(arg) &&
@@ -327,7 +351,7 @@ export function gatePolicyOf(tree: string): GatePolicy {
 		throw new Error("invalid_gate_manifest");
 
 	const sourceRoots =
-		version === 1 ? SOURCE : sourceRootsOf(fieldOf(value, "sourceRoots"));
+		version === 1 ? SOURCE : sourceRootsOf(fieldOf(value, "sourceRoots"), tree);
 
 	const checks = rawChecks.map((item) => {
 		const obj = objectOf(item);
@@ -357,11 +381,7 @@ export function gatePolicyOf(tree: string): GatePolicy {
 	)
 		throw new Error("missing_checks");
 
-	return { checks, sourceRoots, testGlobs };
-}
-
-export function sourceRootsIn(tree: string): readonly string[] {
-	return gatePolicyOf(tree).sourceRoots;
+	return { version, checks, sourceRoots, testGlobs };
 }
 
 export function manifestOf(tree: string) {
