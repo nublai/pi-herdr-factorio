@@ -16,7 +16,7 @@ The push rule is in [Push rule for the bridge](#push-rule-for-the-bridge).
 
 ## Read the feed
 
-Two sources return the same projection. Both call `readOwnerFeed` in `host/cli/owner-feed.ts`, which reads the controller state and receipts and passes them to the projection in `src/views/feed.ts`. Neither makes a GitHub or model call.
+Two sources return the same projection. Both call `readOwnerFeed` in `host/cli/owner-feed.ts`, which reads the controller state and receipts and passes them to the projection in `src/views/feed.ts`. Neither makes a GitHub or model call. For a [new target on its own VM](install-exe-dev.md#set-up-a-factory-for-another-repository-on-a-new-vm), pass its repository explicitly, for example `--repo giuseppecrj/pi-herdr-agents`, and read that VM's private state as `exedev`. The optional Shep bridge uses the same target command; it is not required for a held factory install.
 
 ```bash
 node host/cli/index.ts owner-feed --json --state-dir "$STATE" [--repo <owner/name>]

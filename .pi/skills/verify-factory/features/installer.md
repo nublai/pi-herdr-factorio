@@ -12,7 +12,7 @@
 
 Use `host/install/install-exe-dev.sh` and [the installer runbook](../../../../docs/operations/install-exe-dev.md). Read the script at the chosen revision before running it. This recipe uses a disposable exe.dev VM named `layout-install-test`, not a production host.
 
-The layout program requires separate grants for the fixture repository, its two-field configuration derivation, integration, VM lifecycle, install, upgrade, recovery, and cleanup. See [the fixture prerequisites](../../../../docs/plans/later/codebase-layout.md#disposable-fixture-setup-is-a-real-prerequisite). At this base, `--repo` alone cannot make a fixture installation work. The derived revision must allow the fixture repository in the platform defaults and its trusted main workflow. Record product and fixture SHAs and prove all other blobs identical.
+Require separate grants for the fixture repository/configuration, integration, VM lifecycle, install, upgrade, recovery, and cleanup. The R1 installer pins product source independently from the target. Follow [the current fixture flow](../../../../docs/operations/install-exe-dev.md#disposable-fixture-with-the-r1-installer), not the layout program's historical two-field derivation. Record product and target main SHAs separately. Never dispatch on a second repository until [#837](https://github.com/nublai/pi-herdr-factorio/issues/837) is closed.
 
 `nubl-factory` is held production. Routine access is read-only; upgrades, bridge installation, the hold-lift and fixture runs each need Giuseppe's explicit go. Never run these disposable installation lanes there. `pi-factorio` was retired and deleted on 2026-11-13 (#734), with its state archived.
 
@@ -24,13 +24,13 @@ Under the separate setup grant, create the disposable VM and attach only `nublai
 
 Connect directly to `exedev@layout-install-test.exe.xyz`. Run the remaining commands there as `exedev`, not root. `--vm` changes fix instructions only. It does not select or connect to a VM. Do not use legacy lane helpers as a target selector for this installation.
 
-Set `C` to the approved full lowercase 40-character fixture commit published in the fixture repository. Match the bootstrap URL to that commit's layout. An old-layout commit uses `https://raw.githubusercontent.com/$REPO/$C/server/install-exe-dev.sh`. A new-layout commit uses `https://raw.githubusercontent.com/$REPO/$C/host/install/install-exe-dev.sh`, as below.
+Prepare the fixture main's matching WORKFLOW, gate policy, and assets under its grant. Set `C` to the approved full lowercase 40-character **product** commit published in `nublai/pi-herdr-factorio`. A fixture-only commit cannot be installed by the R1 bootstrap. The fixture may remain private: download the public product installer, not a raw fixture URL.
 
 ```bash
 REPO=nublai/pi-herdr-factorio-layout-fixture
 VM=layout-install-test
-C='<approved-full-fixture-commit>'
-URL="https://raw.githubusercontent.com/$REPO/$C/host/install/install-exe-dev.sh"
+C='<approved-full-product-commit>'
+URL="https://raw.githubusercontent.com/nublai/pi-herdr-factorio/$C/host/install/install-exe-dev.sh"
 ```
 
 ### Check preflight
@@ -49,7 +49,7 @@ Require exit 0 and `preflight=ok` with the explicit repository and VM. Compare t
 curl -fsSL "$URL" | bash -s -- --repo "$REPO" --vm "$VM" "$C"
 ```
 
-Require exit 0 and `installed=<C> held=yes`. Confirm the checkout's exact SHA, its integration origin, private state at `/home/exedev/factory-state`, and a retained `disabled` entry. Capture the successful `install-exe-dev.commit` receipt privately.
+Require exit 0 and `installed=<C> held=yes`. Confirm the checkout's exact product SHA, public product origin `https://github.com/nublai/pi-herdr-factorio.git`, private state at `/home/exedev/factory-state`, and a retained `disabled` entry. Capture the successful `install-exe-dev.commit` receipt containing `<C> <REPO>` privately. Read back the root-owned 0644 `/etc/factory/platform.json`; it must select only the fixture with empty historical aliases. Confirm the installed unit's `--repo` names the fixture and status reports matching CLI/startup platform digests.
 
 Record the restart boundary and current service InvocationID. Inspect that invocation's journal for `event=controller_ready`. Require `status.json` and CLI `controller.lastTick.at` newer than the boundary, dispatch disabled, and `locally_disabled` among its reasons. The installer checks both fresh status reads before enabling boot. An old status file does not prove this start.
 
@@ -70,7 +70,7 @@ Record PID, InvocationID, hold bytes and metadata, receipt, and unit before reru
 
 ### Upgrade and fail safely
 
-Drain the disposable controller under its grant before upgrade. Preserve state and hold evidence. Set `C` to the approved new-layout fixture commit and download that commit's bootstrap with `URL="https://raw.githubusercontent.com/$REPO/$C/host/install/install-exe-dev.sh"`. Rerun with explicit `--repo` and `--vm`. Require the new SHA and receipt, current readiness evidence, and the original hold retained.
+Drain the disposable controller under its grant before upgrade. Preserve state and hold evidence. Set `C` to the approved new product commit and download its bootstrap with `URL="https://raw.githubusercontent.com/nublai/pi-herdr-factorio/$C/host/install/install-exe-dev.sh"`. Update target tooling pins and copied assets to match under their grant. Rerun with the same explicit `--repo` and `--vm`. An existing old-layout fixture without a singleton is not an R1 rerun: report the refusal and request a reviewed migration, never erase its selection or receipt. Require the new SHA and receipt, current readiness evidence, and the original hold retained.
 
 For an authorized failure before stop, use a controlled unavailable integration or fetch. Require a named refusal and the old service identity unchanged. If the hold was absent, installation may already have created it before fetching. Preflight alone never creates it.
 
@@ -82,7 +82,7 @@ For an authorized provisioning failure after stop, require the hold retained, no
 
 - `--check` needs no commit argument. If supplied, it validates the commit's syntax. The downloaded script must still be pinned. Use one SHA variable for both the URL and the installation argument.
 - Preflight requires x86_64 Linux, UID 1000 `exedev`, passwordless sudo, exe.dev integration DNS, bwrap at least 0.9.0, working user namespaces, systemd/logind, and disk/inode headroom. Namespace probes run `true`. Ordinary sudo or network audit logs may change.
-- Dirty, symlinked, wrong-origin checkouts and an existing `/etc/factory/platform.json` refuse. Do not erase local work or platform configuration to force a pass.
+- Dirty, symlinked, and wrong-origin checkouts refuse. For a non-default target, an exact root-owned 0644 singleton selection file is accepted on rerun; mismatched or unsafe files refuse. The default Factorio install still refuses any existing platform file. Check-only never writes one. Do not erase local work or platform configuration to force a pass.
 - The installer never removes `disabled` or changes `factory:enabled`. A hold blocks launches but permits existing-run observation and terminal bookkeeping.
 - Keep redacted commands, timestamps, product/fixture SHAs, exact configuration diffs, before/after identities, output, and exit status in the private trail. Close any authorized fixtures and confirm CLOSED. Stop owned test processes and remove disposable infrastructure only under the cleanup grant.
 - The runbook's `FACTORY_VM=nubl-factory` doctor example is read-only, not installation authority. Read `../SKILL.md` for production target restrictions.

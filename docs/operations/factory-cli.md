@@ -1099,7 +1099,7 @@ SIGTERM or SIGINT lets the current tick finish, then `serve` logs `controller_st
 
 ### Install the service
 
-For a fresh exe.dev VM, use the [commit-pinned, held install](install-exe-dev.md) on `nubl-factory`. It checks prerequisites before changes, has a read-only `--check`, and keeps dispatch held until Giuseppe releases it.
+For a fresh exe.dev VM, use the [commit-pinned, held install](install-exe-dev.md). It checks prerequisites before changes, has a read-only `--check`, and keeps dispatch held until Giuseppe releases it. Factorio's default target is `nublai/pi-herdr-factorio` on `nubl-factory`. For another target, use a separate new VM and follow the [new-repository procedure](install-exe-dev.md#set-up-a-factory-for-another-repository-on-a-new-vm) and [Agents onboarding set](examples/onboarding/pi-herdr-agents/README.md). No second-repo dispatch is allowed until [#837](https://github.com/nublai/pi-herdr-factorio/issues/837) is closed.
 
 Installation requires explicit service/VM authority, a drained rollout, and the [owner bootstrap gates](human-review.md#bootstrap-and-enable-protection-as-the-owner). These examples are not an execution grant.
 
