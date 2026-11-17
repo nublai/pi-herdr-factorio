@@ -50,6 +50,7 @@ import {
 	validateDependencies,
 } from "./manifest.ts";
 import {
+	byteSafeAttributes,
 	gateMaterializerIdentity,
 	heldoutOf,
 	safePath,
@@ -281,19 +282,24 @@ export function baseTreeDigest(tree: string): ReturnType<typeof digestOf> {
 
 			if (
 				!safePath(path) ||
-				entry.name === ".gitattributes" ||
 				stat.isSymbolicLink() ||
 				(!stat.isDirectory() && !stat.isFile())
 			)
 				throw new Error("unsafe_tree");
 
 			if (stat.isDirectory()) walk(path);
-			else
+			else {
+				const bytes = readFileSync(join(tree, path));
+
+				if (entry.name === ".gitattributes" && !byteSafeAttributes(bytes))
+					throw new Error("unsafe_tree");
+
 				entries.push([
 					path,
 					stat.mode & 0o111 ? 0o755 : 0o644,
-					digestOf(readFileSync(join(tree, path))),
+					digestOf(bytes),
 				]);
+			}
 		}
 	};
 
@@ -450,6 +456,9 @@ async function runBase(
 
 		if (source.reason !== "unsafe_tree") throw new Error(source.reason);
 
+		const treeDigest = baseTreeDigest(input.tree);
+		const gatesDigest = baseTreeDigest(gates);
+
 		const version = await command(
 			"bwrap",
 			["--version"],
@@ -459,8 +468,6 @@ async function runBase(
 		);
 
 		runtime.bwrap = version.stdout.trim().slice(0, 100);
-		const treeDigest = baseTreeDigest(input.tree);
-		const gatesDigest = baseTreeDigest(gates);
 
 		const lockDigest = digestOf(
 			readFileSync(join(input.tree, "package-lock.json")),
@@ -587,6 +594,17 @@ async function runBase(
 		execution = await once();
 		repeat = await once();
 	} catch (error) {
+		if (
+			source.kind === "unavailable" &&
+			source.reason === "unsafe_tree" &&
+			error instanceof Error &&
+			error.message === "unsafe_tree"
+		) {
+			source = { kind: "unavailable", reason: "tree_refused" };
+
+			return evidence();
+		}
+
 		const failed: PrivateExecution = {
 			kind: "unavailable",
 			reason:
