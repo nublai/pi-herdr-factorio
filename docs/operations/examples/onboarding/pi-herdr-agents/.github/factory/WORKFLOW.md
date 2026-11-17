@@ -41,6 +41,9 @@ stages:
   review:
     model: openai/gpt-6.1-sol
     fallback_model: openai/gpt-6.1-terra
+    seats:
+      second-judge:
+        model: anthropic/claude-sonnet-5-5
     max_turns: 20
     wall_ms: 900000
     stall_ms: 300000
@@ -87,7 +90,7 @@ Add no dependency unless the contract asks for one. Preserve exact Maestro pins 
 Put regressions, helpers, and fixtures in new files unless the contract names an existing test replacement. Keep every unnamed test intact.
 Run focused tests while iterating, then the repository commands above. Never weaken lint, format, or TypeScript configuration to make a check pass.
 Trusted checks use main's configuration. Restore candidate configuration edits before reproducing feedback locally.
-Host/unit tests do not prove real Herdr lifecycle behavior. Lifecycle changes also need separately authorized candidate-bound Linux integration evidence.
+Host/unit tests do not prove real Herdr lifecycle behavior. The unit suite gates every ticket. A ticket that touches Herdr lifecycle code also needs this repository's `linux-integration` workflow green on its PR before the owner merges.
 
 ## validate
 
@@ -99,7 +102,7 @@ Missing, stale, or incomplete results fail closed. Only exact-head trusted evide
 Review the full diff read-only against the contract in fresh code-review, security-review, and simplify sessions, plus ultrareview for deterministic high-risk changes.
 The findings seats use OpenAI, like the builder. They are context-isolated, same family, not cross-family.
 Two independent judges from different provider families must pass every judge-only scenario. Any fail goes to repair. Missing or unverifiable judgments hold for the owner.
-This onboarding file leaves the second judge unconfigured until Giuseppe confirms its model and spend for this target. Root must add the approved `stages.review.seats.second-judge.model` before dispatch.
+Giuseppe approved the Anthropic second judge and its spend for this target on 2026-11-17, matching nubl-factory.
 The second judge counts within the existing review allowance, not toward R8. R8 remains incomplete with same-family acceptance.
 Only concrete bugs, security defects, broken contract lines, and failed judgments block. Simplify is advisory and never edits.
 The security seat alone retries a recorded refusal once on the configured fallback. Blocking results share two repair rounds with CI. Every repair is rebuilt, validated, and reviewed on its new SHA.
