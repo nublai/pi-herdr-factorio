@@ -28,7 +28,7 @@ validate_selection() {
     ! { [ -e "$HOME/pi-herdr-factorio" ] || [ -L "$HOME/pi-herdr-factorio" ] || [ -e /etc/systemd/system/factory.service ]; } || { refuse repository_selection 'Use a new VM for another repository; never switch an existing installation to a different target.'; return 1; }
   fi
   if [ -e "$HOME/factory-state/install-exe-dev.commit" ]; then
-    read -r installed_commit installed_repo extra <"$HOME/factory-state/install-exe-dev.commit" && [ "$installed_repo" = "$repo" ] && [ -z "$extra" ] || { refuse repository_selection 'Keep the existing repository selection; use a separate VM for another repository.'; return 1; }
+    { read -r installed_commit installed_repo extra <"$HOME/factory-state/install-exe-dev.commit" || [ -n "$installed_commit" ]; } && [ "$installed_repo" = "$repo" ] && [ -z "$extra" ] || { refuse repository_selection 'Keep the existing repository selection; use a separate VM for another repository.'; return 1; }
   fi
 }
 
@@ -117,6 +117,18 @@ ensure_hold() {
 install_controller() (
   local checkout="$HOME/pi-herdr-factorio" state_dir="$HOME/factory-state" receipt invocation journal after
   local staging='' unit_file='' receipt_file='' stopped=false complete=false
+  local origin_fix clone_fix fetch_fix fetched_fix
+  if [ "$repo" = nublai/pi-herdr-factorio ]; then
+    origin_fix='Use a separate clean VM or correct the checkout origin to the selected repository through github.int.exe.xyz after preserving existing work.'
+    clone_fix='Confirm network access and the GitHub integration attachment, then retry.'
+    fetch_fix='Check network access and the GitHub integration; confirm the requested full commit is published in the selected repository, then retry with that SHA.'
+    fetched_fix='Do not continue: the integration did not return the requested commit.'
+  else
+    origin_fix='Preserve existing work and use a clean checkout of the Factorio product from the installer source URL, not the target repository.'
+    clone_fix='Confirm network access to the Factorio product source, then retry.'
+    fetch_fix='Check network access to the Factorio product source; confirm the requested full commit is published in nublai/pi-herdr-factorio, then retry with that SHA.'
+    fetched_fix='Do not continue: the product source did not return the requested commit.'
+  fi
   if [ -n "$continuation" ] && [ "$continuation" != "$checkout" ]; then staging=$continuation; fi
   cleanup_install() {
     local result=$?
@@ -138,7 +150,7 @@ install_controller() (
   if [ -e "$checkout" ] || [ -L "$checkout" ]; then
     [ ! -L "$checkout" ] || { refuse checkout_symlink 'Use a real /home/exedev/pi-herdr-factorio checkout, not a symlink.'; return 1; }
     [ -d "$checkout/.git" ] && [ -z "$(git -C "$checkout" status --porcelain)" ] || { refuse checkout_dirty 'Preserve local work, then provide a clean /home/exedev/pi-herdr-factorio checkout; the installer never resets local edits.'; return 1; }
-    [ "$(git -C "$checkout" remote get-url origin)" = "$product_url" ] || { refuse checkout_origin 'Preserve existing work and use a clean checkout of the Factorio product from the installer source URL, not the target repository.'; return 1; }
+    [ "$(git -C "$checkout" remote get-url origin)" = "$product_url" ] || { refuse checkout_origin "$origin_fix"; return 1; }
   fi
   after=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)
   # Hold before any stop, checkout change, provisioning, enable or restart. Never remove it.
@@ -158,9 +170,9 @@ install_controller() (
   fi
   if [ -z "$continuation" ]; then
     staging=$(mktemp -d "$HOME/.pi-herdr-factorio.install.XXXXXX")
-    git -c credential.helper= -c http.extraHeader= clone --quiet --no-checkout --depth 1 "$product_url" "$staging" >/dev/null 2>&1 || { refuse clone 'Confirm network access to the Factorio product source, then retry.'; return 1; }
-    git -C "$staging" -c credential.helper= -c http.extraHeader= fetch --quiet --depth 1 origin "$commit" >/dev/null 2>&1 || { refuse fetch_commit 'Check network access to the Factorio product source; confirm the requested full commit is published in nublai/pi-herdr-factorio, then retry with that SHA.'; return 1; }
-    [ "$(git -C "$staging" rev-parse FETCH_HEAD)" = "$commit" ] || { refuse fetched_sha 'Do not continue: the product source did not return the requested commit.'; return 1; }
+    git -c credential.helper= -c http.extraHeader= clone --quiet --no-checkout --depth 1 "$product_url" "$staging" >/dev/null 2>&1 || { refuse clone "$clone_fix"; return 1; }
+    git -C "$staging" -c credential.helper= -c http.extraHeader= fetch --quiet --depth 1 origin "$commit" >/dev/null 2>&1 || { refuse fetch_commit "$fetch_fix"; return 1; }
+    [ "$(git -C "$staging" rev-parse FETCH_HEAD)" = "$commit" ] || { refuse fetched_sha "$fetched_fix"; return 1; }
     git -C "$staging" checkout --quiet --detach "$commit"
     verify_head "$staging" "$commit"
     exec bash "$staging/host/install/install-exe-dev.sh" --continue "$staging" --repo "$repo" --vm "$vm" "$commit"

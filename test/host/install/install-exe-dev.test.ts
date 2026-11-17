@@ -423,6 +423,7 @@ G
 cat >"$W/bin/systemctl" <<'S'
 #!/bin/bash
 echo "systemctl $* hold=$([ -e "$HOME/factory-state/disabled" ] && echo y || echo n)" >>"$LOG"
+[ "$1" != stop ] || echo "stop platform=$([ -f "$FAKE/etc/platform.json" ] && echo y || echo n)" >>"$LOG"
 case "$1" in
   stop|restart|enable|disable)
     [ -f "$FAKE/etc/factory.service" ] || { echo "Failed to $1 unit: Unit factory.service does not exist" >&2; exit 1; };;
@@ -446,11 +447,11 @@ case "$1" in
     args=("$@")
     case "${"${args[-1]}"}" in
       /etc/systemd/system/factory.service) cp "${"${args[-2]}"}" "$FAKE/etc/factory.service";;
-      /etc/factory) [ "$*" = 'install -d -m 0755 -o root -g root /etc/factory' ];;
-      /etc/factory/platform.json.tmp) [ "$*" = 'install -m 0644 -o root -g root /dev/stdin /etc/factory/platform.json.tmp' ]; cat >"$FAKE/etc/platform.json.tmp"; chmod 644 "$FAKE/etc/platform.json.tmp";;
+      /etc/factory) [ "$*" = 'install -d -m 0755 -o root -g root /etc/factory' ] || { echo "BAD sudo $*" >&2; exit 98; };;
+      /etc/factory/platform.json.tmp) [ "$*" = 'install -m 0644 -o root -g root /dev/stdin /etc/factory/platform.json.tmp' ] || { echo "BAD sudo $*" >&2; exit 98; }; cat >"$FAKE/etc/platform.json.tmp"; chmod 644 "$FAKE/etc/platform.json.tmp";;
       *) exit 99;;
     esac;;
-  mv) [ "$*" = 'mv -T /etc/factory/platform.json.tmp /etc/factory/platform.json' ]; mv "$FAKE/etc/platform.json.tmp" "$FAKE/etc/platform.json";;
+  mv) [ "$*" = 'mv -T /etc/factory/platform.json.tmp /etc/factory/platform.json' ] || { echo "BAD sudo $*" >&2; exit 98; }; mv "$FAKE/etc/platform.json.tmp" "$FAKE/etc/platform.json";;
   systemctl) shift; exec systemctl "$@";;
   journalctl) [ -z "${"${JOURNAL_FAIL:-}"}" ] || exit 1; echo event=controller_ready; if [ -n "${"${LARGE_JOURNAL:-}"}" ]; then for chunk in {1..100}; do printf '%10000s\n' end || exit $?; done; fi;;
   *) echo "UNEXPECTED sudo $*" >&2; exit 99;;
@@ -486,10 +487,12 @@ cat >"$W/bin/git" <<'S'
 #!/bin/bash
 echo "git $*" >>"$LOG"
 if [[ " $* " == *" remote get-url origin "* ]]; then
-  if [ -n "${"${TARGET_REPO:-}"}" ]; then echo https://github.com/nublai/pi-herdr-factorio.git; else echo https://github.int.exe.xyz/nublai/pi-herdr-factorio.git; fi
+  if [ -n "${"${ORIGIN_URL:-}"}" ]; then echo "$ORIGIN_URL"; elif [ -n "${"${TARGET_REPO:-}"}" ]; then echo https://github.com/nublai/pi-herdr-factorio.git; else echo https://github.int.exe.xyz/nublai/pi-herdr-factorio.git; fi
   exit
 fi
 if [ -n "${"${FETCH_FAIL:-}"}" ] && [[ " $* " == *" fetch "* ]]; then echo fetch-failed >>"$LOG"; exit 128; fi
+if [ -n "${"${CLONE_FAIL:-}"}" ] && [[ " $* " == *" clone "* ]]; then exit 128; fi
+if [ -n "${"${WRONG_FETCH_HEAD:-}"}" ] && [[ " $* " == *" rev-parse FETCH_HEAD "* ]]; then echo 0000000000000000000000000000000000000000; exit; fi
 exec /usr/bin/git "$@"
 S
 cat >"$W/bin/cmp" <<'S'
@@ -549,6 +552,10 @@ grep -q -- '--repo giuseppecrj/pi-herdr-agents' "$FAKE/etc/factory.service"
 grep -q 'clone --quiet --no-checkout --depth 1 https://github.com/nublai/pi-herdr-factorio.git' "$LOG"
 [ -f "$FAKE/active" ] && [ -f "$FAKE/enabled" ]
 [ -e "$state/disabled" ]
+[ "$(grep -m1 '^stop platform=' "$LOG")" = 'stop platform=y' ]
+mv_line=$(grep -n '^sudo mv -T /etc/factory/platform.json.tmp /etc/factory/platform.json$' "$LOG" | cut -d: -f1)
+stop_line=$(grep -n '^systemctl stop ' "$LOG" | head -n1 | cut -d: -f1)
+[ -n "$mv_line" ] && [ -n "$stop_line" ] && [ "$mv_line" -lt "$stop_line" ]
 before=$(stat -c '%i:%s:%Y:%Z' "$FAKE/etc/platform.json")
 : >"$LOG"
 run "$bootstrap" "$A"
@@ -622,6 +629,76 @@ absent_log 'systemctl stop|sudo install|^provision '
 		assert.equal(result.status, 0, result.stdout + result.stderr);
 		assert.match(result.stderr, /REFUSE fetch_commit/);
 	});
+
+	const sourceRefusals = [
+		{
+			code: "checkout_origin",
+			env: "ORIGIN_URL=https://example.invalid/other.git",
+			installed: true,
+			main: "Use a separate clean VM or correct the checkout origin to the selected repository through github.int.exe.xyz after preserving existing work.",
+			target:
+				"Preserve existing work and use a clean checkout of the Factorio product from the installer source URL, not the target repository.",
+		},
+		{
+			code: "clone",
+			env: "CLONE_FAIL=1",
+			installed: false,
+			main: "Confirm network access and the GitHub integration attachment, then retry.",
+			target:
+				"Confirm network access to the Factorio product source, then retry.",
+		},
+		{
+			code: "fetch_commit",
+			env: "FETCH_FAIL=1",
+			installed: false,
+			main: "Check network access and the GitHub integration; confirm the requested full commit is published in the selected repository, then retry with that SHA.",
+			target:
+				"Check network access to the Factorio product source; confirm the requested full commit is published in nublai/pi-herdr-factorio, then retry with that SHA.",
+		},
+		{
+			code: "fetched_sha",
+			env: "WRONG_FETCH_HEAD=1",
+			installed: false,
+			main: "Do not continue: the integration did not return the requested commit.",
+			target:
+				"Do not continue: the product source did not return the requested commit.",
+		},
+	];
+
+	for (const refusal of sourceRefusals) {
+		for (const selected of ["default", "target"] as const) {
+			it(`prints the ${selected} ${refusal.code} refusal text`, () => {
+				const result = isolatedInstall(`
+${selected === "target" ? `export TARGET_REPO=${target}` : ""}
+${refusal.installed ? 'run "$bootstrap" "$A" 2>"$W/setup.err" || { cat "$W/setup.err" >&2; exit 93; }' : ""}
+if ${refusal.env} run "$bootstrap" "$B"; then exit 91; fi
+`);
+
+				assert.equal(result.status, 0, result.stdout + result.stderr);
+				assert.equal(
+					result.stderr,
+					`install-exe-dev: REFUSE ${refusal.code}\nfix: ${selected === "default" ? refusal.main : refusal.target}\n`,
+				);
+			});
+		}
+	}
+
+	for (const selected of ["default", "target"] as const) {
+		it(`accepts a ${selected} receipt without a trailing newline as already installed`, () => {
+			const result = isolatedInstall(`
+${selected === "target" ? `export TARGET_REPO=${target}` : ""}
+run "$bootstrap" "$A"
+printf '%s %s' "$A" "${selected === "target" ? target : "nublai/pi-herdr-factorio"}" >"$state/install-exe-dev.commit"
+: >"$LOG"
+run "$bootstrap" "$A"
+absent_log '^provision |systemctl stop|systemctl restart'
+`);
+
+			assert.equal(result.status, 0, result.stdout + result.stderr);
+			assert.match(result.stdout, /already_installed=.*hold retained/);
+			assert.doesNotMatch(result.stderr, /REFUSE/);
+		});
+	}
 
 	for (const existingHold of [false, true]) {
 		it(`old bootstrap refuses a new-layout SHA before stopping the service, hold present=${existingHold}`, () => {
