@@ -720,6 +720,16 @@ describe("bench run offline CLI", (suite) => {
 		}
 	});
 
+	it("837b respec keeps running-product tooling for draft and final base qualification", () => {
+		const { f, result } = happyRespec;
+		assert.equal(existsSync(join(f.repository, MATERIALIZER_FILES[0])), false);
+		assert.equal(result.code, 0, result.stderr);
+		const trial = parseBenchTrial(result.stdout);
+		assert.equal(trial.outcome.kind, "passed");
+		assert.ok(f.baseRequests.some(({ tree }) => tree.includes("draft-1")));
+		assert.ok(f.baseRequests.some(({ tree }) => tree.includes("accept-base")));
+	});
+
 	it("respec final base qualification passes production's scope and abort bounds to every runner call", {
 		timeout: 30000,
 	}, () => {

@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, it } from "node:test";
 import { runHeldoutBase } from "../../../host/gates/base.ts";
+import { MATERIALIZER_FILES } from "../../../host/gates/materialize.ts";
 import { assessBase } from "../../../src/candidate/diagnosis.ts";
 import { isGitSha } from "../../../src/config/schema.ts";
 import { parseWorkflow } from "../../../src/config/parse.ts";
@@ -1520,6 +1521,12 @@ describe("held-out checks resolve the repository root through the real base chec
 			join(tree, ".github/factory/gates"),
 			{ recursive: true },
 		);
+
+		for (const path of MATERIALIZER_FILES) {
+			mkdirSync(join(tree, path, ".."), { recursive: true });
+			cpSync(resolve(path), join(tree, path));
+		}
+
 		writeFileSync(join(tree, "data/marker.txt"), "MARKER");
 		writeFileSync(
 			join(tree, "package.json"),

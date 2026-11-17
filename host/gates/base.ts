@@ -45,10 +45,15 @@ import { ACCEPTANCE_SUITE_PREFIX } from "../../src/trust/protected-paths.ts";
 
 import {
 	type Dependency,
+	gatePolicyOf,
 	readDependencies,
 	validateDependencies,
 } from "./manifest.ts";
-import { heldoutOf, safePath } from "./materialize.ts";
+import {
+	gateMaterializerIdentity,
+	heldoutOf,
+	safePath,
+} from "./materialize.ts";
 import {
 	CLEAN_ENV,
 	command,
@@ -299,6 +304,7 @@ export function baseTreeDigest(tree: string): ReturnType<typeof digestOf> {
 
 type BaseRunInput = {
 	readonly tree: string;
+	readonly tooling?: "running-product";
 	readonly refused?: "tree_partial" | "tree_refused" | "tree_unavailable";
 	readonly workDir: string;
 	readonly cacheDir: string;
@@ -429,8 +435,20 @@ async function runBase(
 	};
 
 	try {
-		if (source.reason !== "unsafe_tree") throw new Error(source.reason);
 		remaining();
+
+		if (input.refused === undefined && input.tooling !== "running-product") {
+			try {
+				gatePolicyOf(input.tree);
+				gateMaterializerIdentity(input.tree);
+			} catch {
+				source = { kind: "unavailable", reason: "tree_refused" };
+
+				return evidence();
+			}
+		}
+
+		if (source.reason !== "unsafe_tree") throw new Error(source.reason);
 
 		const version = await command(
 			"bwrap",

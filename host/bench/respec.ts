@@ -322,6 +322,7 @@ export async function respecBench(input: {
 				signal: new AbortController().signal,
 				progress: () => {},
 				draftCheck: controllerDraftChecker({
+					tooling: "running-product",
 					stateDir: input.state,
 					stageDir,
 					attempt: 1,
@@ -401,6 +402,7 @@ export async function respecBench(input: {
 		};
 
 		const evidence = await runHeldoutBase({
+			tooling: "running-product",
 			tree,
 			workDir,
 			cacheDir: join(input.state, "base-dependencies"),

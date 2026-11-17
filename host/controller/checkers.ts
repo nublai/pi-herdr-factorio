@@ -69,6 +69,7 @@ import { fileRunFiles } from "./run-files.ts";
 import { keepValidationFile, parseJson, writeAtomic } from "./state.ts";
 
 export function controllerDraftChecker(config: {
+	readonly tooling?: "running-product";
 	readonly stateDir: string;
 	readonly stageDir: string;
 	readonly attempt: number;
@@ -150,6 +151,7 @@ export function controllerDraftChecker(config: {
 			});
 
 			const { evidence, details } = await runDraftBase({
+				tooling: config.tooling,
 				tree,
 				workDir: dir,
 				cacheDir: join(config.stateDir, "base-dependencies"),

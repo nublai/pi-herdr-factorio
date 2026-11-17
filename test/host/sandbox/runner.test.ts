@@ -23,6 +23,7 @@ import {
 	startEchoFixture,
 } from "../gateway/http-fixtures.ts";
 import { runHeldoutBase } from "../../../host/gates/base.ts";
+import { MATERIALIZER_FILES } from "../../../host/gates/materialize.ts";
 import { assessBase } from "../../../src/candidate/diagnosis.ts";
 import {
 	createReadTool,
@@ -6892,6 +6893,12 @@ describe("pinned zero-token accept replay", () => {
 			join(tree, ".github/factory/gates"),
 			{ recursive: true },
 		);
+
+		for (const path of MATERIALIZER_FILES) {
+			mkdirSync(join(tree, path, ".."), { recursive: true });
+			cpSync(join(process.cwd(), path), join(tree, path));
+		}
+
 		const startedAt = Date.now();
 		const exits: number[] = [];
 
