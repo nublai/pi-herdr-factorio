@@ -109,6 +109,17 @@ describe("platform environment for provisioning", () => {
 		}
 	}
 
+	it("renders the same exe-dev environment for an installer-owned target singleton", async () => {
+		const result = await render("exe-dev", {
+			kind: "present",
+			text: '{"version":1,"platform":"exe-dev","repositories":["giuseppecrj/pi-herdr-agents"],"historicalRepositories":{}}\n',
+		});
+
+		assert.equal(result.code, 0);
+		assert.equal(result.stdout, DEFAULT_ENV);
+		assert.equal(result.stderr, "");
+	});
+
 	it("takes the platform and one-label GitHub override from the same resolver", async () => {
 		const result = await render(
 			undefined,

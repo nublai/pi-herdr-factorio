@@ -1,15 +1,18 @@
 import { readFileSync } from "node:fs";
+import { isDeepStrictEqual } from "node:util";
 
 // Only the installer's JSON protocol, not a general jq interpreter. Unknown
 // filters or flags fail so a changed installer cannot silently bypass a check.
 const args = process.argv.slice(2);
 const vars = new Map();
 let exitStatus = false;
+let slurp = false;
 
 while (args[0]?.startsWith("-")) {
 	const flag = args.shift();
 
 	if (flag === "-e") exitStatus = true;
+	else if (flag === "-s") slurp = true;
 	else if (flag === "--arg") vars.set(args.shift(), args.shift());
 	else throw new Error(`unsupported fixture jq flag: ${flag}`);
 }
@@ -98,6 +101,15 @@ function evaluate(input) {
 			};
 		case '.at > $after and .dispatch.enabled == false and (.dispatch.reasons | type == "array" and index("locally_disabled") != null)':
 			return held(input);
+		case '. == [{version: 1, platform: "exe-dev", repositories: [$repo], historicalRepositories: {}}]':
+			return isDeepStrictEqual(input, [
+				{
+					version: 1,
+					platform: "exe-dev",
+					repositories: [vars.get("repo")],
+					historicalRepositories: {},
+				},
+			]);
 		case ".platform.repositories | index($repo) != null": {
 			const repositories = field(field(input, "platform"), "repositories");
 
@@ -112,7 +124,7 @@ function evaluate(input) {
 try {
 	process.exitCode = exitStatus ? 4 : 0;
 
-	for (const input of documents(text)) {
+	for (const input of slurp ? [[...documents(text)]] : documents(text)) {
 		const result = evaluate(input);
 		console.log(JSON.stringify(result, null, 2));
 		process.exitCode =

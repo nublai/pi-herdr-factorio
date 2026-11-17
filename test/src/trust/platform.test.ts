@@ -461,6 +461,23 @@ describe("platform selection", () => {
 		assert.equal(Object.isFrozen(unset.repositories), true);
 	});
 
+	it("resolves the installer's target singleton to the exe-dev profile with only its repository and no aliases", () => {
+		const singleton = resolved(undefined, {
+			kind: "present",
+			text: '{"version":1,"platform":"exe-dev","repositories":["giuseppecrj/pi-herdr-agents"],"historicalRepositories":{}}\n',
+		});
+
+		assert.deepEqual(singleton, {
+			...EXE_DEV_PLATFORM,
+			repositories: ["giuseppecrj/pi-herdr-agents"],
+			historicalRepositories: {},
+		});
+		assert.deepEqual(EXE_DEV_PLATFORM.repositories, [
+			"nublai/pi-herdr-factorio",
+		]);
+		assert.deepEqual(resolved(undefined, ABSENT), EXE_DEV_PLATFORM);
+	});
+
 	it("builds exmach from the built-in contract with the published identity and factorio GitHub host", () => {
 		assert.deepEqual(EXMACH, {
 			name: "exmach",
