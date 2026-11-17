@@ -176,9 +176,11 @@ from the offline archive adapter, with production's complete file list, includin
 separate sanitized trees.
 
 Accept uses `runStage`, the frozen workflow's model, fallback, budget and accept
-reasoning effort, and `controllerDraftChecker`. Its archive adapter serves only
-the frozen repository and SHA from a locally generated gzip archive. It has no
-GitHub fallback. Judge-only gate/execution demands and new-behavior checks that
+reasoning effort, and `controllerDraftChecker`. Bench respec does not yet retry
+failed or malformed specify or accept stages. That production-parity work is
+tracked in [#851](https://github.com/nublai/pi-herdr-factorio/issues/851).
+Its archive adapter serves only the frozen repository and SHA from a locally
+generated gzip archive. It has no GitHub fallback. Judge-only gate/execution demands and new-behavior checks that
 read preserved test source retain production's refusals.
 
 Draft feedback is not qualification. The final suite receives a fresh canary and
@@ -188,7 +190,12 @@ no load, runtime, skip, todo, cancellation or tamper failure. Draft and final
 base checks use production's `localRunner` (bubblewrap), including dependency
 and detail-reporter mounts; candidate gates still use the pinned Docker image.
 Final qualification has at most 180 seconds and only the remaining accept wall
-time. It uses production's systemd scope with 2G memory, 512 tasks, 100% CPU,
+time. An author-fixable base refusal gets production's one accept feedback retry,
+subject to the workflow's attempt limit. The retry uses the shared refusal policy,
+bounded feedback and previous-suite prompt. Both attempts and base checks share
+the accept wall allowance and 100,000-token allowance, and the same trial cap.
+The retry has its own `runtime/accept-retry/` receipt and journal; a second
+refusal stops the trial. It uses production's systemd scope with 2G memory, 512 tasks, 100% CPU,
 and stop-on-abort through `localRunner`. The build and visible-test deadline
 starts separately at build start. This deadline change also applies to baseline,
 model and skill trials; their visible-test allowance no longer starts at trial
@@ -198,11 +205,16 @@ The fresh contract, suite, canary-bearing check bytes and digests flow through
 visible tests, replacement policy, gates and review. The old oracle is verified
 as part of the frozen bundle, but never reused for respec validation. Private
 artifacts live under `respec/`; `respec/base-receipt.json` and its digest retain
-the final qualification. Trial `respec` metadata records frozen base/archive and
+the final qualification. Each attempt also retains its receipt and digest under
+`respec/accept-base-<attempt>/`. A retried first suite is retained under
+`respec/accept-base-1/acceptance/`; the current suite stays in `respec/acceptance/`.
+Trial `respec` metadata records frozen base/archive and
 snapshot bindings, generated digests, effective accept effort and per-session
-requested/observed model evidence. Early failures may have null artifacts;
-successful records require complete proof and authoring-stage evidence. Old
-records without this field still parse.
+requested/observed model evidence. `baseRetryReason` records the first base
+refusal that granted an accept feedback retry, or null if none was granted.
+Older respec records without this field parse with null. Early failures may have
+null artifacts; successful records require complete proof and authoring-stage
+evidence. Records without `respec` metadata still parse.
 
 Before authorized model trials, the coordinator must qualify the bench host's
 local-bwrap accept-base lane as well as the Docker preflight below. Require a
@@ -372,10 +384,39 @@ The JSON contains `variants` and `tasks`. Reports include:
   `failureClasses` uses the factory's existing classes. Candidate check and
   policy failures are `candidate`; blocking or unverifiable review judgments
   are `review`. Specify questions are `input`, a specification needs-info outcome
-  counted with candidate failures, never a harness failure. Missing or malformed
-  evidence is `missing_evidence`, caps are
-  `budget`, refusals are `provider`, and other execution failures are
-  `infrastructure`. Install and baseline failures are harness failures, not
+  counted with candidate failures, never a harness failure. Author-fixable base
+  refusals use `base`. Malformed model, specify or accept output uses `attempts`.
+  Both count with candidate failures, not harness failures. Stage reasons retain
+  the exit kind, such as `specify_failed_malformed` or `accept_failed_crashed`.
+  The `crashed` and `aborted` exits are `infrastructure`. The `error` exit
+  defaults to `attempts`, matching production's stage-failure retry exhaustion.
+  Reasons append a named diagnostic when available, for example
+  `accept_failed_error:accept_tool_limit`. The model guard diagnostics
+  `accept_tool_limit`, `accept_request_limit` and `accept_length` remain `attempts`.
+  Only these explicit error diagnostics count as `infrastructure`:
+  `prompt_response_failed`, `secret-in-request`, `upstream-error`,
+  `upstream-timeout`, `audit-unavailable`, `response-blocked`, `redirect-refused`
+  and `upstream-address-refused`. The bench observes failed prompt responses
+  without changing the production runner. It retains receipt diagnostics and,
+  when none exists, reads the last model gateway audit result. A secret alert
+  always stops the stage. An earlier transport error followed by a successful
+  request does not turn a later model failure into a harness failure.
+  Known limitation: a provider HTTP error is classed as `attempts`, which counts
+  with candidate failures. Production does the same after its stage retries.
+  This covers a 5xx or 429 that the gateway forwards with `reason: null`, and the
+  gateway's own `rate-limited` and `route-closed` denials. Classification does
+  not yet read the audit `status`. Until the bench retries failed stages as
+  production does ([#851](https://github.com/nublai/pi-herdr-factorio/issues/851)),
+  check a candidate failure whose last model request has status 429 or at least
+  500 by hand before blaming the spec.
+  For legacy `model_failed`, `specify_failed` and `accept_failed` reasons,
+  comparison reads the stored stage receipt, including a failed specify leaf
+  or the retried accept stage. Without an exit receipt, it uses `attempts`,
+  production's stage-failure class, rather than assume a harness fault.
+  Comparison never rewrites the stored trial or its digest.
+  Missing or malformed evidence is `missing_evidence`, caps
+  are `budget`, provider refusals are `provider`, and execution failures such
+  as a base runner error or timeout remain `infrastructure`. Install and baseline failures are harness failures, not
   candidate failures. Each trial also reports its class and original reason.
 - Token and wall-time medians, minima, maxima, and counts.
 - A median labelled `api_equivalent_estimate`, minima and maxima, its coverage

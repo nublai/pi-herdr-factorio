@@ -841,6 +841,8 @@ const OUTPUT_SCHEMA = `Reply with exactly one JSON object and nothing else, in o
 A contract, when the issue and the repository settle every decision that changes behavior:
 {"kind":"contract","summary":"<one line>","behavior":["<what the change does>"],"exclusions":["<what it must not do or change>"],"acceptance":[{"kind":"new_behavior|preservation","text":"<one checkable criterion>"}],"compatibility":["<what must keep working>"],"limits":["<non-functional limit>"],"files":["<repo path likely touched>"],"evidence":[{"path":"<repo path>","start":<line>,"end":<line>,"fact":"<what those lines show>"}]}
 
+files entries must be repository file paths, not directories.
+
 Questions, when a decision that changes behavior is open and the repository does not answer it:
 {"kind":"questions","questions":[{"text":"<one specific question>","cites":[{"path":"<repo path>","start":<line>,"end":<line>}]}]}
 

@@ -117,6 +117,156 @@ describe("bench compare and spend CLI", () => {
 		assert.equal(JSON.parse(result.stdout).tasks[0].differences[0].tokens, -50);
 		assert.ok(before.equals(readFileSync(join(a, "trial.json"))));
 	});
+
+	for (const [prefix, stage] of [
+		["specify", "specify"],
+		["accept", "accept"],
+		["model", "build"],
+	] as const)
+		for (const [exit, diagnostic, expected] of [
+			["malformed", null, "attempts"],
+			["error", "accept_tool_limit", "attempts"],
+			["error", "accept_request_limit", "attempts"],
+			["error", "accept_length", "attempts"],
+			["error", "prompt_response_failed", "infrastructure"],
+			["crashed", null, "infrastructure"],
+			["aborted", null, "infrastructure"],
+		] as const)
+			it(`reads legacy ${prefix}_failed's ${exit}/${diagnostic} receipt without changing stored bytes`, (t) => {
+				const f = fixture(t);
+
+				const dir = f.put("r-401-3", {
+					...syntheticTrial({ id: "r-401-3" }),
+					outcome: { kind: "failed", stage, reason: `${prefix}_failed` },
+				});
+
+				const runtime = join(dir, "runtime", stage);
+				mkdirSync(runtime, { recursive: true });
+				writeFileSync(
+					join(runtime, "receipt.json"),
+					JSON.stringify({
+						outcome: { kind: "failed", exit },
+						diagnostic,
+					}),
+					{ mode: 0o600 },
+				);
+				const before = readFileSync(join(dir, "trial.json"));
+				const result = f.run("compare", dir);
+				assert.equal(result.status, 0, result.stderr);
+				const summary = JSON.parse(result.stdout).variants[0].summary;
+				assert.equal(summary.failureClasses[expected], 1);
+				assert.equal(
+					summary.passRate.candidateFailures,
+					expected === "attempts" ? 1 : 0,
+				);
+				assert.equal(
+					summary.passRate.harnessFailures,
+					expected === "infrastructure" ? 1 : 0,
+				);
+				assert.ok(before.equals(readFileSync(join(dir, "trial.json"))));
+			});
+
+	for (const [diagnostic, expected] of [
+		["secret-in-request", "infrastructure"],
+		["upstream-error", "infrastructure"],
+		["upstream-timeout", "infrastructure"],
+		["audit-unavailable", "infrastructure"],
+		["response-blocked", "infrastructure"],
+		["redirect-refused", "infrastructure"],
+		["upstream-address-refused", "infrastructure"],
+		["body-not-allowed", "attempts"],
+	] as const)
+		it(`uses the failed specify leaf's gateway ${diagnostic} evidence, not a generic error assumption`, (t) => {
+			const f = fixture(t);
+
+			const dir = f.put("legacy", {
+				...syntheticTrial(),
+				outcome: { kind: "failed", stage: "specify", reason: "specify_failed" },
+			});
+
+			const runtime = join(dir, "runtime/specify/draft");
+			mkdirSync(runtime, { recursive: true });
+			writeFileSync(
+				join(runtime, "receipt.json"),
+				JSON.stringify({ outcome: { kind: "failed", exit: "error" } }),
+				{ mode: 0o600 },
+			);
+			writeFileSync(
+				join(runtime, "egress.jsonl"),
+				JSON.stringify({ route: "model-openai", reason: diagnostic }),
+				{ mode: 0o600 },
+			);
+			const result = f.run("compare", dir);
+			assert.equal(result.status, 0, result.stderr);
+			const value = JSON.parse(result.stdout);
+			assert.equal(value.variants[0].summary.failureClasses[expected], 1);
+			assert.equal(
+				value.tasks[0].variants[0].trials[0].outcome.reason,
+				`specify_failed_error:${diagnostic}`,
+			);
+		});
+
+	it("uses the retried accept receipt and ignores a recovered transport error", (t) => {
+		const f = fixture(t);
+
+		const dir = f.put("retry", {
+			...syntheticTrial(),
+			accounting: {
+				...syntheticTrial().accounting,
+				sources: ["accept", "accept-retry"],
+			},
+			outcome: { kind: "failed", stage: "accept", reason: "accept_failed" },
+		});
+
+		for (const stage of ["accept", "accept-retry"]) {
+			const runtime = join(dir, "runtime", stage);
+			mkdirSync(runtime, { recursive: true });
+			writeFileSync(
+				join(runtime, "receipt.json"),
+				JSON.stringify({
+					outcome: {
+						kind: "failed",
+						exit: stage === "accept" ? "crashed" : "error",
+					},
+				}),
+				{ mode: 0o600 },
+			);
+		}
+
+		writeFileSync(
+			join(dir, "runtime/accept-retry/egress.jsonl"),
+			[
+				{ route: "model-openai", reason: "upstream-error" },
+				{ route: "model-openai", reason: null },
+			]
+				.map((entry) => JSON.stringify(entry))
+				.join("\n"),
+			{ mode: 0o600 },
+		);
+		const result = f.run("compare", dir);
+		assert.equal(result.status, 0, result.stderr);
+		assert.equal(
+			JSON.parse(result.stdout).variants[0].summary.passRate.candidateFailures,
+			1,
+		);
+	});
+
+	it("counts a legacy failure without a receipt as attempts", (t) => {
+		const f = fixture(t);
+
+		const dir = f.put("missing", {
+			...syntheticTrial(),
+			outcome: { kind: "failed", stage: "build", reason: "model_failed" },
+		});
+
+		const result = f.run("compare", dir);
+		assert.equal(result.status, 0, result.stderr);
+		assert.equal(
+			JSON.parse(result.stdout).variants[0].summary.failureClasses.attempts,
+			1,
+		);
+	});
+
 	it("refuses corrupt digests, structurally invalid records, and duplicate directory aliases", (t) => {
 		const f = fixture(t);
 		const a = f.put("a");

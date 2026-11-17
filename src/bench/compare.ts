@@ -1,6 +1,12 @@
 import type { BenchTrial } from "./trial.ts";
 import type { BenchVariant } from "./variant.ts";
 import type { CostCoverage } from "../core/tariff.ts";
+import type { MalformedReason } from "../contract/contract.ts";
+import type { AcceptanceOutput } from "../contract/acceptance.ts";
+import {
+	parseBaseReason,
+	retryableBaseReason,
+} from "../candidate/diagnosis.ts";
 import { FAILURE_CLASSES, type FailureClassName } from "../ledger/schema.ts";
 
 function selector(change: BenchVariant["change"]): string {
@@ -119,6 +125,43 @@ function distribution(values: readonly number[]) {
 	return { n, median, min: sorted[0] ?? null, max: sorted[n - 1] ?? null };
 }
 
+const AUTHOR_OUTPUT_REASONS = {
+	empty: true,
+	too_large: true,
+	not_json: true,
+	duplicate_key: true,
+	bad_kind: true,
+	unknown_key: true,
+	bad_field: true,
+	unknown_path: true,
+	unknown_test: true,
+	ambiguous_test: true,
+	too_large_to_post: true,
+	schema: true,
+	coverage: true,
+	manifest: true,
+	judge_restates_gate: true,
+	judge_requires_execution: true,
+	heldout_reads_preserved_test: true,
+} satisfies Readonly<
+	Record<
+		| MalformedReason
+		| Extract<AcceptanceOutput, { kind: "malformed" }>["reason"],
+		true
+	>
+>;
+
+const STAGE_INFRASTRUCTURE_DIAGNOSTICS = new Set([
+	"prompt_response_failed",
+	"secret-in-request",
+	"upstream-error",
+	"upstream-timeout",
+	"audit-unavailable",
+	"response-blocked",
+	"redirect-refused",
+	"upstream-address-refused",
+]);
+
 function failureClass(trial: BenchTrial): FailureClassName | null {
 	const outcome = trial.outcome;
 
@@ -131,6 +174,21 @@ function failureClass(trial: BenchTrial): FailureClassName | null {
 	)
 		return "budget";
 
+	const stageFailure =
+		/^(?:model|specify|accept)_failed(?:_(malformed|error|crashed|aborted))?(?::([a-z][a-z0-9_-]*))?$/.exec(
+			outcome.reason,
+		);
+
+	if (stageFailure !== null) {
+		const [, exit, diagnostic = ""] = stageFailure;
+
+		return exit === "crashed" ||
+			exit === "aborted" ||
+			(exit === "error" && STAGE_INFRASTRUCTURE_DIAGNOSTICS.has(diagnostic))
+			? "infrastructure"
+			: "attempts";
+	}
+
 	if (
 		outcome.reason.includes("unavailable") ||
 		outcome.reason.includes("unconfigured")
@@ -139,7 +197,21 @@ function failureClass(trial: BenchTrial): FailureClassName | null {
 
 	if (outcome.reason === "specify_questions") return "input";
 
-	if (outcome.reason === "model_refused") return "provider";
+	if (/^(?:model|specify|accept)_refused$/.test(outcome.reason))
+		return "provider";
+
+	const baseReason = parseBaseReason(outcome.reason);
+
+	if (baseReason !== null && retryableBaseReason(baseReason)) return "base";
+
+	if (
+		Object.keys(AUTHOR_OUTPUT_REASONS).some(
+			(reason) =>
+				outcome.reason === `specify_${reason}` ||
+				outcome.reason === `accept_${reason}`,
+		)
+	)
+		return "attempts";
 
 	if (outcome.reason === "review_malformed") return "missing_evidence";
 
@@ -184,7 +256,9 @@ function summarize(trials: readonly BenchTrial[]) {
 			if (
 				classified === "candidate" ||
 				classified === "review" ||
-				classified === "input"
+				classified === "input" ||
+				classified === "base" ||
+				classified === "attempts"
 			)
 				candidateFailures++;
 			else harnessFailures++;

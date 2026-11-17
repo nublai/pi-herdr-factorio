@@ -1,9 +1,16 @@
 import { randomBytes } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import type { TaskBundle } from "../../src/bench/bundle.ts";
 import type { BenchRespec } from "../../src/bench/trial.ts";
-import { assessBase } from "../../src/candidate/diagnosis.ts";
+import {
+	assessBase,
+	baseRetryFeedback,
+	retryableBaseReason,
+	type BaseReceipt,
+	type BaseRefusal,
+	type RetryFeedback,
+} from "../../src/candidate/diagnosis.ts";
 import type { Guidance, WorkflowConfig } from "../../src/config/schema.ts";
 import {
 	ACCEPTANCE_MAX_TOKENS,
@@ -13,6 +20,7 @@ import {
 	acceptanceEntries,
 	acceptancePrompt,
 	writeAcceptance,
+	type AcceptanceSuite,
 } from "../../src/contract/acceptance.ts";
 import { regularText } from "../../src/contract/artifacts.ts";
 import {
@@ -50,9 +58,14 @@ import { runHeldoutBase } from "../gates/base.ts";
 import { localRunner } from "../gates/runner.ts";
 import { scopeOwner, scopeUnit } from "../isolation/scope.ts";
 import { withSkills } from "../sandbox/executor.ts";
-import { boundedText, publishFile } from "../sandbox/receipts.ts";
+import {
+	boundedText,
+	executionCharge,
+	publishFile,
+} from "../sandbox/receipts.ts";
 import { runStage, type StageHost } from "../sandbox/run-stage.ts";
 import { runSpecify } from "../sandbox/specify.ts";
+import { stageFailureReason } from "./report.ts";
 
 export function offlineArchiveFetch(
 	task: Pick<TaskBundle, "repo" | "base">,
@@ -77,6 +90,17 @@ function keep(path: string, text: string): void {
 		throw new Error("respec_artifact_publish_failed");
 }
 
+class RefusedBase extends Error {
+	readonly receipt: BaseReceipt;
+	readonly failure: BaseRefusal;
+
+	constructor(receipt: BaseReceipt, failure: BaseRefusal) {
+		super(failure.reason);
+		this.receipt = receipt;
+		this.failure = failure;
+	}
+}
+
 export async function respecBench(input: {
 	readonly bundle: string;
 	readonly state: string;
@@ -93,6 +117,7 @@ export async function respecBench(input: {
 		name: string,
 		stage: "specify" | "accept",
 		tools: readonly string[],
+		attempt?: number,
 	) => StageHost;
 	readonly stage: <T>(name: string, run: () => Promise<T>) => Promise<T>;
 }) {
@@ -221,7 +246,13 @@ export async function respecBench(input: {
 			throw new Error(
 				result.kind === "budget_exhausted"
 					? "budget_exhausted"
-					: `specify_${result.kind}`,
+					: result.kind === "failed"
+						? stageFailureReason(
+								"specify",
+								join(input.state, "runtime/specify"),
+								result.exit,
+							)
+						: `specify_${result.kind}`,
 			);
 	});
 
@@ -273,192 +304,235 @@ export async function respecBench(input: {
 	const accept = input.config.stages.accept;
 	const acceptStarted = Date.now();
 	const deadline = acceptStarted + accept.budget.wallMs;
-	const stageDir = join(input.state, "runtime/accept");
+	let spent = 0;
+	let feedback: RetryFeedback | undefined;
+	let previousSuite: AcceptanceSuite | undefined;
 
-	const accepted = await input.stage("accept", async () => {
-		const excerpts = await sourceExcerpts({
-			files: contract.files,
-			evidence: contract.evidence,
-			checkout: {
-				files,
-				read: (path, cap) => boundedText(join(input.workspace, path), cap),
-			},
-			identity: `${task.repo}@${task.base.sha}`,
-			repair: false,
-			accept: true,
-		});
+	for (let attempt = 1; ; attempt++) {
+		const name = attempt === 1 ? "accept" : "accept-retry";
+		const stageDir = join(input.state, "runtime", name);
 
-		const prompt = await withSkills(
-			input.assets,
-			`${acceptancePrompt({
-				contract,
-				files,
-				inlined: excerpts,
-				guidance: input.guidance,
-			})}\n`,
-			ACCEPTANCE_SKILLS,
-		);
-
-		if (prompt === null) throw new Error("accept_skills_unavailable");
-		mkdirSync(stageDir, { recursive: true, mode: 0o700 });
-
-		const result = await runStage(
-			{
-				runId: input.id,
-				stage: "accept",
-				attempt: 1,
-				prompt,
-				source: sourceFacts(excerpts),
-				settings: {
-					model: accept.model,
-					fallback: accept.fallbackModel,
-					budget: {
-						...accept.budget,
-						wallMs: Math.max(0, deadline - Date.now()),
-					},
-					maxTokens: Math.min(ACCEPTANCE_MAX_TOKENS, input.remaining()),
+		const accepted = await input.stage("accept", async () => {
+			const excerpts = await sourceExcerpts({
+				files: contract.files,
+				evidence: contract.evidence,
+				checkout: {
+					files,
+					read: (path, cap) => boundedText(join(input.workspace, path), cap),
 				},
-				remainingRunTokens: input.remaining(),
-				signal: new AbortController().signal,
-				progress: () => {},
-				draftCheck: controllerDraftChecker({
-					tooling: "running-product",
-					stateDir: input.state,
-					stageDir,
-					attempt: 1,
-					input: {
-						contract,
-						digest,
-						files: set,
-						repo: task.repo,
-						issue: task.issue,
-						baseSha: task.base.sha,
+				identity: `${task.repo}@${task.base.sha}`,
+				repair: false,
+				accept: true,
+			});
+
+			const prompt = await withSkills(
+				input.assets,
+				`${acceptancePrompt({
+					contract,
+					files,
+					inlined: excerpts,
+					guidance: input.guidance,
+					feedback,
+					previousSuite,
+				})}\n`,
+				ACCEPTANCE_SKILLS,
+			);
+
+			if (prompt === null) throw new Error("accept_skills_unavailable");
+			mkdirSync(stageDir, { recursive: true, mode: 0o700 });
+
+			const result = await runStage(
+				{
+					runId: input.id,
+					stage: "accept",
+					attempt,
+					prompt,
+					source: sourceFacts(excerpts),
+					settings: {
+						model: accept.model,
+						fallback: accept.fallbackModel,
+						budget: {
+							...accept.budget,
+							wallMs: Math.max(0, deadline - Date.now()),
+						},
+						maxTokens: Math.min(
+							ACCEPTANCE_MAX_TOKENS - spent,
+							input.remaining(),
+						),
 					},
+					remainingRunTokens: input.remaining(),
+					signal: new AbortController().signal,
+					progress: () => {},
+					draftCheck: controllerDraftChecker({
+						tooling: "running-product",
+						stateDir: input.state,
+						stageDir,
+						attempt,
+						input: {
+							contract,
+							digest,
+							files: set,
+							repo: task.repo,
+							issue: task.issue,
+							baseSha: task.base.sha,
+						},
+						fetch,
+						runner: localRunner,
+					}),
+				},
+				input.host(name, "accept", ACCEPTANCE_TOOLS, attempt),
+			);
+
+			if (result.kind !== "passed")
+				throw new Error(
+					result.kind === "budget_exhausted"
+						? "budget_exhausted"
+						: result.kind === "failed"
+							? stageFailureReason("accept", stageDir, result.exit)
+							: `accept_${result.kind}`,
+				);
+
+			const parsed = writeAcceptance(
+				regularText(join(stageDir, "output.txt"), 256 * 1024),
+				contract,
+				set,
+			);
+
+			if (parsed.kind !== "suite") throw new Error(`accept_${parsed.reason}`);
+
+			return parsed.suite;
+		});
+
+		const canary = `factory-holdout-${randomBytes(32).toString("hex")}`;
+		const acceptanceDigest = acceptanceDigestOf(accepted, canary);
+		metadata.acceptanceDigest = acceptanceDigest;
+		const entries = acceptanceEntries(accepted, canary);
+
+		for (const [path, content] of entries) {
+			const target = join(privateDir, "acceptance", path);
+			mkdirSync(join(target, ".."), { recursive: true, mode: 0o700 });
+			keep(target, content);
+		}
+
+		try {
+			await input.stage("accept-base", async () => {
+				const startedAt = Date.now();
+				const boundedDeadline = Math.min(deadline, startedAt + 180_000);
+
+				if (boundedDeadline <= startedAt) throw new Error("base_timeout");
+				const signal = AbortSignal.timeout(boundedDeadline - startedAt);
+				const workDir = join(privateDir, `accept-base-${attempt}`);
+				const tree = join(workDir, "source");
+				mkdirSync(tree, { recursive: true, mode: 0o700 });
+
+				const checked = await checkoutWorkspace({
+					stateDir: workDir,
+					runId: input.id,
+					workspace: tree,
+					repo: task.repo,
+					sha: task.base.sha,
 					fetch,
+					signal,
+					deadline: boundedDeadline,
+				});
+
+				const binding = {
+					runId: input.id,
+					repo: task.repo,
+					issue: task.issue,
+					contractDigest: digest,
+					acceptanceDigest,
+					baseSha: task.base.sha,
+					gateSha: task.base.sha,
+				};
+
+				const evidence = await runHeldoutBase({
+					tooling: "running-product",
+					tree,
+					workDir,
+					cacheDir: join(input.state, "base-dependencies"),
+					binding,
+					contract,
+					suite: accepted,
+					canary,
+					startedAt,
+					deadline: boundedDeadline,
+					signal,
+					scope: scopeUnit(
+						scopeOwner(input.state),
+						input.id,
+						"basecheck",
+						attempt,
+						randomBytes(4).toString("hex"),
+					),
 					runner: localRunner,
-				}),
-			},
-			input.host("accept", "accept", ACCEPTANCE_TOOLS),
-		);
+					refused:
+						checked.kind === "unavailable"
+							? "tree_unavailable"
+							: checked.kind === "refused"
+								? "tree_refused"
+								: checked.omitted !== 0
+									? "tree_partial"
+									: undefined,
+				});
 
-		if (result.kind !== "passed")
-			throw new Error(
-				result.kind === "budget_exhausted"
-					? "budget_exhausted"
-					: `accept_${result.kind}`,
-			);
+				const { receipt, assessment } = assessBase(evidence);
+				const text = JSON.stringify(receipt);
+				const receiptDigest = digestOf(text);
+				keep(join(workDir, "base-receipt.json"), text);
+				keep(join(workDir, "base-receipt.sha256"), `${receiptDigest}\n`);
 
-		const parsed = writeAcceptance(
-			regularText(join(stageDir, "output.txt"), 256 * 1024),
+				if (assessment.kind === "refused")
+					throw new RefusedBase(receipt, assessment.failure);
+
+				keep(join(privateDir, "base-receipt.json"), text);
+				keep(join(privateDir, "base-receipt.sha256"), `${receiptDigest}\n`);
+
+				if (assessment.proof.receiptDigest !== receiptDigest)
+					throw new Error("base_evidence_missing");
+				metadata.baseReceiptDigest = receiptDigest;
+			});
+		} catch (error) {
+			if (!(error instanceof RefusedBase)) throw error;
+			const charge = await executionCharge(stageDir);
+
+			if (
+				attempt === 1 &&
+				attempt < input.config.retry.maxAttempts &&
+				retryableBaseReason(error.failure.reason) &&
+				charge !== null &&
+				charge.total < ACCEPTANCE_MAX_TOKENS &&
+				input.remaining() > 0 &&
+				Date.now() < deadline
+			) {
+				renameSync(
+					join(privateDir, "acceptance"),
+					join(privateDir, "accept-base-1/acceptance"),
+				);
+				metadata.baseRetryReason = error.failure.reason;
+				spent = charge.total;
+				feedback = baseRetryFeedback(error.receipt, error.failure);
+				previousSuite = accepted;
+				continue;
+			}
+
+			const text = JSON.stringify(error.receipt);
+			keep(join(privateDir, "base-receipt.json"), text);
+			keep(join(privateDir, "base-receipt.sha256"), `${digestOf(text)}\n`);
+			throw error;
+		}
+
+		return {
 			contract,
-			set,
-		);
-
-		if (parsed.kind !== "suite") throw new Error(`accept_${parsed.reason}`);
-
-		return parsed.suite;
-	});
-
-	const canary = `factory-holdout-${randomBytes(32).toString("hex")}`;
-	const acceptanceDigest = acceptanceDigestOf(accepted, canary);
-	metadata.acceptanceDigest = acceptanceDigest;
-	const entries = acceptanceEntries(accepted, canary);
-
-	for (const [path, content] of entries) {
-		const target = join(privateDir, "acceptance", path);
-		mkdirSync(join(target, ".."), { recursive: true, mode: 0o700 });
-		keep(target, content);
-	}
-
-	await input.stage("accept-base", async () => {
-		const startedAt = Date.now();
-		const boundedDeadline = Math.min(deadline, startedAt + 180_000);
-
-		if (boundedDeadline <= startedAt) throw new Error("base_timeout");
-		const signal = AbortSignal.timeout(boundedDeadline - startedAt);
-		const workDir = join(privateDir, "accept-base");
-		const tree = join(workDir, "source");
-		mkdirSync(tree, { recursive: true, mode: 0o700 });
-
-		const checked = await checkoutWorkspace({
-			stateDir: workDir,
-			runId: input.id,
-			workspace: tree,
-			repo: task.repo,
-			sha: task.base.sha,
-			fetch,
-			signal,
-			deadline: boundedDeadline,
-		});
-
-		const binding = {
-			runId: input.id,
-			repo: task.repo,
-			issue: task.issue,
-			contractDigest: digest,
-			acceptanceDigest,
-			baseSha: task.base.sha,
-			gateSha: task.base.sha,
-		};
-
-		const evidence = await runHeldoutBase({
-			tooling: "running-product",
-			tree,
-			workDir,
-			cacheDir: join(input.state, "base-dependencies"),
-			binding,
-			contract,
+			digest,
 			suite: accepted,
-			canary,
-			startedAt,
-			deadline: boundedDeadline,
-			signal,
-			scope: scopeUnit(
-				scopeOwner(input.state),
-				input.id,
-				"basecheck",
-				1,
-				randomBytes(4).toString("hex"),
-			),
-			runner: localRunner,
-			refused:
-				checked.kind === "unavailable"
-					? "tree_unavailable"
-					: checked.kind === "refused"
-						? "tree_refused"
-						: checked.omitted !== 0
-							? "tree_partial"
-							: undefined,
-		});
-
-		const { receipt, assessment } = assessBase(evidence);
-		const text = JSON.stringify(receipt);
-		const receiptDigest = digestOf(text);
-		keep(join(privateDir, "base-receipt.json"), text);
-		keep(join(privateDir, "base-receipt.sha256"), `${receiptDigest}\n`);
-
-		if (
-			assessment.kind !== "ready" ||
-			assessment.proof.receiptDigest !== receiptDigest
-		)
-			throw new Error(
-				assessment.kind === "refused"
-					? assessment.failure.reason
-					: "base_evidence_missing",
-			);
-		metadata.baseReceiptDigest = receiptDigest;
-	});
-
-	return {
-		contract,
-		digest,
-		suite: accepted,
-		acceptanceDigest,
-		checks: entries
-			.filter(([path]) => path.startsWith("checks/"))
-			.map(([path, content]) => ({
-				path: path.slice("checks/".length),
-				bytes: Buffer.from(content),
-			})),
-	};
+			acceptanceDigest,
+			checks: entries
+				.filter(([path]) => path.startsWith("checks/"))
+				.map(([path, content]) => ({
+					path: path.slice("checks/".length),
+					bytes: Buffer.from(content),
+				})),
+		};
+	}
 }

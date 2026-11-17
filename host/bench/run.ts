@@ -106,6 +106,7 @@ import { runVisibleTests } from "../sandbox/visible-tests.ts";
 import { unpackBase } from "./archive.ts";
 import { verifyBundle } from "./export.ts";
 import { respecBench } from "./respec.ts";
+import { benchDiagnosticHost, stageFailureReason } from "./report.ts";
 
 export type BenchRuntime = {
 	readonly exec: Exec;
@@ -452,6 +453,7 @@ export async function runBench(
 					contractDigest: null,
 					acceptanceDigest: null,
 					baseReceiptDigest: null,
+					baseRetryReason: null,
 					acceptEffort: workflow.config.stages.accept.reasoningEffort,
 					models: [],
 				};
@@ -607,7 +609,7 @@ export async function runBench(
 
 		const result = await runStage(
 			draftCheck === undefined ? request : { ...request, draftCheck },
-			(runtime.createHost ?? sandboxHost)(config),
+			benchDiagnosticHost((runtime.createHost ?? sandboxHost)(config)),
 		);
 
 		journals[index] = {
@@ -628,7 +630,9 @@ export async function runBench(
 			throw new Error(
 				result.kind === "budget_exhausted"
 					? "budget_exhausted"
-					: `model_${result.kind}`,
+					: result.kind === "failed"
+						? stageFailureReason("model", stageDir, result.exit)
+						: `model_${result.kind}`,
 			);
 
 		if (
@@ -722,7 +726,7 @@ export async function runBench(
 				guidance: workflow.guidance,
 				metadata: respec,
 				remaining,
-				host: (name, stage, tools) => {
+				host: (name, stage, tools, attempt = 1) => {
 					const settings = workflow.config.stages[stage];
 
 					const fallback =
@@ -738,8 +742,16 @@ export async function runBench(
 						receiptTokens: 0,
 					});
 
-					return (runtime.createHost ?? sandboxHost)(
-						hostConfig(stage, join(state, "runtime", name), authoring, tools),
+					return benchDiagnosticHost(
+						(runtime.createHost ?? sandboxHost)({
+							...hostConfig(
+								stage,
+								join(state, "runtime", name),
+								authoring,
+								tools,
+							),
+							attempt,
+						}),
 					);
 				},
 				stage: async (name, run) => {
@@ -758,7 +770,9 @@ export async function runBench(
 
 						for (const journal of journals.filter(
 							(journal) =>
-								journal.id.startsWith("specify/") || journal.id === "accept",
+								journal.id.startsWith("specify/") ||
+								journal.id === "accept" ||
+								journal.id === "accept-retry",
 						)) {
 							if (respec.models.some((model) => model.session === journal.id))
 								continue;
@@ -771,7 +785,7 @@ export async function runBench(
 								session: journal.id,
 								requested:
 									workflow.config.stages[
-										journal.id === "accept" ? "accept" : "specify"
+										journal.id.startsWith("accept") ? "accept" : "specify"
 									].model,
 								observed:
 									textOf(
