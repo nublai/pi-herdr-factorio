@@ -65,6 +65,7 @@ import {
 } from "../sandbox/receipts.ts";
 import { runStage, type StageHost } from "../sandbox/run-stage.ts";
 import { runSpecify } from "../sandbox/specify.ts";
+import { stageFailureReason } from "./report.ts";
 
 export function offlineArchiveFetch(
 	task: Pick<TaskBundle, "repo" | "base">,
@@ -246,7 +247,11 @@ export async function respecBench(input: {
 				result.kind === "budget_exhausted"
 					? "budget_exhausted"
 					: result.kind === "failed"
-						? `specify_failed_${result.exit}`
+						? stageFailureReason(
+								"specify",
+								join(input.state, "runtime/specify"),
+								result.exit,
+							)
 						: `specify_${result.kind}`,
 			);
 	});
@@ -383,7 +388,7 @@ export async function respecBench(input: {
 					result.kind === "budget_exhausted"
 						? "budget_exhausted"
 						: result.kind === "failed"
-							? `accept_failed_${result.exit}`
+							? stageFailureReason("accept", stageDir, result.exit)
 							: `accept_${result.kind}`,
 				);
 

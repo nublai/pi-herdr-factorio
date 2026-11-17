@@ -151,6 +151,17 @@ const AUTHOR_OUTPUT_REASONS = {
 	>
 >;
 
+const STAGE_INFRASTRUCTURE_DIAGNOSTICS = new Set([
+	"prompt_response_failed",
+	"secret-in-request",
+	"upstream-error",
+	"upstream-timeout",
+	"audit-unavailable",
+	"response-blocked",
+	"redirect-refused",
+	"upstream-address-refused",
+]);
+
 function failureClass(trial: BenchTrial): FailureClassName | null {
 	const outcome = trial.outcome;
 
@@ -162,6 +173,21 @@ function failureClass(trial: BenchTrial): FailureClassName | null {
 		outcome.reason === "budget_exhausted"
 	)
 		return "budget";
+
+	const stageFailure =
+		/^(?:model|specify|accept)_failed(?:_(malformed|error|crashed|aborted))?(?::([a-z][a-z0-9_-]*))?$/.exec(
+			outcome.reason,
+		);
+
+	if (stageFailure !== null) {
+		const [, exit, diagnostic = ""] = stageFailure;
+
+		return exit === "crashed" ||
+			exit === "aborted" ||
+			(exit === "error" && STAGE_INFRASTRUCTURE_DIAGNOSTICS.has(diagnostic))
+			? "infrastructure"
+			: "attempts";
+	}
 
 	if (
 		outcome.reason.includes("unavailable") ||
@@ -179,7 +205,6 @@ function failureClass(trial: BenchTrial): FailureClassName | null {
 	if (baseReason !== null && retryableBaseReason(baseReason)) return "base";
 
 	if (
-		/^(?:model|specify|accept)_failed_malformed$/.test(outcome.reason) ||
 		Object.keys(AUTHOR_OUTPUT_REASONS).some(
 			(reason) =>
 				outcome.reason === `specify_${reason}` ||

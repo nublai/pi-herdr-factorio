@@ -3,10 +3,138 @@ import { join } from "node:path";
 import { parseBenchTrial, type BenchTrial } from "../../src/bench/trial.ts";
 import { regularText } from "../../src/contract/artifacts.ts";
 import { journalCharge } from "../../src/core/journal.ts";
-import { hasDuplicateKey, parseJson } from "../../src/core/json.ts";
+import {
+	fieldOf,
+	hasDuplicateKey,
+	objectOf,
+	parseJson,
+	textOf,
+} from "../../src/core/json.ts";
+import type { FailedExit } from "../../src/core/execution.ts";
 import { digestOf } from "../../src/core/run.ts";
 import { count, digest, literal, record } from "../../src/ledger/schema.ts";
 import { boundedText, executionCharge } from "../sandbox/receipts.ts";
+import { LineSplitter } from "../sandbox/lines.ts";
+import { parsePiRecord } from "../sandbox/rpc.ts";
+import type { StageHost } from "../sandbox/run-stage.ts";
+
+export function benchDiagnosticHost(host: StageHost): StageHost {
+	const failures = new Map<number, string>();
+
+	return {
+		...host,
+		async launchPi(model, session) {
+			const pi = await host.launchPi(model, session);
+
+			if (pi === null) return null;
+			const splitter = new LineSplitter(64 * 1024 * 1024);
+
+			pi.stdout.on("data", (chunk: Buffer) => {
+				for (const line of splitter.push(chunk) ?? []) {
+					const record = parsePiRecord(line);
+
+					if (
+						record.type === "response" &&
+						record.command === "prompt" &&
+						/^factory-(?:prompt|draft-[12])$/.test(record.id ?? "") &&
+						(!record.success || record.disposition === "handled")
+					)
+						failures.set(session, "prompt_response_failed");
+				}
+			});
+
+			return pi;
+		},
+		writeReceipt(receipt) {
+			const diagnostic =
+				receipt.guardStop ?? failures.get(receipt.fallback === null ? 0 : 1);
+
+			const recorded =
+				diagnostic === undefined ? receipt : { ...receipt, diagnostic };
+
+			return host.writeReceipt(recorded);
+		},
+	};
+}
+
+function failedExitOf(value: string | null | undefined): FailedExit | null {
+	return value === "error" ||
+		value === "malformed" ||
+		value === "crashed" ||
+		value === "aborted"
+		? value
+		: null;
+}
+
+function stageEvidence(dir: string) {
+	const path = join(dir, "receipt.json");
+
+	const receipt = existsSync(path)
+		? objectOf(parseJson(regularText(path, 1024 * 1024)))
+		: null;
+
+	const outcome = objectOf(fieldOf(receipt, "outcome"));
+
+	const exit =
+		fieldOf(outcome, "kind") === "failed"
+			? failedExitOf(textOf(fieldOf(outcome, "exit")))
+			: null;
+
+	const diagnostic =
+		textOf(fieldOf(receipt, "diagnostic")) ??
+		textOf(fieldOf(receipt, "guardStop"));
+
+	return { exit, diagnostic };
+}
+
+export function stageFailureReason(
+	prefix: string,
+	dir: string,
+	knownExit: FailedExit | null = null,
+): string {
+	let evidence = stageEvidence(dir);
+	let evidenceDir = dir;
+
+	if (prefix === "specify") {
+		for (const name of ["draft", "review", "revision"]) {
+			const leaf = stageEvidence(join(dir, name));
+
+			if (leaf.exit !== null) {
+				evidence = {
+					exit: evidence.exit ?? leaf.exit,
+					diagnostic: evidence.diagnostic ?? leaf.diagnostic,
+				};
+				evidenceDir = join(dir, name);
+			}
+		}
+	}
+
+	const exit = knownExit ?? evidence.exit;
+	let diagnostic = evidence.diagnostic;
+	const audit = join(evidenceDir, "egress.jsonl");
+
+	if (exit === "error" && diagnostic === null && existsSync(audit)) {
+		for (const line of regularText(audit, 32 * 1024 * 1024).split("\n")) {
+			const entry = objectOf(parseJson(line));
+			const reason = textOf(fieldOf(entry, "reason"));
+
+			if (reason === "secret-in-request") {
+				diagnostic = reason;
+				break;
+			}
+
+			if (textOf(fieldOf(entry, "route"))?.startsWith("model-"))
+				diagnostic = reason;
+		}
+	}
+
+	const suffix =
+		diagnostic !== null && /^[a-z][a-z0-9_-]{0,79}$/.test(diagnostic)
+			? `:${diagnostic}`
+			: "";
+
+	return `${prefix}_failed${exit === null ? "" : `_${exit}`}${suffix}`;
+}
 
 function directories(paths: readonly string[]) {
 	const dirs = paths.map((path) => realpathSync(path));
@@ -28,12 +156,44 @@ export function readBenchTrial(dir: string): BenchTrial {
 	return parseBenchTrial(raw);
 }
 
+function comparisonTrial(dir: string): BenchTrial {
+	const trial = readBenchTrial(dir);
+
+	if (trial.outcome.kind !== "failed") return trial;
+
+	const failed =
+		/^(specify|accept|model)_failed(?:_(malformed|error|crashed|aborted))?$/.exec(
+			trial.outcome.reason,
+		);
+
+	if (failed === null) return trial;
+	const prefix = failed[1] ?? "model";
+
+	const acceptStage = trial.accounting.sources.includes("accept-retry")
+		? "accept-retry"
+		: "accept";
+
+	const stage = prefix === "accept" ? acceptStage : trial.outcome.stage;
+
+	return {
+		...trial,
+		outcome: {
+			...trial.outcome,
+			reason: stageFailureReason(
+				prefix,
+				join(dir, "runtime", stage),
+				failedExitOf(failed[2]),
+			),
+		},
+	};
+}
+
 export function readBenchTrials(paths: readonly string[]) {
 	const trials: BenchTrial[] = [];
 	const incompleteTrials: string[] = [];
 
 	for (const dir of directories(paths)) {
-		if (existsSync(join(dir, "trial.json"))) trials.push(readBenchTrial(dir));
+		if (existsSync(join(dir, "trial.json"))) trials.push(comparisonTrial(dir));
 		else {
 			readBinding(dir);
 			incompleteTrials.push(dir);

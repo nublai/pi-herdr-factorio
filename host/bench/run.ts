@@ -106,6 +106,7 @@ import { runVisibleTests } from "../sandbox/visible-tests.ts";
 import { unpackBase } from "./archive.ts";
 import { verifyBundle } from "./export.ts";
 import { respecBench } from "./respec.ts";
+import { benchDiagnosticHost, stageFailureReason } from "./report.ts";
 
 export type BenchRuntime = {
 	readonly exec: Exec;
@@ -608,7 +609,7 @@ export async function runBench(
 
 		const result = await runStage(
 			draftCheck === undefined ? request : { ...request, draftCheck },
-			(runtime.createHost ?? sandboxHost)(config),
+			benchDiagnosticHost((runtime.createHost ?? sandboxHost)(config)),
 		);
 
 		journals[index] = {
@@ -630,7 +631,7 @@ export async function runBench(
 				result.kind === "budget_exhausted"
 					? "budget_exhausted"
 					: result.kind === "failed"
-						? `model_failed_${result.exit}`
+						? stageFailureReason("model", stageDir, result.exit)
 						: `model_${result.kind}`,
 			);
 
@@ -741,15 +742,17 @@ export async function runBench(
 						receiptTokens: 0,
 					});
 
-					return (runtime.createHost ?? sandboxHost)({
-						...hostConfig(
-							stage,
-							join(state, "runtime", name),
-							authoring,
-							tools,
-						),
-						attempt,
-					});
+					return benchDiagnosticHost(
+						(runtime.createHost ?? sandboxHost)({
+							...hostConfig(
+								stage,
+								join(state, "runtime", name),
+								authoring,
+								tools,
+							),
+							attempt,
+						}),
+					);
 				},
 				stage: async (name, run) => {
 					activeStage = name;

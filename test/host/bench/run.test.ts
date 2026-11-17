@@ -107,7 +107,14 @@ async function harness(
 	builtValue = 1,
 	options: Parameters<typeof benchFixture>[1] & {
 		pi140Request?: boolean;
-		failure?: { stage: "specify" | "accept" | "build"; exit: FailedExit };
+		failure?: {
+			stage: "specify" | "accept" | "build";
+			exit: FailedExit;
+			diagnostic?:
+				| "prompt_response_failed"
+				| "accept_length"
+				| "accept_tool_limit";
+		};
 		onFinalBaseRun?: () => void;
 		respec?:
 			| "on"
@@ -386,6 +393,20 @@ async function harness(
 							if (command.type !== "prompt") continue;
 							prompts.push(String(command.message));
 							turns++;
+
+							if (
+								options.failure?.stage === config.stage &&
+								options.failure.diagnostic === "prompt_response_failed"
+							) {
+								emit({
+									type: "response",
+									id: command.id ?? null,
+									command: "prompt",
+									success: false,
+								});
+								continue;
+							}
+
 							emit({
 								type: "response",
 								id: command.id ?? null,
@@ -396,16 +417,28 @@ async function harness(
 							emit({ type: "turn_start" });
 
 							if (options.failure?.stage === config.stage) {
-								const { exit } = options.failure;
+								const { exit, diagnostic } = options.failure;
 
-								if (exit === "crashed") {
+								if (diagnostic === "accept_tool_limit") {
+									for (let i = 0; i < 3; i++)
+										emit({
+											type: "tool_execution_start",
+											toolCallId: `call-${i}`,
+											toolName: "read",
+											args: { path: `file-${i}` },
+										});
+								} else if (exit === "crashed") {
 									stdout.end();
 									finish(1);
 								} else if (exit === "malformed") stdout.write("not-json\n");
 								else {
 									emit({
 										type: "message_end",
-										message: { role: "assistant", stopReason: exit },
+										message: {
+											role: "assistant",
+											stopReason:
+												diagnostic === "accept_length" ? "length" : exit,
+										},
 									});
 									emit({ type: "agent_settled", aborted: exit === "aborted" });
 								}
@@ -1160,6 +1193,37 @@ describe("bench run offline CLI", (suite) => {
 			}
 		});
 
+	it("respec's retryableBaseReason guard rejects an infrastructure base refusal", {
+		timeout: 60000,
+	}, async (t) => {
+		const f = await harness(t, false, 1, { respec: "failed-base" });
+		const result = await f.run();
+		assert.equal(result.code, 0, result.stderr);
+		assert.equal(
+			f.reservations.filter(
+				({ stage }) => stage === "accept" || stage === "accept-retry",
+			).length,
+			1,
+		);
+		const trial = parseBenchTrial(result.stdout);
+		assert.deepEqual(trial.outcome, {
+			kind: "failed",
+			stage: "accept-base",
+			reason: "base_runner_error",
+		});
+		assert.equal(trial.respec?.baseRetryReason, null);
+		assert.equal(
+			trial.stages.filter(({ name }) => name === "accept").length,
+			1,
+		);
+		assert.equal(
+			trial.stages.filter(({ name }) => name === "accept-base").length,
+			1,
+		);
+		assert.equal(existsSync(join(f.root, "trial/runtime/accept-retry")), false);
+		assert.equal(f.buildTools.length, 0);
+	});
+
 	for (const guard of ["run-tokens", "maxAttempts", "accept-tokens", "wall"])
 		it(`respec refuses the feedback retry at the ${guard} guard`, {
 			timeout: 60000,
@@ -1232,13 +1296,61 @@ describe("bench run offline CLI", (suite) => {
 				const compared = compareTrials([trial]);
 				assert.equal(
 					compared.variants[0]?.summary.passRate.candidateFailures,
-					exit === "malformed" ? 1 : 0,
+					exit === "malformed" || exit === "error" ? 1 : 0,
 				);
 				assert.equal(
 					compared.variants[0]?.summary.passRate.harnessFailures,
-					exit === "malformed" ? 0 : 1,
+					exit === "malformed" || exit === "error" ? 0 : 1,
 				);
 			});
+
+	for (const [stage, diagnostic, expected] of [
+		["specify", "prompt_response_failed", "infrastructure"],
+		["accept", "prompt_response_failed", "infrastructure"],
+		["build", "prompt_response_failed", "infrastructure"],
+		["accept", "accept_length", "attempts"],
+		["accept", "accept_tool_limit", "attempts"],
+	] as const)
+		it(`retains ${stage}'s ${diagnostic} diagnostic through the real bench command`, {
+			timeout: 60000,
+		}, async (t) => {
+			const f = await harness(t, false, 1, {
+				respec: stage === "build" ? undefined : "on",
+				failure: { stage, exit: "error", diagnostic },
+			});
+
+			const result = await f.run();
+			assert.equal(result.code, 0, result.stderr);
+			const trial = parseBenchTrial(result.stdout);
+			assert.deepEqual(trial.outcome, {
+				kind: "failed",
+				stage,
+				reason: `${stage === "build" ? "model" : stage}_failed_error:${diagnostic}`,
+			});
+			assert.equal(
+				compareTrials([trial]).variants[0]?.summary.failureClasses[expected],
+				1,
+			);
+
+			const compared = spawnSync(
+				process.execPath,
+				[
+					new URL("../../../host/cli/index.ts", import.meta.url).pathname,
+					"bench",
+					"compare",
+					join(f.root, "trial"),
+				],
+				{ encoding: "utf8", timeout: 15000 },
+			);
+
+			assert.equal(compared.status, 0, compared.stderr);
+			assert.equal(
+				JSON.parse(compared.stdout).variants[0].summary.failureClasses[
+					expected
+				],
+				1,
+			);
+		});
 
 	for (const cap of [48, 49])
 		it(`respec keeps the feedback retry within the same ${cap}-token trial cap`, {

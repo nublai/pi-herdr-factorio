@@ -367,7 +367,7 @@ describe("BenchComparison", () => {
 		["accept-base", "preservation_failed", "base"],
 		["accept-base", "base_load_error", "base"],
 		["accept-base", "base_nondeterministic", "base"],
-		["specify", "specify_failed", "infrastructure"],
+		["specify", "specify_failed", "attempts"],
 		["specify", "specify_bad_field", "attempts"],
 		["specify", "specify_unknown_path", "attempts"],
 		["specify", "specify_too_large_to_post", "attempts"],
@@ -376,8 +376,8 @@ describe("BenchComparison", () => {
 		["accept", "accept_manifest", "attempts"],
 		["accept", "accept_judge_requires_execution", "attempts"],
 		["accept", "accept_heldout_reads_preserved_test", "attempts"],
-		["accept", "accept_failed", "infrastructure"],
-		["build", "model_failed", "infrastructure"],
+		["accept", "accept_failed", "attempts"],
+		["build", "model_failed", "attempts"],
 		["accept", "accept_refused", "provider"],
 		["specify", "specify_refused", "provider"],
 		["accept-base", "base_runner_error", "infrastructure"],
@@ -408,7 +408,7 @@ describe("BenchComparison", () => {
 			["malformed", "attempts"],
 			["crashed", "infrastructure"],
 			["aborted", "infrastructure"],
-			["error", "infrastructure"],
+			["error", "attempts"],
 		] as const)
 			it(`classifies ${prefix}_failed_${exit} as ${expected}`, () => {
 				const result = compareTrials([
@@ -433,6 +433,43 @@ describe("BenchComparison", () => {
 				assert.equal(
 					result.variants[0]?.summary.passRate.harnessFailures,
 					expected === "attempts" ? 0 : 1,
+				);
+			});
+
+	for (const prefix of ["specify", "accept", "model"])
+		for (const [diagnostic, expected] of [
+			["accept_tool_limit", "attempts"],
+			["accept_request_limit", "attempts"],
+			["accept_length", "attempts"],
+			["unknown_diagnostic", "attempts"],
+			["secret-in-request", "infrastructure"],
+			["prompt_response_failed", "infrastructure"],
+			["upstream-error", "infrastructure"],
+			["upstream-timeout", "infrastructure"],
+			["audit-unavailable", "infrastructure"],
+			["response-blocked", "infrastructure"],
+			["redirect-refused", "infrastructure"],
+			["upstream-address-refused", "infrastructure"],
+		] as const)
+			it(`classifies ${prefix}'s error diagnostic ${diagnostic} as ${expected}`, () => {
+				const trial = {
+					...syntheticTrial(),
+					outcome: {
+						kind: "failed",
+						stage: prefix === "model" ? "build" : prefix,
+						reason: `${prefix}_failed_error:${diagnostic}`,
+					},
+				} as const;
+
+				const summary = compareTrials([trial]).variants[0]?.summary;
+				assert.equal(summary?.failureClasses[expected], 1);
+				assert.equal(
+					summary?.passRate.candidateFailures,
+					expected === "attempts" ? 1 : 0,
+				);
+				assert.equal(
+					summary?.passRate.harnessFailures,
+					expected === "infrastructure" ? 1 : 0,
 				);
 			});
 

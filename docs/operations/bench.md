@@ -388,11 +388,24 @@ The JSON contains `variants` and `tasks`. Reports include:
   refusals use `base`. Malformed model, specify or accept output uses `attempts`.
   Both count with candidate failures, not harness failures. Stage reasons retain
   the exit kind, such as `specify_failed_malformed` or `accept_failed_crashed`.
-  The `crashed`, `aborted` and `error` exits are `infrastructure`. An `error`
-  indicates an execution or provider transport failure, matching production's
-  infrastructure diagnosis rather than an authored-output failure. Legacy
-  `model_failed`, `specify_failed` and `accept_failed` reasons lack the exit kind
-  and stay `infrastructure` rather than count against the spec.
+  The `crashed` and `aborted` exits are `infrastructure`. The `error` exit
+  defaults to `attempts`, matching production's stage-failure retry exhaustion.
+  Reasons append a named diagnostic when available, for example
+  `accept_failed_error:accept_tool_limit`. The model guard diagnostics
+  `accept_tool_limit`, `accept_request_limit` and `accept_length` remain `attempts`.
+  Only these explicit error diagnostics count as `infrastructure`:
+  `prompt_response_failed`, `secret-in-request`, `upstream-error`,
+  `upstream-timeout`, `audit-unavailable`, `response-blocked`, `redirect-refused`
+  and `upstream-address-refused`. The bench observes failed prompt responses
+  without changing the production runner. It retains receipt diagnostics and,
+  when none exists, reads the last model gateway audit result. A secret alert
+  always stops the stage. An earlier transport error followed by a successful
+  request does not turn a later model failure into a harness failure.
+  For legacy `model_failed`, `specify_failed` and `accept_failed` reasons,
+  comparison reads the stored stage receipt, including a failed specify leaf
+  or the retried accept stage. Without an exit receipt, it uses `attempts`,
+  production's stage-failure class, rather than assume a harness fault.
+  Comparison never rewrites the stored trial or its digest.
   Missing or malformed evidence is `missing_evidence`, caps
   are `budget`, provider refusals are `provider`, and execution failures such
   as a base runner error or timeout remain `infrastructure`. Install and baseline failures are harness failures, not
