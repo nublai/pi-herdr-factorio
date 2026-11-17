@@ -68,6 +68,10 @@ it("accepts the Agents onboarding policy and expands all four inventory forms", 
 			writeFileSync(join(tree, path), "");
 		}
 
+		writeFileSync(join(tree, "tsconfig.json"), "{}");
+		writeFileSync(join(tree, "biome.json"), "{}");
+		writeFileSync(join(tree, "oxlint.config.ts"), "export default {};\n");
+
 		const policy = gatePolicyOf(tree);
 		assert.equal(policy.version, 2);
 		assert.deepEqual(policy.sourceRoots, [
