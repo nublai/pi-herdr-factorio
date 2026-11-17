@@ -126,6 +126,7 @@ export const dockerRunner: GateRunner = {
 				[
 					"run",
 					"--rm",
+					"--init",
 					"--name",
 					id,
 					"--network",

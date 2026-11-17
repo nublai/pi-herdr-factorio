@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import childProcess, { execFileSync, spawnSync } from "node:child_process";
 import {
 	chmodSync,
 	cpSync,
@@ -14,6 +14,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -38,7 +39,11 @@ import {
 	manifestOf,
 	validateDependencies,
 } from "../../../host/gates/manifest.ts";
-import { type GateRunner, localRunner } from "../../../host/gates/runner.ts";
+import {
+	type GateRunner,
+	dockerRunner,
+	localRunner,
+} from "../../../host/gates/runner.ts";
 import {
 	assessBase,
 	classifyFailure,
@@ -68,6 +73,108 @@ import { objectOf, parseJson } from "../../../src/core/json.ts";
 import { digestOf } from "../../../src/core/run.ts";
 import { isRepoSlug } from "../../../src/trust/platform.ts";
 import { passingVerdict } from "../../helpers.ts";
+
+test("Docker gate reaps orphaned children without relaxing container restrictions", async (t) => {
+	const calls: { command: string; argv: readonly string[] }[] = [];
+
+	const docker = t.mock.method(
+		childProcess,
+		"execFile",
+		(command: string, argv: readonly string[]) => {
+			calls.push({ command, argv });
+			throw new Error("captured Docker invocation");
+		},
+	);
+
+	syncBuiltinESMExports();
+
+	try {
+		await assert.rejects(
+			dockerRunner.run({
+				tree: "/tree",
+				gates: "/gates",
+				argv: ["node", "--test"],
+			}),
+			/captured Docker invocation/,
+		);
+	} finally {
+		docker.mock.restore();
+		syncBuiltinESMExports();
+	}
+
+	assert.equal(calls.length, 2);
+	const run = calls[0];
+	assert.ok(run);
+	assert.equal(run.command, "docker");
+	assert.deepEqual(run.argv.slice(0, 4), ["run", "--rm", "--init", "--name"]);
+	const id = run.argv[4];
+	assert.match(id ?? "", /^factory-gate-[a-f0-9]{16}$/);
+	assert.deepEqual(run.argv.slice(5, 23), [
+		"--network",
+		"none",
+		"--read-only",
+		"--tmpfs",
+		"/tmp:exec,size=1g",
+		"--user",
+		"1001",
+		"--cap-drop",
+		"ALL",
+		"--security-opt",
+		"no-new-privileges",
+		"--pids-limit",
+		"512",
+		"--memory",
+		"4g",
+		"--mount",
+		"type=bind,src=/tree,dst=/w,readonly",
+		"--mount",
+	]);
+	assert.equal(run.argv[23], "type=bind,src=/gates,dst=/g,readonly");
+	assert.deepEqual(calls[1], { command: "docker", argv: ["rm", "-f", id] });
+});
+
+function missingBubblewrap(): string | null {
+	const argv = [
+		"bwrap",
+		"--unshare-all",
+		"--die-with-parent",
+		"--ro-bind",
+		"/",
+		"/",
+		"true",
+	];
+
+	try {
+		execFileSync(argv[0] ?? "bwrap", argv.slice(1), {
+			stdio: ["ignore", "ignore", "pipe"],
+			timeout: 10_000,
+		});
+
+		return null;
+	} catch (error) {
+		const stderr =
+			error instanceof Error && "stderr" in error
+				? String(error.stderr).trim()
+				: "";
+
+		return `${argv.join(" ")} failed in this environment${stderr ? `: ${stderr.slice(0, 300)}` : ""}`;
+	}
+}
+
+const bwrap = missingBubblewrap();
+
+function sandboxAvailable(t: import("node:test").TestContext): boolean {
+	if (bwrap === null) return true;
+
+	assert.notEqual(
+		process.env.FACTORY_REQUIRE_SANDBOX_TESTS,
+		"1",
+		`FACTORY_REQUIRE_SANDBOX_TESTS=1 but ${bwrap}`,
+	);
+	t.diagnostic(`not run: ${bwrap}`);
+
+	return false;
+}
 
 function gitSha(text: string) {
 	assert.ok(isGitSha(text));
@@ -685,6 +792,7 @@ test("R3 G1 missing gates.json follows the unpinned identity path and gives the 
 });
 
 test("R3 external target without Factorio source passes the gates CLI and both diagnostic replays", async (t) => {
+	if (!sandboxAvailable(t)) return;
 	const product = await pinnedProduct(t);
 	const f = externalTarget(t, product.revision);
 	assert.equal(existsSync(join(f.root, "host")), false);
@@ -827,6 +935,7 @@ test("R3 every modified installed gate member is rejected despite the correct pr
 });
 
 test("R3 tooling pins are exact commit SHAs, and candidate edits cannot remove or replace them", async (t) => {
+	if (!sandboxAvailable(t)) return;
 	const product = await pinnedProduct(t);
 	const f = externalTarget(t, product.revision);
 	const policyPath = ".github/factory/gates/gates.json";
@@ -885,7 +994,10 @@ test("R3 tooling pins are exact commit SHAs, and candidate edits cannot remove o
 		assert.ok(facts.replay?.kind === "observed");
 		assert.equal(facts.replay.gate.projection.passed, true);
 		assert.equal(facts.replay.full.projection.passed, true);
-		rmSync(join(f.root, "private-diagnosis"), { recursive: true, force: true });
+		rmSync(join(f.root, "private-diagnosis"), {
+			recursive: true,
+			force: true,
+		});
 	}
 });
 
@@ -916,6 +1028,7 @@ test("R3 a bad external candidate still fails gates and both diagnostic replays"
 });
 
 test("R3 a pinned Agents-shaped version 2 target passes real static tools, gates and native replay without Factorio source", async (t) => {
+	if (!sandboxAvailable(t)) return;
 	const product = await pinnedProduct(t);
 	const f = agentsRepo(t);
 	f.git("rm", "-rq", "host");
