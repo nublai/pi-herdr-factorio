@@ -10,12 +10,16 @@ import {
 	readdirSync,
 	readFileSync,
 	rmSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { test } from "node:test";
+import { parse as parseYaml } from "yaml";
+import type { DiagnosisFacts } from "../../../host/controller/checkers.ts";
 import { checkCandidate, receiptPasses } from "../../../host/gates/gates.ts";
 import {
 	exportTree,
@@ -24,13 +28,16 @@ import {
 	materializeFromDirectories,
 	replacementDigest,
 	replacementsOf,
+	MATERIALIZER_FILES,
+	materializerIdentity,
+	gateMaterializerIdentity,
 } from "../../../host/gates/materialize.ts";
 import { runDraftBase, runHeldoutBase } from "../../../host/gates/base.ts";
 import {
 	manifestOf,
 	validateDependencies,
 } from "../../../host/gates/manifest.ts";
-import { type GateRunner } from "../../../host/gates/runner.ts";
+import { type GateRunner, localRunner } from "../../../host/gates/runner.ts";
 import {
 	assessBase,
 	classifyFailure,
@@ -166,6 +173,584 @@ const miniRunner: GateRunner = {
 		}
 	},
 };
+
+async function pinnedProduct(t: { after(fn: () => void): void }) {
+	const root = mkdtempSync(join(tmpdir(), "factory-product-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+
+	for (const path of ["host", "src", ".github/factory/gates", "package.json"])
+		cpSync(resolve(path), join(root, path), { recursive: true });
+
+	const git = (...args: string[]) =>
+		execFileSync("git", ["-C", root, ...args], { encoding: "utf8" }).trim();
+
+	git("init", "-q");
+	git("add", ".");
+	git(
+		"-c",
+		"user.name=Gate test",
+		"-c",
+		"user.email=gate@example.invalid",
+		"commit",
+		"-qm",
+		"trusted product",
+	);
+	const revision = git("rev-parse", "HEAD");
+	symlinkSync(resolve("node_modules"), join(root, "node_modules"), "dir");
+
+	const gates: typeof import("../../../host/gates/gates.ts") = await import(
+		pathToFileURL(join(root, "host/gates/gates.ts")).href
+	);
+
+	const checkers: typeof import("../../../host/controller/checkers.ts") =
+		await import(pathToFileURL(join(root, "host/controller/checkers.ts")).href);
+
+	return { root, revision, git, ...gates, ...checkers };
+}
+
+function externalTarget(t: { after(fn: () => void): void }, revision: string) {
+	const f = repo(t);
+
+	const policy = JSON.parse(
+		readFileSync(join(f.root, ".github/factory/gates/gates.json"), "utf8"),
+	);
+
+	f.put(
+		".github/factory/gates/gates.json",
+		JSON.stringify({ ...policy, toolingRevision: revision }),
+	);
+	const gateSha = gitSha(f.commit());
+	const heldoutDir = "test/acceptance/123";
+	const path = `${heldoutDir}/checks/value.test.ts`;
+
+	const bytes = Buffer.from(
+		'import {test} from "node:test"; import assert from "node:assert/strict"; import {value} from "../../../../src/value.ts"; test("held-out value", () => assert.equal(value, "main"));\n',
+	);
+
+	f.put(path, bytes.toString());
+	const candidateSha = gitSha(f.commit());
+
+	return {
+		...f,
+		gateSha,
+		candidateSha,
+		heldoutDir,
+		heldoutDigest: heldoutDigest([{ path, bytes }]),
+	};
+}
+
+async function diagnoseExternal(
+	product: Awaited<ReturnType<typeof pinnedProduct>>,
+	f: ReturnType<typeof externalTarget>,
+) {
+	const repo = "giuseppecrj/pi-herdr-agents";
+	assert.ok(isRepoSlug(repo));
+	const runId = digestOf("external-tooling-run");
+	const dir = join(f.root, "private-diagnosis");
+
+	const owner = product.controllerDiagnosis({
+		stateDir: dir,
+		fetch: async (requestedRepo, sha) => {
+			assert.equal(requestedRepo, repo);
+
+			return execFileSync("git", [
+				"-C",
+				f.root,
+				"archive",
+				"--format=tar.gz",
+				"--prefix=target/",
+				sha,
+			]);
+		},
+		runner: localRunner,
+	});
+
+	const facts = new Promise<DiagnosisFacts>((finish, reject) => {
+		void owner
+			.check({
+				runId,
+				dir,
+				bindingDigest: digestOf("external-binding"),
+				repo,
+				gateSha: f.gateSha,
+				candidateSha: f.candidateSha,
+				round: 0,
+				allowanceMs: 30_000,
+				needs: { replay: true, dependencies: false },
+				heldoutDir: f.heldoutDir,
+				heldoutDigest: f.heldoutDigest,
+				replacements: [],
+				base: { kind: "stored", receipt: null },
+				finish,
+				interrupted: () => assert.fail("unexpected interruption"),
+			})
+			.catch(reject);
+	});
+
+	const result = await facts;
+	await owner.stop(runId);
+
+	return result;
+}
+
+test("R3 external target without Factorio source passes the gates CLI and both diagnostic replays", async (t) => {
+	const product = await pinnedProduct(t);
+	const f = externalTarget(t, product.revision);
+	assert.equal(existsSync(join(f.root, "host")), false);
+	const output = join(f.root, "cli-output");
+
+	const result = spawnSync(
+		process.execPath,
+		[
+			join(product.root, "host/cli/index.ts"),
+			"gates",
+			"--repository",
+			f.root,
+			"--gate-sha",
+			f.gateSha,
+			"--candidate-sha",
+			f.candidateSha,
+			"--nonce",
+			"1234567890abcdef-r0-d1",
+			"--output",
+			output,
+			"--runner",
+			"local",
+			"--heldout-dir",
+			f.heldoutDir,
+			"--heldout-digest",
+			f.heldoutDigest,
+		],
+		{ encoding: "utf8", timeout: 30_000 },
+	);
+
+	assert.equal(result.status, 0, result.stderr || result.stdout);
+
+	const receipt = JSON.parse(
+		readFileSync(join(output, "receipt.json"), "utf8"),
+	);
+
+	assert.equal(receipt.status, "passed");
+	assert.equal(receipt.gateSha, f.gateSha);
+	assert.equal(receipt.candidateSha, f.candidateSha);
+	assert.equal(receipt.nonce, "1234567890abcdef-r0-d1");
+	assert.equal(receipt.heldoutDigest, f.heldoutDigest);
+	assert.ok(receipt.heldoutCounts[`${f.heldoutDir}/checks/value.test.ts`] > 0);
+	const facts = await diagnoseExternal(product, f);
+	assert.equal(facts.replay?.kind, "observed", JSON.stringify(facts.replay));
+	assert.ok(facts.replay?.kind === "observed");
+	assert.equal(
+		facts.replay.gate.projection.passed,
+		true,
+		JSON.stringify(facts.replay),
+	);
+	assert.equal(
+		facts.replay.full.projection.passed,
+		true,
+		JSON.stringify(facts.replay),
+	);
+});
+
+test("R3 external tooling revision mismatch is rejected before gate execution and replay", async (t) => {
+	const product = await pinnedProduct(t);
+	const f = externalTarget(t, "a".repeat(40));
+
+	const receipt = await product.checkCandidate({
+		repository: f.root,
+		gateSha: f.gateSha,
+		candidateSha: f.candidateSha,
+		nonce: "external-pin",
+		output: join(f.root, "output"),
+		heldoutDir: f.heldoutDir,
+		heldoutDigest: f.heldoutDigest,
+		runner: {
+			kind: "must-not-run",
+			run: async () => assert.fail("unverified tooling ran"),
+		},
+	});
+
+	assert.equal(receipt.reason, "unsupported_materializer");
+	assert.equal(receipt.checks.length, 0);
+	const facts = await diagnoseExternal(product, f);
+	assert.equal(facts.replay?.kind, "unavailable");
+	assert.ok(facts.replay?.kind === "unavailable");
+	assert.equal(facts.replay.reason, "unsupported_materializer");
+});
+
+test("R3 every modified installed gate member is rejected despite the correct product revision", async (t) => {
+	const product = await pinnedProduct(t);
+	const f = externalTarget(t, product.revision);
+	const gateTree = join(f.root, "exported-gate");
+	const candidateTree = join(f.root, "exported-candidate");
+	await exportTree(f.root, f.gateSha, gateTree);
+	await exportTree(f.root, f.candidateSha, candidateTree);
+
+	const materialize: typeof import("../../../host/gates/materialize.ts") =
+		await import(
+			pathToFileURL(join(product.root, "host/gates/materialize.ts")).href
+		);
+
+	for (const member of MATERIALIZER_FILES) {
+		const path = join(product.root, member);
+		const before = readFileSync(path);
+		writeFileSync(path, Buffer.concat([before, Buffer.from("\n")]));
+
+		const receipt = await product.checkCandidate({
+			repository: f.root,
+			gateSha: f.gateSha,
+			candidateSha: f.candidateSha,
+			nonce: "external-member",
+			output: join(f.root, "out-member"),
+			heldoutDir: f.heldoutDir,
+			heldoutDigest: f.heldoutDigest,
+			runner: {
+				kind: "must-not-run",
+				run: async () => assert.fail("changed tooling ran"),
+			},
+		});
+
+		assert.equal(receipt.reason, "unsupported_materializer", member);
+		assert.equal(receipt.checks.length, 0, member);
+		const dest = join(f.root, "refused-materialization");
+		assert.throws(
+			() =>
+				materialize.materializeFromDirectories({
+					gateTree,
+					candidateTree,
+					dest,
+					replacements: [],
+					heldoutDir: f.heldoutDir,
+					heldoutDigest: f.heldoutDigest,
+				}),
+			/unsupported_materializer/,
+			member,
+		);
+		assert.equal(existsSync(dest), false, member);
+		const facts = await diagnoseExternal(product, f);
+		assert.equal(facts.replay?.kind, "unavailable", member);
+		assert.ok(facts.replay?.kind === "unavailable");
+		assert.equal(facts.replay.reason, "unsupported_materializer", member);
+		rmSync(join(f.root, "private-diagnosis"), { recursive: true, force: true });
+		writeFileSync(path, before);
+	}
+});
+
+test("R3 tooling pins are exact commit SHAs, and candidate edits cannot remove or replace them", async (t) => {
+	const product = await pinnedProduct(t);
+	const f = externalTarget(t, product.revision);
+	const policyPath = ".github/factory/gates/gates.json";
+	const policy = JSON.parse(readFileSync(join(f.root, policyPath), "utf8"));
+	const gateTree = join(f.root, "gate-export");
+	await exportTree(f.root, f.gateSha, gateTree);
+
+	const materialize: typeof import("../../../host/gates/materialize.ts") =
+		await import(
+			pathToFileURL(join(product.root, "host/gates/materialize.ts")).href
+		);
+
+	for (const pin of [
+		null,
+		"",
+		"main",
+		product.revision.slice(0, 7),
+		product.revision.toUpperCase(),
+		42,
+		{},
+	]) {
+		writeFileSync(
+			join(gateTree, policyPath),
+			JSON.stringify({ ...policy, toolingRevision: pin }),
+		);
+		assert.throws(
+			() => materialize.gateMaterializerIdentity(gateTree),
+			/unsupported_materializer/,
+			JSON.stringify(pin),
+		);
+	}
+
+	rmSync(gateTree, { recursive: true, force: true });
+
+	for (const pin of [undefined, "b".repeat(40)]) {
+		f.put(policyPath, JSON.stringify({ ...policy, toolingRevision: pin }));
+		const candidateSha = gitSha(f.commit());
+
+		const receipt = await product.checkCandidate({
+			repository: f.root,
+			gateSha: f.gateSha,
+			candidateSha,
+			nonce: "candidate-pin",
+			output: join(product.root, "out-pin"),
+			runner: miniRunner,
+			install: false,
+			heldoutDir: f.heldoutDir,
+			heldoutDigest: f.heldoutDigest,
+		});
+
+		assert.equal(receipt.status, "passed", JSON.stringify(receipt));
+		assert.deepEqual(receipt.ignoredChanges, [policyPath]);
+	}
+});
+
+test("R3 a bad external candidate still fails gates and both diagnostic replays", async (t) => {
+	const product = await pinnedProduct(t);
+	const f = externalTarget(t, product.revision);
+	f.put("src/value.ts", 'export const value = "wrong";\n');
+	const candidateSha = gitSha(f.commit());
+
+	const receipt = await product.checkCandidate({
+		repository: f.root,
+		gateSha: f.gateSha,
+		candidateSha,
+		nonce: "bad-candidate",
+		output: join(f.root, "out-bad"),
+		runner: miniRunner,
+		install: false,
+		heldoutDir: f.heldoutDir,
+		heldoutDigest: f.heldoutDigest,
+	});
+
+	assert.equal(receipt.status, "failed");
+	assert.equal(receipt.checks.find((c) => c.name === "heldout")?.exitCode, 1);
+	const facts = await diagnoseExternal(product, { ...f, candidateSha });
+	assert.ok(facts.replay?.kind === "observed", JSON.stringify(facts.replay));
+	assert.equal(facts.replay.gate.projection.passed, false);
+	assert.equal(facts.replay.full.projection.passed, false);
+});
+
+test("R3 a pinned Agents-shaped version 2 target passes real static tools, gates and native replay without Factorio source", async (t) => {
+	const product = await pinnedProduct(t);
+	const f = agentsRepo(t);
+	f.put(
+		GATE_POLICY,
+		JSON.stringify({ ...agentsPolicy(), toolingRevision: product.revision }),
+	);
+	const gateSha = gitSha(f.commit());
+	const heldoutDir = "test/acceptance/123";
+	const path = `${heldoutDir}/checks/value.test.ts`;
+
+	const bytes = Buffer.from(
+		'import { test } from "node:test";\nimport assert from "node:assert/strict";\nimport { value } from "../../../../maestro/value.ts";\ntest("held-out value", () => assert.equal(value, "main"));\n',
+	);
+
+	f.put(path, bytes.toString());
+	const candidateSha = gitSha(f.commit());
+	const digest = heldoutDigest([{ path, bytes }]);
+	assert.equal(existsSync(join(f.root, "host")), false);
+	assert.equal(existsSync(join(f.root, "src")), false);
+
+	const receipt = await product.checkCandidate({
+		repository: f.root,
+		gateSha,
+		candidateSha,
+		nonce: "agents-pin",
+		output: join(product.root, "out-agents"),
+		runner: toolingRunner,
+		install: false,
+		heldoutDir,
+		heldoutDigest: digest,
+	});
+
+	assert.equal(receipt.status, "passed", JSON.stringify(receipt));
+	assert.deepEqual(receipt.testGlobs, AGENTS_GLOBS);
+
+	const facts = await diagnoseExternal(product, {
+		...f,
+		gateSha,
+		candidateSha,
+		heldoutDir,
+		heldoutDigest: digest,
+	});
+
+	assert.ok(facts.replay?.kind === "observed", JSON.stringify(facts.replay));
+	assert.equal(facts.replay.gate.projection.passed, true);
+	assert.equal(facts.replay.full.projection.passed, true);
+});
+
+test("R3 unpinned Factorio self-hosting retains the exact six-file identity and gate policy", () => {
+	assert.ok(gateMaterializerIdentity(".").equals(materializerIdentity(".")));
+	const manifest = manifestOf(".");
+	assert.deepEqual(
+		manifest.checks.map((c) => c.name),
+		["typecheck", "lint", "format", "layout", "decisions"],
+	);
+	assert.deepEqual(manifest.testGlobs, [
+		"test/src/**/*.test.ts",
+		"test/host/**/*.test.ts",
+		"test/integration/*.test.ts",
+	]);
+});
+
+test("R3 target CI template separates the pinned product from the target and preserves fail-closed reporting", (t) => {
+	const workflow = parseYaml(
+		readFileSync("docs/operations/examples/target-ci.yml", "utf8"),
+	);
+
+	assert.equal(
+		workflow["run-name"],
+		"gates ${{ inputs.candidate_sha }} ${{ inputs.nonce }}",
+	);
+	assert.deepEqual(workflow.permissions, { contents: "read" });
+	assert.deepEqual(workflow.jobs.report.permissions, {
+		actions: "read",
+		checks: "write",
+	});
+	const steps = workflow.jobs.gates.steps;
+
+	const checkouts = steps.filter((s: { uses?: string }) =>
+		s.uses?.startsWith("actions/checkout@"),
+	);
+
+	assert.equal(checkouts.length, 2);
+	assert.equal(checkouts[0].with.repository, "nublai/pi-herdr-factorio");
+	assert.equal(checkouts[0].with.ref, "${{ env.FACTORY_PRODUCT_REVISION }}");
+	assert.equal(checkouts[0].with.path, "product");
+	assert.equal(checkouts[1].with.ref, "${{ github.sha }}");
+	assert.equal(checkouts[1].with.path, "target");
+
+	for (const checkout of checkouts)
+		assert.equal(checkout.with["persist-credentials"], false);
+
+	const run = steps.find(
+		(s: { name?: string }) => s.name === "Run trusted gates",
+	).run;
+
+	assert.match(run, /product\/host\/cli\/index\.ts gates/);
+	assert.ok(run.includes('--repository "$PWD/target" --gate-sha "$GATE_SHA"'));
+	assert.ok(
+		workflow.jobs.report.steps.every(
+			(s: { uses?: string }) => !s.uses?.startsWith("actions/checkout@"),
+		),
+	);
+
+	const shell = workflow.jobs.report.steps.find(
+		(s: { name?: string }) => s.name === "Report exact candidate result",
+	).run;
+
+	const script = /<<'NODE'\n([\s\S]+)\nNODE\n?$/.exec(shell)?.[1];
+	assert.ok(script);
+	const root = mkdtempSync(join(tmpdir(), "factory-template-"));
+	t.after(() => rmSync(root, { recursive: true, force: true }));
+
+	const names = [
+		"install",
+		"baseline_tests",
+		"typecheck",
+		"lint",
+		"format",
+		"main_tests",
+		"candidate_tests",
+		"heldout",
+	];
+
+	const base = {
+		version: 2,
+		status: "passed",
+		modelCalls: 0,
+		candidateSha: "a".repeat(40),
+		gateSha: "b".repeat(40),
+		nonce: "1234567890abcdef-r0-d1",
+		heldoutDigest: "c".repeat(64),
+		heldoutCounts: { held: 1 },
+		requiredChecks: names,
+		checks: names.map((name) => ({ name, exitCode: 0 })),
+	};
+
+	const input = join(root, "input.json");
+	const posted = join(root, "posted.json");
+
+	const env = {
+		PATH: process.env.PATH,
+		HOME: root,
+		GH_TOKEN: "not-a-token",
+		CANDIDATE_SHA: base.candidateSha,
+		GATE_SHA: base.gateSha,
+		NONCE: base.nonce,
+		HELDOUT_DIR: "test/acceptance/123",
+		HELDOUT_DIGEST: base.heldoutDigest,
+		GATE_RESULT: "success",
+		GITHUB_REF: "refs/heads/main",
+		GITHUB_EVENT_NAME: "workflow_dispatch",
+		GITHUB_ACTOR: "exe-dev-github-integration[bot]",
+		TRIGGERING_ACTOR: "exe-dev-github-integration[bot]",
+		GITHUB_REPOSITORY: "giuseppecrj/pi-herdr-agents",
+		GITHUB_RUN_ID: "77",
+		GITHUB_RUN_ATTEMPT: "1",
+		REPORT_INPUT: input,
+		POSTED: posted,
+	};
+
+	const fakeGithub = `globalThis.fetch = async (_url, request) => {
+		const body = JSON.parse(request.body);
+		(await import('node:fs')).writeFileSync(process.env.POSTED, JSON.stringify(body));
+		return {ok: true, json: async () => ({id: 123, app: {id: Number(process.env.APP_ID ?? 15368)},
+			head_sha: body.head_sha, external_id: body.external_id})};
+	};\n`;
+
+	for (const [label, receipt] of [
+		["valid", base],
+		["gate SHA", { ...base, gateSha: "d".repeat(40) }],
+		["candidate SHA", { ...base, candidateSha: "d".repeat(40) }],
+		["nonce", { ...base, nonce: "1234567890abcdef-r0-d2" }],
+		["held-out", { ...base, heldoutDigest: "d".repeat(64) }],
+		["missing check", { ...base, checks: base.checks.slice(1) }],
+		[
+			"timeout",
+			{ ...base, checks: base.checks.map((c) => ({ ...c, timedOut: true })) },
+		],
+	] as const) {
+		writeFileSync(input, JSON.stringify(receipt));
+		const output = join(root, label);
+
+		const result: import("node:child_process").SpawnSyncReturns<string> =
+			spawnSync(
+				process.execPath,
+				["--input-type=module", "-e", fakeGithub + script],
+				{
+					env: { ...env, REPORT_OUTPUT: output },
+					encoding: "utf8",
+					timeout: 5_000,
+				},
+			);
+
+		assert.equal(result.status, 0, result.stderr);
+
+		const report = JSON.parse(
+			readFileSync(join(output, "receipt.json"), "utf8"),
+		);
+
+		assert.equal(report.status, label === "valid" ? "passed" : "failed", label);
+		assert.equal(report.gateSha, env.GATE_SHA);
+		assert.equal(report.candidateSha, env.CANDIDATE_SHA);
+		assert.equal(report.nonce, env.NONCE);
+		assert.equal(report.heldoutDigest, env.HELDOUT_DIGEST);
+		assert.equal(report.workflow, ".github/workflows/ci.yml");
+		assert.equal(report.externalId, `factory-gates:77:${env.NONCE}`);
+	}
+
+	writeFileSync(input, JSON.stringify(base));
+
+	for (const change of [
+		{ APP_ID: "1" },
+		{ GITHUB_REF: "refs/heads/candidate" },
+		{ GITHUB_ACTOR: "other" },
+	]) {
+		const output = join(root, "invalid-identity");
+
+		const result: import("node:child_process").SpawnSyncReturns<string> =
+			spawnSync(
+				process.execPath,
+				["--input-type=module", "-e", fakeGithub + script],
+				{
+					env: { ...env, ...change, REPORT_OUTPUT: output },
+					encoding: "utf8",
+					timeout: 5_000,
+				},
+			);
+
+		assert.equal(result.status, 1, JSON.stringify(change));
+		assert.equal(existsSync(join(output, "receipt.json")), false);
+	}
+});
 
 test("merged tree routes imports to candidate source and preserves every unnamed main test and config", async (t) => {
 	const f = repo(t);

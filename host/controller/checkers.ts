@@ -53,6 +53,7 @@ import { validateDependencies } from "../gates/manifest.ts";
 import {
 	materializeFromDirectories,
 	materializerIdentity,
+	gateMaterializerIdentity,
 } from "../gates/materialize.ts";
 import { type GateRunner } from "../gates/runner.ts";
 import { scopeOwner, scopeUnit, stopScopeArgv } from "../isolation/scope.ts";
@@ -681,7 +682,7 @@ function completedDiagnosis(root: string): DiagnosisFacts | null {
 
 function sameMaterializer(gate: string, source: Uint8Array): boolean {
 	try {
-		return Buffer.from(source).equals(materializerIdentity(gate));
+		return Buffer.from(source).equals(gateMaterializerIdentity(gate));
 	} catch {
 		return false;
 	}

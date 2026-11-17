@@ -12,6 +12,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { dirname, join, posix, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ReplacedTest } from "../../src/contract/contract.ts";
 import { hasControl } from "../../src/contract/parse.ts";
 import {
@@ -58,6 +59,72 @@ export function materializerIdentity(tree: string): Buffer {
 }
 
 export const SHA = /^[a-f0-9]{40}$/;
+
+function pinnedMaterializerIdentity(tree: string): Buffer | null {
+	const policy = join(tree, ".github/factory/gates/gates.json");
+
+	const value = fieldOf(
+		objectOf(parseJson(readFileSync(policy, "utf8"))),
+		"toolingRevision",
+	);
+
+	if (value === undefined) return null;
+	const revision = textOf(value);
+
+	try {
+		if (revision === null || !SHA.test(revision))
+			throw new Error("unsupported_materializer");
+		const product = fileURLToPath(new URL("../..", import.meta.url));
+
+		const gitBytes = (...args: string[]) =>
+			execFileSync("git", ["-C", product, ...args], {
+				env: CLEAN_ENV,
+				timeout: 5_000,
+				maxBuffer: 2 * 1024 * 1024,
+				stdio: ["ignore", "pipe", "ignore"],
+			});
+
+		if (gitBytes("rev-parse", "HEAD").toString().trim() !== revision)
+			throw new Error("unsupported_materializer");
+
+		const files = gitBytes(
+			"ls-tree",
+			"-z",
+			revision,
+			"--",
+			...MATERIALIZER_FILES,
+		)
+			.toString()
+			.split("\0")
+			.filter(Boolean);
+
+		if (
+			files.length !== MATERIALIZER_FILES.length ||
+			files.some((row) => !/^100(?:644|755) blob [a-f0-9]{40}\t/.test(row))
+		)
+			throw new Error("unsupported_materializer");
+
+		const identity = Buffer.from(
+			JSON.stringify(
+				MATERIALIZER_FILES.map((path) => [
+					path,
+					digestOf(gitBytes("show", "--no-textconv", `${revision}:${path}`)),
+				]),
+			),
+		);
+
+		if (!identity.equals(materializerIdentity(product)))
+			throw new Error("unsupported_materializer");
+
+		return identity;
+	} catch {
+		throw new Error("unsupported_materializer");
+	}
+}
+
+export function gateMaterializerIdentity(tree: string): Buffer {
+	return pinnedMaterializerIdentity(tree) ?? materializerIdentity(tree);
+}
 
 function isDocumentation(
 	path: string,
@@ -547,6 +614,7 @@ export async function materializeCandidate(input: {
 	const replacements = checkReplacements(base, candidate, input.replacements);
 	await exportTree(input.repository, input.gateSha, input.dest);
 	const policy = gatePolicyOf(input.dest);
+	pinnedMaterializerIdentity(input.dest);
 	const temp = mkdtempSync(join(dirname(input.dest), "candidate-"));
 
 	try {
@@ -610,6 +678,7 @@ export function materializeFromDirectories(input: {
 	const candidate = inventory(input.candidateTree);
 	const replacements = checkReplacements(base, candidate, input.replacements);
 	const policy = gatePolicyOf(input.gateTree);
+	pinnedMaterializerIdentity(input.gateTree);
 	cpSync(input.gateTree, input.dest, { recursive: true, errorOnExist: true });
 
 	return overlay({
