@@ -160,6 +160,9 @@ const STAGE_INFRASTRUCTURE_DIAGNOSTICS = new Set([
 	"response-blocked",
 	"redirect-refused",
 	"upstream-address-refused",
+	"provider-http-error",
+	"rate-limited",
+	"route-closed",
 ]);
 
 function failureClass(trial: BenchTrial): FailureClassName | null {

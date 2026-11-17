@@ -39,6 +39,7 @@ Two matchers keep their own spelling on purpose. They match the gate container's
 - `accounting.ts` holds the totals and charges: late usage, adopted and released spend, attempt ends and accept spend.
 - `base-check.ts` holds the acceptance receipt, the accept retry's refused suite and feedback, and the refusal notice.
 - `recovery.ts` turns unsettled candidate execution accounts back into candidate events after a restart.
+- `retry.ts` holds the pure early-stage retry decision and accept feedback allowance checks, shared with bench respec. Charging, backoff and transitions stay in `orchestrator.ts`.
 
 A new method that reads or writes `Orchestrator` fields belongs in `orchestrator.ts`. Move it out only when it needs at most four of them, passed explicitly, and calls no `Orchestrator` method.
 
@@ -54,7 +55,7 @@ L06 moved the intact modules into their owner folders. Files marked pending stay
 | `src/contract` | `contract.ts`, `parse.ts`, `render.ts`, `prompt.ts`, `acceptance.ts`, `artifacts.ts` | None |
 | `src/candidate` | `state.ts`, `codec.ts`, `handoff.ts`, `build.ts`, `review.ts`, `validation.ts`, `feedback.ts`, `diagnosis.ts`, `stages.ts` | None |
 | `src/ledger` | `schema.ts`, `git.ts`, `append.ts`, `terminal.ts`, `outbox.ts` | None |
-| `src/controller` | `orchestrator.ts`, `claims.ts`, `admission.ts`, `launch.ts`, `effects.ts`, `accounting.ts`, `base-check.ts`, `recovery.ts` | None |
+| `src/controller` | `orchestrator.ts`, `claims.ts`, `admission.ts`, `launch.ts`, `effects.ts`, `accounting.ts`, `base-check.ts`, `recovery.ts`, `retry.ts` | None |
 | `src/views` | `feed.ts`, `attention.ts`, `explain.ts`, `metrics.ts` | None |
 | `src/maintenance` | `cadence.ts`, `replay.ts`, `scorers.ts` | None |
 

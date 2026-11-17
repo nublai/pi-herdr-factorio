@@ -176,9 +176,17 @@ from the offline archive adapter, with production's complete file list, includin
 separate sanitized trees.
 
 Accept uses `runStage`, the frozen workflow's model, fallback, budget and accept
-reasoning effort, and `controllerDraftChecker`. Bench respec does not yet retry
-failed or malformed specify or accept stages. That production-parity work is
-tracked in [#851](https://github.com/nublai/pi-herdr-factorio/issues/851).
+reasoning effort, and `controllerDraftChecker`. Specify and accept retry failed
+or malformed attempts up to the frozen workflow's `maxAttempts`, default 3,
+through production's shared decision in `src/controller/retry.ts`. Questions,
+provider refusals and budget exhaustion do not retry. Every attempt charges the
+same trial cap, which stands in for production's `maxTokensPerRun` (the lower of
+the two applies). Each retry first waits production's backoff: 10 seconds,
+doubling per retry up to the workflow's `maxBackoffMs`.
+Ordinary stage failures get production's fresh per-attempt stage allowance.
+Once accept receives base feedback, later attempts share its remaining
+100,000 tokens and wall allowance, including earlier accept spend and base checks.
+Each attempt has a separate receipt, journal and entry in trial `stages`.
 Its archive adapter serves only the frozen repository and SHA from a locally
 generated gzip archive. It has no GitHub fallback. Judge-only gate/execution demands and new-behavior checks that
 read preserved test source retain production's refusals.
@@ -192,10 +200,12 @@ and detail-reporter mounts; candidate gates still use the pinned Docker image.
 Final qualification has at most 180 seconds and only the remaining accept wall
 time. An author-fixable base refusal gets production's one accept feedback retry,
 subject to the workflow's attempt limit. The retry uses the shared refusal policy,
-bounded feedback and previous-suite prompt. Both attempts and base checks share
+bounded feedback and previous-suite prompt. All accept attempts and base checks then share
 the accept wall allowance and 100,000-token allowance, and the same trial cap.
-The retry has its own `runtime/accept-retry/` receipt and journal; a second
-refusal stops the trial. It uses production's systemd scope with 2G memory, 512 tasks, 100% CPU,
+The second accept attempt has its own `runtime/accept-retry/` receipt and journal;
+later attempts use `runtime/accept-<attempt>/`. Specify retries use
+`runtime/specify-<attempt>/`, retaining their draft, review and revision leaves.
+A second base refusal stops the trial. It uses production's systemd scope with 2G memory, 512 tasks, 100% CPU,
 and stop-on-abort through `localRunner`. The build and visible-test deadline
 starts separately at build start. This deadline change also applies to baseline,
 model and skill trials; their visible-test allowance no longer starts at trial
@@ -205,9 +215,9 @@ The fresh contract, suite, canary-bearing check bytes and digests flow through
 visible tests, replacement policy, gates and review. The old oracle is verified
 as part of the frozen bundle, but never reused for respec validation. Private
 artifacts live under `respec/`; `respec/base-receipt.json` and its digest retain
-the final qualification. Each attempt also retains its receipt and digest under
-`respec/accept-base-<attempt>/`. A retried first suite is retained under
-`respec/accept-base-1/acceptance/`; the current suite stays in `respec/acceptance/`.
+the final qualification. Each base check also retains its receipt and digest under
+`respec/accept-base-<attempt>/`. A retried suite is retained under
+`respec/accept-base-<attempt>/acceptance/`; the current suite stays in `respec/acceptance/`.
 Trial `respec` metadata records frozen base/archive and
 snapshot bindings, generated digests, effective accept effort and per-session
 requested/observed model evidence. `baseRetryReason` records the first base
@@ -395,20 +405,18 @@ The JSON contains `variants` and `tasks`. Reports include:
   `accept_tool_limit`, `accept_request_limit` and `accept_length` remain `attempts`.
   Only these explicit error diagnostics count as `infrastructure`:
   `prompt_response_failed`, `secret-in-request`, `upstream-error`,
-  `upstream-timeout`, `audit-unavailable`, `response-blocked`, `redirect-refused`
-  and `upstream-address-refused`. The bench observes failed prompt responses
+  `upstream-timeout`, `audit-unavailable`, `response-blocked`, `redirect-refused`,
+  `upstream-address-refused`, `provider-http-error`, `rate-limited` and `route-closed`. The bench observes failed prompt responses
   without changing the production runner. It retains receipt diagnostics and,
   when none exists, reads the last model gateway audit result. A secret alert
   always stops the stage. An earlier transport error followed by a successful
   request does not turn a later model failure into a harness failure.
-  Known limitation: a provider HTTP error is classed as `attempts`, which counts
-  with candidate failures. Production does the same after its stage retries.
-  This covers a 5xx or 429 that the gateway forwards with `reason: null`, and the
-  gateway's own `rate-limited` and `route-closed` denials. Classification does
-  not yet read the audit `status`. Until the bench retries failed stages as
-  production does ([#851](https://github.com/nublai/pi-herdr-factorio/issues/851)),
-  check a candidate failure whose last model request has status 429 or at least
-  500 by hand before blaming the spec.
+  When stage retries run out on an `error` exit, a last model request that the
+  gateway forwarded with status 429 or at least 500 appends `provider-http-error`,
+  which counts as `infrastructure`, as do the gateway's own `rate-limited` and
+  `route-closed` denials. The audit reason, when present, wins over the status.
+  A later successful model request clears an earlier HTTP error, and npm
+  requests never change it.
   For legacy `model_failed`, `specify_failed` and `accept_failed` reasons,
   comparison reads the stored stage receipt, including a failed specify leaf
   or the retried accept stage. Without an exit receipt, it uses `attempts`,

@@ -191,6 +191,11 @@ import {
 	recoverCandidate,
 } from "./recovery.ts";
 
+import {
+	acceptRetryUnavailable,
+	retryableStageOutcome,
+	stageRetryDecision,
+} from "./retry.ts";
 import type { TimelineInput } from "./timeline.ts";
 
 /** Milliseconds since the epoch. Tests pass a fake. */
@@ -1382,21 +1387,18 @@ export class Orchestrator {
 			reference.acceptAttempt,
 		);
 
-		const why =
-			reference.acceptAttempt >= limits.maxAttempts
-				? "attempts"
-				: spent === null || spent >= ACCEPTANCE_MAX_TOKENS
-					? "stage_tokens"
-					: run.usage >= limits.maxTokensPerRun
-						? "run_tokens"
-						: baseWallMs === null
-							? "base_receipt"
-							: config.stages.accept.budget.wallMs -
-										(run.acceptWallMs ?? 0) -
-										baseWallMs <=
-									0
-								? "wall"
-								: null;
+		const why = acceptRetryUnavailable({
+			attempt: reference.acceptAttempt,
+			maxAttempts: limits.maxAttempts,
+			spent,
+			maxTokens: ACCEPTANCE_MAX_TOKENS,
+			remainingRunTokens: limits.maxTokensPerRun - run.usage,
+			baseWallMs,
+			remainingWallMs:
+				config.stages.accept.budget.wallMs -
+				(run.acceptWallMs ?? 0) -
+				(baseWallMs ?? 0),
+		});
 
 		if (why !== null) {
 			this.#input.log("accept_retry_unavailable", {
@@ -1529,7 +1531,7 @@ export class Orchestrator {
 		}
 
 		if (
-			result.kind === "failed" ||
+			retryableStageOutcome(result.kind) ||
 			(run.stage === "build" && result.kind === "passed")
 		) {
 			this.#endStage(run, "stage_failed", result.usage, limits);
@@ -1611,12 +1613,20 @@ export class Orchestrator {
 	): void {
 		const attempt = run.attempt;
 
-		run.usage += usage;
+		const decision = stageRetryDecision({
+			usage: run.usage,
+			charge: usage,
+			attempt,
+			maxTokensPerRun: limits.maxTokensPerRun,
+			maxAttempts: limits.maxAttempts,
+		});
+
+		run.usage = decision.usage;
 		this.state.totals.usage += usage;
 
-		if (run.usage >= limits.maxTokensPerRun) {
+		if (decision.kind === "budget_exhausted") {
 			this.#stop(run, budgetCause(run.stage, "run_tokens"));
-		} else if (run.attempt >= limits.maxAttempts) {
+		} else if (decision.kind === "attempts") {
 			this.#stop(run, { stage: run.stage, class: "attempts", reason: cause });
 		} else {
 			run.attempt++;

@@ -6,6 +6,7 @@ import { journalCharge } from "../../src/core/journal.ts";
 import {
 	fieldOf,
 	hasDuplicateKey,
+	numberOf,
 	objectOf,
 	parseJson,
 	textOf,
@@ -123,8 +124,13 @@ export function stageFailureReason(
 				break;
 			}
 
-			if (textOf(fieldOf(entry, "route"))?.startsWith("model-"))
-				diagnostic = reason;
+			if (textOf(fieldOf(entry, "route"))?.startsWith("model-")) {
+				const status = numberOf(fieldOf(entry, "status")) ?? 0;
+
+				diagnostic =
+					reason ??
+					(status === 429 || status >= 500 ? "provider-http-error" : null);
+			}
 		}
 	}
 
@@ -169,11 +175,24 @@ function comparisonTrial(dir: string): BenchTrial {
 	if (failed === null) return trial;
 	const prefix = failed[1] ?? "model";
 
-	const acceptStage = trial.accounting.sources.includes("accept-retry")
-		? "accept-retry"
-		: "accept";
+	const attempts = trial.accounting.sources
+		.map((source) => source.split("/")[0] ?? "")
+		.filter((name) =>
+			prefix === "accept"
+				? /^accept(?:-retry|-\d+)?$/.test(name)
+				: /^specify(?:-\d+)?$/.test(name),
+		)
+		.sort((left, right) => {
+			const attempt = (name: string) =>
+				name.endsWith("-retry") ? 2 : Number(name.split("-")[1] ?? 1);
 
-	const stage = prefix === "accept" ? acceptStage : trial.outcome.stage;
+			return attempt(left) - attempt(right);
+		});
+
+	const stage =
+		prefix === "accept" || prefix === "specify"
+			? (attempts.at(-1) ?? trial.outcome.stage)
+			: trial.outcome.stage;
 
 	return {
 		...trial,

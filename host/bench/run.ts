@@ -13,6 +13,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { bundleJson } from "../../src/bench/bundle.ts";
 import { parseBenchVariant } from "../../src/bench/variant.ts";
@@ -117,6 +118,7 @@ export type BenchRuntime = {
 	readonly gateRunner?: GateRunner;
 	readonly uid?: () => number;
 	readonly preflight?: (config: SandboxHostConfig) => Promise<void>;
+	readonly sleep?: (ms: number) => Promise<void>;
 };
 
 function git(repository: string, args: readonly string[]): string {
@@ -726,13 +728,27 @@ export async function runBench(
 				guidance: workflow.guidance,
 				metadata: respec,
 				remaining,
+				tokenCap: input.tokenCap,
+				sleep: runtime.sleep ?? ((ms) => delay(ms)),
 				host: (name, stage, tools, attempt = 1) => {
 					const settings = workflow.config.stages[stage];
 
-					const fallback =
-						name === "specify/review" || name === "specify/revision"
-							? null
-							: settings.fallbackModel;
+					const fallback = /^specify(?:-\d+)?\/(?:review|revision)$/.test(name)
+						? null
+						: settings.fallbackModel;
+
+					const parent = name.split("/")[0] ?? name;
+
+					if (
+						stage === "specify" &&
+						!journals.some((journal) => journal.id === parent)
+					)
+						journals.push({
+							id: parent,
+							model: settings.model,
+							text: null,
+							receiptTokens: 0,
+						});
 
 					journals.push({
 						id: name,
@@ -770,9 +786,8 @@ export async function runBench(
 
 						for (const journal of journals.filter(
 							(journal) =>
-								journal.id.startsWith("specify/") ||
-								journal.id === "accept" ||
-								journal.id === "accept-retry",
+								/^specify(?:-\d+)?\//.test(journal.id) ||
+								journal.id.startsWith("accept"),
 						)) {
 							if (respec.models.some((model) => model.session === journal.id))
 								continue;

@@ -39,6 +39,7 @@ import {
 import { LineSplitter } from "../../../host/sandbox/lines.ts";
 import { executionCharge } from "../../../host/sandbox/receipts.ts";
 import { ACCEPTANCE_MAX_TOKENS } from "../../../src/contract/acceptance.ts";
+import { backoffMs } from "../../../src/controller/orchestrator.ts";
 import type { FailedExit } from "../../../src/core/execution.ts";
 import { runVisibleTests } from "../../../host/sandbox/visible-tests.ts";
 import {
@@ -107,9 +108,16 @@ async function harness(
 	builtValue = 1,
 	options: Parameters<typeof benchFixture>[1] & {
 		pi140Request?: boolean;
+		malformed?: {
+			stage: "specify" | "accept";
+			attempts: number;
+			fromAttempt?: number;
+			tokens?: number;
+		};
 		failure?: {
 			stage: "specify" | "accept" | "build";
 			exit: FailedExit;
+			attempts?: number;
 			diagnostic?:
 				| "prompt_response_failed"
 				| "accept_length"
@@ -214,8 +222,12 @@ async function harness(
 
 	let visibleDeadline: number | undefined;
 	let buildHostAt = 0;
+	const sleeps: number[] = [];
 
 	const runtime: BenchRuntime = {
+		sleep: async (ms) => {
+			sleeps.push(ms);
+		},
 		exec: async (command, args) => {
 			assert.equal(command, "systemctl");
 			assert.ok(args.includes("factory.service"));
@@ -351,7 +363,24 @@ async function harness(
 			return {
 				...base,
 				stopSandbox: async () => {},
+				writeReceipt(receipt) {
+					return base.writeReceipt(
+						options.malformed?.stage === config.stage &&
+							options.malformed.tokens !== undefined
+							? {
+									...receipt,
+									usage: { ...receipt.usage, total: options.malformed.tokens },
+								}
+							: receipt,
+					);
+				},
 				async launchPi(model) {
+					const failure =
+						options.failure?.stage === config.stage &&
+						config.attempt <= (options.failure.attempts ?? Infinity)
+							? options.failure
+							: undefined;
+
 					calls.push(model);
 					workspaces.push({
 						stage: config.stage,
@@ -393,17 +422,21 @@ async function harness(
 									id: command.id ?? null,
 									command: command.type,
 									success: true,
-									data: { text: output },
+									data: {
+										text:
+											options.malformed?.stage === config.stage &&
+											config.attempt >= (options.malformed.fromAttempt ?? 1) &&
+											config.attempt <= options.malformed.attempts
+												? "not-json"
+												: output,
+									},
 								});
 
 							if (command.type !== "prompt") continue;
 							prompts.push(String(command.message));
 							turns++;
 
-							if (
-								options.failure?.stage === config.stage &&
-								options.failure.diagnostic === "prompt_response_failed"
-							) {
+							if (failure?.diagnostic === "prompt_response_failed") {
 								emit({
 									type: "response",
 									id: command.id ?? null,
@@ -422,8 +455,8 @@ async function harness(
 							});
 							emit({ type: "turn_start" });
 
-							if (options.failure?.stage === config.stage) {
-								const { exit, diagnostic } = options.failure;
+							if (failure !== undefined) {
+								const { exit, diagnostic } = failure;
 
 								if (diagnostic === "accept_tool_limit") {
 									for (let i = 0; i < 3; i++)
@@ -760,6 +793,7 @@ async function harness(
 		buildTools,
 		baseRequests,
 		workspaces,
+		sleeps,
 		deadline: () => ({ visibleDeadline, buildHostAt }),
 		run,
 		service: (value: string) => {
@@ -1279,6 +1313,153 @@ describe("bench run offline CLI", (suite) => {
 				existsSync(join(f.root, "trial/runtime/accept-retry")),
 				false,
 			);
+		});
+
+	const malformedOutcome = (stage: "specify" | "accept") => ({
+		kind: "failed",
+		stage,
+		reason: stage === "specify" ? "specify_failed_malformed" : "accept_schema",
+	});
+
+	for (const stage of ["specify", "accept"] as const) {
+		it(`respec retries a transient ${stage} stage failure then proceeds`, {
+			timeout: 60000,
+		}, async (t) => {
+			const f = await harness(t, false, 1, {
+				respec: "on",
+				failure: { stage, exit: "error", attempts: 1 },
+			});
+
+			const result = await f.run();
+			assert.equal(result.code, 0, result.stderr);
+			const trial = parseBenchTrial(result.stdout);
+			assert.equal(trial.outcome.kind, "passed");
+			assert.equal(
+				trial.stages.filter((entry) => entry.name === stage).length,
+				2,
+			);
+			assert.deepEqual(f.sleeps, [backoffMs(1, 300_000)]);
+		});
+
+		it(`respec honors the frozen ${stage} maxAttempts override`, {
+			timeout: 60000,
+		}, async (t) => {
+			const f = await harness(t, false, 1, {
+				respec: "on",
+				maxAttempts: 2,
+				malformed: { stage, attempts: 3 },
+			});
+
+			const result = await f.run();
+			assert.equal(result.code, 0, result.stderr);
+			const trial = parseBenchTrial(result.stdout);
+			assert.deepEqual(trial.outcome, malformedOutcome(stage));
+			assert.equal(
+				trial.stages.filter((entry) => entry.name === stage).length,
+				2,
+			);
+			assert.deepEqual(f.sleeps, [backoffMs(1, 300_000)]);
+		});
+
+		for (const attempts of [1, 3])
+			it(`respec retries ${stage} malformed output ${attempts === 1 ? "then proceeds" : "until maxAttempts"}`, {
+				timeout: 60000,
+			}, async (t) => {
+				const f = await harness(t, false, 1, {
+					respec: "on",
+					malformed: { stage, attempts },
+				});
+
+				const result = await f.run();
+				assert.equal(result.code, 0, result.stderr);
+				const trial = parseBenchTrial(result.stdout);
+				assert.equal(
+					trial.stages.filter((entry) => entry.name === stage).length,
+					attempts === 1 ? 2 : 3,
+				);
+				assert.deepEqual(
+					trial.outcome,
+					attempts === 1 ? { kind: "passed" } : malformedOutcome(stage),
+				);
+				assert.equal(f.buildTools.length > 0, attempts === 1);
+				assert.deepEqual(
+					f.sleeps,
+					[1, 2].slice(0, attempts).map((retry) => backoffMs(retry, 300_000)),
+				);
+
+				const names =
+					stage === "specify"
+						? ["specify", "specify-2", "specify-3"]
+						: ["accept", "accept-retry", "accept-3"];
+
+				for (const [i, name] of names
+					.slice(0, attempts === 1 ? 2 : 3)
+					.entries()) {
+					const receipt = JSON.parse(
+						readFileSync(
+							join(f.root, "trial/runtime", name, "receipt.json"),
+							"utf8",
+						),
+					);
+
+					assert.equal(receipt.attempt, i + 1);
+					assert.ok(
+						trial.accounting.sources.some(
+							(source) => source === name || source.startsWith(`${name}/`),
+						),
+					);
+				}
+			});
+
+		it(`respec stops ${stage} retry at the shared run allowance`, {
+			timeout: 60000,
+		}, async (t) => {
+			const f = await harness(t, false, 1, {
+				respec: "on",
+				malformed: { stage, attempts: 3, tokens: 1000 },
+			});
+
+			const result = await f.run(undefined, 1000);
+			assert.equal(result.code, 0, result.stderr);
+			const trial = parseBenchTrial(result.stdout);
+			assert.equal(trial.outcome.kind, "budget_exhausted");
+			assert.equal(
+				trial.stages.filter((entry) => entry.name === stage).length,
+				1,
+			);
+			assert.equal(f.buildTools.length, 0);
+			assert.deepEqual(f.sleeps, []);
+		});
+	}
+
+	for (const exhausted of [false, true])
+		it(`respec retains base feedback across a malformed retry, exhausted=${exhausted}`, {
+			timeout: 60000,
+		}, async (t) => {
+			const f = await harness(t, false, 1, {
+				respec: "preservation-retry",
+				malformed: {
+					stage: "accept",
+					fromAttempt: 2,
+					attempts: 2,
+					tokens: exhausted ? ACCEPTANCE_MAX_TOKENS / 2 : undefined,
+				},
+			});
+
+			const result = await f.run();
+			assert.equal(result.code, 0, result.stderr);
+			const trial = parseBenchTrial(result.stdout);
+			assert.equal(
+				trial.outcome.kind,
+				exhausted ? "budget_exhausted" : "passed",
+			);
+			assert.equal(
+				trial.stages.filter((entry) => entry.name === "accept").length,
+				exhausted ? 2 : 3,
+			);
+			assert.equal(trial.respec?.baseRetryReason, "preservation_failed");
+			assert.equal(f.buildTools.length > 0, !exhausted);
+			assert.deepEqual(f.sleeps, [backoffMs(2, 300_000)]);
 		});
 
 	for (const stage of ["specify", "accept", "build"] as const)
