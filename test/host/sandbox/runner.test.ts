@@ -6430,7 +6430,7 @@ describe("pinned zero-token accept replay", () => {
 			),
 		);
 
-		const repo = "owner/repo";
+		const repo = "nublai/pi-herdr-factorio";
 		assert.ok(isRepoSlug(repo) && isGitSha(pin.baseline));
 		assert.equal(
 			digestOf(readFileSync(".github/factory/WORKFLOW.md", "utf8")),
