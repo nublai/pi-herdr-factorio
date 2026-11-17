@@ -401,6 +401,14 @@ The JSON contains `variants` and `tasks`. Reports include:
   when none exists, reads the last model gateway audit result. A secret alert
   always stops the stage. An earlier transport error followed by a successful
   request does not turn a later model failure into a harness failure.
+  Known limitation: a provider HTTP error is classed as `attempts`, which counts
+  with candidate failures. Production does the same after its stage retries.
+  This covers a 5xx or 429 that the gateway forwards with `reason: null`, and the
+  gateway's own `rate-limited` and `route-closed` denials. Classification does
+  not yet read the audit `status`. Until the bench retries failed stages as
+  production does ([#851](https://github.com/nublai/pi-herdr-factorio/issues/851)),
+  check a candidate failure whose last model request has status 429 or at least
+  500 by hand before blaming the spec.
   For legacy `model_failed`, `specify_failed` and `accept_failed` reasons,
   comparison reads the stored stage receipt, including a failed specify leaf
   or the retried accept stage. Without an exit receipt, it uses `attempts`,
