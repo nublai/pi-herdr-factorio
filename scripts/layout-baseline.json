@@ -71,6 +71,18 @@
 				"from": [],
 				"since": "M5"
 			},
+			"host/bench/respec.ts": {
+				"owner": "host/bench",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "respec"
+			},
+			"test/host/bench/respec.test.ts": {
+				"owner": "host/bench",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "respec"
+			},
 			"host/bench/run.ts": {
 				"owner": "host/bench",
 				"seats": ["code-review", "security-review", "simplify"],

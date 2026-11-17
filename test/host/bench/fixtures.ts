@@ -33,7 +33,12 @@ export function put(
 
 export async function benchFixture(
 	root: string,
-	options: { replacements?: boolean; ignored?: boolean; large?: boolean } = {},
+	options: {
+		replacements?: boolean;
+		ignored?: boolean;
+		large?: boolean;
+		ambiguous?: boolean;
+	} = {},
 ) {
 	const repository = join(root, "source");
 	mkdirSync(repository, { mode: 0o700 });
@@ -72,6 +77,7 @@ export async function benchFixture(
 		'{"name":"bench-fixture","version":"1.0.0","lockfileVersion":3,"packages":{"":{"name":"bench-fixture","version":"1.0.0"}}}',
 	);
 	put(repository, "src/value.ts", "export const value = 0;\n");
+	put(repository, "README.md", "# Synthetic task\nExport the value.\n");
 
 	if (options.ignored) {
 		put(
@@ -85,7 +91,8 @@ export async function benchFixture(
 	put(
 		repository,
 		"test/src/value.test.ts",
-		"import {test} from 'node:test'; test('base', () => {});\n",
+		"import {test} from 'node:test'; test('base', () => {});\n" +
+			(options.ambiguous ? "test('base', () => {});\n" : ""),
 	);
 	put(
 		repository,
@@ -302,6 +309,10 @@ export async function benchFixture(
 
 	for (const seat of [
 		"build",
+		"audit-ticket",
+		"grill-me",
+		"deep-research",
+		"acceptance",
 		"code-review",
 		"security-review",
 		"simplify",
@@ -333,5 +344,16 @@ export async function benchFixture(
 
 	put(root, "variant.json", JSON.stringify(variant));
 
-	return { repository, state, bundle, assets, variant, variantFile, sha, git };
+	return {
+		repository,
+		state,
+		bundle,
+		assets,
+		variant,
+		variantFile,
+		sha,
+		git,
+		contract,
+		suite: accepted.suite,
+	};
 }

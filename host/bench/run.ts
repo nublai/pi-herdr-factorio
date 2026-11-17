@@ -20,6 +20,7 @@ import {
 	trialAccounting,
 	parseBenchTrial,
 	type BenchTrial,
+	type BenchRespec,
 	type TrialJournal,
 	type TrialOutcome,
 	type TrialStage,
@@ -55,7 +56,7 @@ import {
 	regularText,
 } from "../../src/contract/artifacts.ts";
 import { sourceExcerpts } from "../../src/contract/prompt.ts";
-import { objectOf, parseJson } from "../../src/core/json.ts";
+import { fieldOf, objectOf, parseJson, textOf } from "../../src/core/json.ts";
 import {
 	parseFamily,
 	FAMILY_MISSING,
@@ -104,6 +105,7 @@ import {
 import { runVisibleTests } from "../sandbox/visible-tests.ts";
 import { unpackBase } from "./archive.ts";
 import { verifyBundle } from "./export.ts";
+import { respecBench } from "./respec.ts";
 
 export type BenchRuntime = {
 	readonly exec: Exec;
@@ -361,10 +363,9 @@ export async function runBench(
 
 	if (stored.kind !== "found") throw new Error("bench_contract_invalid");
 
-	const buildTools =
-		stored.contract.files.length > 8
-			? [...BUILD_TOOLS, "subagent"]
-			: BUILD_TOOLS;
+	let contract = stored.contract;
+	let contractDigest = stored.digest;
+	let acceptanceDigest = task.acceptanceDigest;
 
 	const rawSuite = objectOf(
 		parseJson(regularText(join(bundle, "oracle/suite.json"), 8 * 1024 * 1024)),
@@ -375,6 +376,13 @@ export async function runBench(
 	const accepted = readAcceptanceSuite(suiteBody, stored.contract);
 
 	if (accepted.kind !== "suite") throw new Error("bench_suite_invalid");
+	let suite = accepted.suite;
+
+	let checks = suite.files.map((file) => ({
+		path: file.path,
+		bytes: readFileSync(join(bundle, "oracle/checks", file.path)),
+	}));
+
 	privateState(state);
 	const realState = realpathSync(state);
 
@@ -431,6 +439,23 @@ export async function runBench(
 	const started = Date.now();
 	const stages: TrialStage[] = [];
 	const journals: TrialJournal[] = [];
+
+	const respec:
+		| { -readonly [K in keyof BenchRespec]: BenchRespec[K] }
+		| undefined =
+		variant.change.kind !== "respec"
+			? undefined
+			: {
+					baseSha: task.base.sha,
+					archiveDigest: task.base.digest,
+					snapshotDigest: task.snapshotDigest,
+					contractDigest: null,
+					acceptanceDigest: null,
+					baseReceiptDigest: null,
+					acceptEffort: workflow.config.stages.accept.reasoningEffort,
+					models: [],
+				};
+
 	const judges: SeatReceipt[] = [];
 	let activeStage = "prepare";
 
@@ -451,7 +476,7 @@ export async function runBench(
 	if (arch === null) throw new Error("bench_arch_unsupported");
 
 	const hostConfig = (
-		stage: "build" | "review",
+		stage: "specify" | "accept" | "build" | "review",
 		stageDir: string,
 		tree: string,
 		tools: readonly string[],
@@ -463,6 +488,10 @@ export async function runBench(
 		stageDir,
 		runId: id,
 		stage,
+		acceptEffort:
+			stage === "accept"
+				? workflow.config.stages.accept.reasoningEffort
+				: undefined,
 		attempt: 1,
 		tools,
 		arch,
@@ -472,6 +501,28 @@ export async function runBench(
 		versions: PINNED_VERSIONS,
 		exec: runtime.exec,
 	});
+
+	const refreshJournals = async () => {
+		for (let i = 0; i < journals.length; i++) {
+			const journal = journals[i];
+
+			if (journal === undefined) continue;
+			const dir = join(state, "runtime", journal.id);
+			const receipt = await readStageReceipt(join(dir, "receipt.json"));
+
+			journals[i] = {
+				...journal,
+				text: await boundedText(
+					join(dir, "egress.requests.jsonl"),
+					16 * 1024 * 1024,
+				),
+				receiptTokens: Math.max(
+					journal.receiptTokens,
+					receipt?.usage.total ?? 0,
+				),
+			};
+		}
+	};
 
 	const remaining = () =>
 		Math.max(0, input.tokenCap - trialAccounting(journals).chargedTokens);
@@ -548,7 +599,7 @@ export async function runBench(
 							workspaceTestEdits(
 								base,
 								workspace,
-								stored.contract.replacesTests ?? [],
+								contract.replacesTests ?? [],
 								true,
 							).unrunTestEdits,
 						)
@@ -607,7 +658,7 @@ export async function runBench(
 		}
 
 		await (runtime.preflight ?? preflight)(
-			hostConfig("build", join(state, "runtime/build"), workspace, buildTools),
+			hostConfig("build", join(state, "runtime/build"), workspace, []),
 		);
 		mkdirSync(base, { mode: 0o700 });
 		unpackBase(readFileSync(join(bundle, "builder/base.tar")), base);
@@ -627,9 +678,139 @@ export async function runBench(
 		await prepareRepairTree(base, workspace, "", [], "{}");
 		rmSync(join(workspace, FEEDBACK_FILE));
 
+		if (respec !== undefined) {
+			const authoring = join(state, "respec/authoring");
+
+			const archive = execFileSync(
+				"git",
+				[
+					"-C",
+					repository,
+					"archive",
+					"--format=tar.gz",
+					"--prefix=source/",
+					gateSha,
+				],
+				{
+					maxBuffer: 64 * 1024 * 1024,
+					timeout: 30_000,
+					env: {
+						PATH: process.env.PATH,
+						HOME: "/nonexistent",
+						GIT_CONFIG_NOSYSTEM: "1",
+						GIT_CONFIG_GLOBAL: "/dev/null",
+					},
+				},
+			);
+
+			journals.push({
+				id: "specify",
+				model: workflow.config.stages.specify.model,
+				text: null,
+				receiptTokens: 0,
+			});
+
+			const fresh = await respecBench({
+				bundle,
+				state,
+				workspace: authoring,
+				task,
+				id,
+				assets: bundleDir,
+				archive,
+				config: workflow.config,
+				guidance: workflow.guidance,
+				metadata: respec,
+				remaining,
+				host: (name, stage, tools) => {
+					const settings = workflow.config.stages[stage];
+
+					const fallback =
+						name === "specify/review" || name === "specify/revision"
+							? null
+							: settings.fallbackModel;
+
+					journals.push({
+						id: name,
+						model: settings.model,
+						fallback,
+						text: null,
+						receiptTokens: 0,
+					});
+
+					return (runtime.createHost ?? sandboxHost)(
+						hostConfig(stage, join(state, "runtime", name), authoring, tools),
+					);
+				},
+				stage: async (name, run) => {
+					activeStage = name;
+					const began = Date.now();
+					let outcome = "failed";
+
+					try {
+						const value = await run();
+						outcome = "passed";
+
+						return value;
+					} finally {
+						await refreshJournals();
+						stages.push({ name, wallMs: Date.now() - began, outcome });
+
+						for (const journal of journals.filter(
+							(journal) =>
+								journal.id.startsWith("specify/") || journal.id === "accept",
+						)) {
+							if (respec.models.some((model) => model.session === journal.id))
+								continue;
+
+							const receipt = await readStageReceipt(
+								join(state, "runtime", journal.id, "receipt.json"),
+							);
+
+							respec.models.push({
+								session: journal.id,
+								requested:
+									workflow.config.stages[
+										journal.id === "accept" ? "accept" : "specify"
+									].model,
+								observed:
+									textOf(
+										fieldOf(
+											objectOf(fieldOf(receipt?.record ?? null, "fallback")),
+											"observed",
+										),
+									) ??
+									textOf(
+										fieldOf(
+											objectOf(fieldOf(receipt?.record ?? null, "models")),
+											"observed",
+										),
+									),
+								fallback: textOf(
+									fieldOf(
+										objectOf(fieldOf(receipt?.record ?? null, "fallback")),
+										"requested",
+									),
+								),
+							});
+						}
+					}
+				},
+			});
+
+			contract = fresh.contract;
+			contractDigest = fresh.digest;
+			suite = fresh.suite;
+			acceptanceDigest = fresh.acceptanceDigest;
+			checks = fresh.checks;
+		}
+
+		const buildTools =
+			contract.files.length > 8 ? [...BUILD_TOOLS, "subagent"] : BUILD_TOOLS;
+
 		const inlined = await sourceExcerpts({
-			files: stored.contract.files,
-			evidence: stored.contract.evidence,
+			files: contract.files,
+			evidence: contract.evidence,
 			checkout: {
 				files: [...fileLines(workspace).keys()],
 				read: (path, cap) => boundedText(join(workspace, path), cap),
@@ -642,7 +823,7 @@ export async function runBench(
 		const prompt = await withSkills(
 			bundleDir,
 			buildPrompt({
-				contract: stored.contract,
+				contract,
 				guidance: workflow.guidance,
 				inlined,
 			}),
@@ -650,6 +831,8 @@ export async function runBench(
 		);
 
 		if (prompt === null) throw new Error("build_skills_unavailable");
+
+		const buildStarted = Date.now();
 
 		const build = await runModel(
 			"build",
@@ -680,8 +863,8 @@ export async function runBench(
 			base,
 			collected.patch,
 			visibleTestCommand(workflow.guidance),
-			stored.contract.replacesTests ?? [],
-			{ deadline: started + workflow.config.stages.build.budget.wallMs },
+			contract.replacesTests ?? [],
+			{ deadline: buildStarted + workflow.config.stages.build.budget.wallMs },
 		);
 
 		publishFile(join(state, "visible.json"), JSON.stringify(visible));
@@ -705,9 +888,9 @@ export async function runBench(
 		git(repository, ["apply", "--binary", patchFile]);
 		const heldoutDir = `${ACCEPTANCE_SUITE_PREFIX}bench-${id.slice(0, 16)}`;
 
-		const heldoutFiles = accepted.suite.files.map((file) => ({
+		const heldoutFiles = checks.map((file) => ({
 			path: `${heldoutDir}/checks/${file.path}`,
-			bytes: readFileSync(join(bundle, "oracle/checks", file.path)),
+			bytes: file.bytes,
 		}));
 
 		for (const file of heldoutFiles) {
@@ -745,10 +928,8 @@ export async function runBench(
 			nonce: id.slice(0, 32),
 			output: join(state, "gates"),
 			runner: runtime.gateRunner ?? dockerRunner,
-			replacements: stored.contract.replacesTests ?? [],
-			replacementsDigest: replacementDigest(
-				stored.contract.replacesTests ?? [],
-			),
+			replacements: contract.replacesTests ?? [],
+			replacementsDigest: replacementDigest(contract.replacesTests ?? []),
 			heldoutDir: heldoutFiles.length ? heldoutDir : undefined,
 			heldoutDigest: heldoutFiles.length ? oracleDigest : undefined,
 		};
@@ -763,10 +944,7 @@ export async function runBench(
 		if (gate.status !== "passed" || !receiptPasses(gate))
 			throw new Error(gate.reason ?? "trusted_gates_failed");
 
-		const scenarios = [
-			...accepted.suite.scenarios,
-			...replacementScenarios(stored.contract),
-		];
+		const scenarios = [...suite.scenarios, ...replacementScenarios(contract)];
 
 		const unjudged = scenarios.flatMap((scenario) =>
 			scenario.judge === null ? [] : [scenario.id],
@@ -774,7 +952,7 @@ export async function runBench(
 
 		const verdict: Verdict = {
 			patchDigest: collected.patchDigest,
-			acceptanceDigest: task.acceptanceDigest,
+			acceptanceDigest,
 			heldoutDigest: oracleDigest,
 			candidateSha,
 			gateSha,
@@ -804,7 +982,7 @@ export async function runBench(
 			gateSha,
 			ciRunId: 0,
 			patchDigest: collected.patchDigest,
-			acceptanceDigest: task.acceptanceDigest,
+			acceptanceDigest,
 			heldoutDigest: oracleDigest,
 			gateReceiptDigest: digestOf(gateReceipt),
 			reportDigest: digestOf(gateReceipt),
@@ -829,7 +1007,7 @@ export async function runBench(
 		};
 
 		const reviewPrompt = candidateReviewPrompt({
-			contract: stored.contract,
+			contract,
 			diff: collected.patch,
 			paths: collected.changedPaths,
 			judges: scenarios,
@@ -851,8 +1029,8 @@ export async function runBench(
 				round: 0,
 				candidateSha,
 				patchDigest: collected.patchDigest,
-				contractDigest: stored.digest,
-				acceptanceDigest: task.acceptanceDigest,
+				contractDigest,
+				acceptanceDigest,
 				ciRunId: 0,
 				originalBase: task.base.sha,
 				baseSha: gateSha,
@@ -980,6 +1158,7 @@ export async function runBench(
 			gateRunner: (runtime.gateRunner ?? dockerRunner).kind,
 			thinking: "runtime_default:not_historically_recorded",
 		},
+		...(respec === undefined ? undefined : { respec }),
 		tokenCap: input.tokenCap,
 		startedAt: new Date(started).toISOString(),
 		endedAt: new Date(ended).toISOString(),

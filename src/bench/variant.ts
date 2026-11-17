@@ -97,6 +97,8 @@ const variantCodec = record({
 				return skillChange(value);
 			case "buildRevision":
 				return revisionChange(value);
+			case "respec":
+				return record({ kind: literal("respec"), value: literal("on") })(value);
 			default:
 				throw new Error("declare_exactly_one_variant_dimension");
 		}

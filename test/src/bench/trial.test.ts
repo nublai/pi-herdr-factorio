@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { parseBenchTrial, trialAccounting } from "../../../src/bench/trial.ts";
+import { digestOf } from "../../../src/core/run.ts";
+import { parseBenchVariant } from "../../../src/bench/variant.ts";
 import { syntheticTrial } from "../../host/bench/trial-fixtures.ts";
 
 const journal = [
@@ -25,6 +27,52 @@ const journal = [
 	.join("\n");
 
 describe("BenchTrial parser", () => {
+	it("requires conditional respec provenance, complete successful proofs, and strict nested digests", () => {
+		const old = syntheticTrial();
+		assert.equal(parseBenchTrial(JSON.stringify(old)).respec, undefined);
+
+		const variant = parseBenchVariant(
+			JSON.stringify({
+				...old.variant,
+				name: "respec",
+				change: { kind: "respec", value: "on" },
+			}),
+		);
+
+		const trial = {
+			...old,
+			variant,
+			variantDigest: digestOf(JSON.stringify(variant)),
+			outcome: { kind: "failed", stage: "specify", reason: "specify_failed" },
+		};
+
+		const respec = {
+			baseSha: "b".repeat(40),
+			archiveDigest: digestOf("archive"),
+			snapshotDigest: digestOf("snapshot"),
+			contractDigest: null,
+			acceptanceDigest: null,
+			baseReceiptDigest: null,
+			acceptEffort: "medium",
+			models: [],
+		};
+
+		assert.equal(
+			parseBenchTrial(JSON.stringify({ ...trial, respec })).respec
+				?.contractDigest,
+			null,
+		);
+
+		for (const value of [
+			trial,
+			{ ...old, respec },
+			{ ...trial, respec: { ...respec, extra: true } },
+			{ ...trial, respec: { ...respec, contractDigest: "wrong" } },
+			{ ...trial, respec: { ...respec, baseReceiptDigest: "wrong" } },
+			{ ...trial, respec, outcome: { kind: "passed" } },
+		])
+			assert.throws(() => parseBenchTrial(JSON.stringify(value)));
+	});
 	it("rejects coverage kinds that contradict counts or claim unavailable with a numeric estimate", () => {
 		const trial = syntheticTrial();
 		const missing = syntheticTrial({ missing: true });
@@ -149,6 +197,37 @@ describe("BenchTrial parser", () => {
 });
 
 describe("BenchTrial accounting", () => {
+	it("prices nested specify leaves once and reconciles an aggregate charge floor without repricing it", () => {
+		const leaf = {
+			id: "specify/draft",
+			model: "openai/gpt-6.1-sol",
+			text: journal,
+			receiptTokens: 15,
+		};
+
+		const parent = { ...leaf, id: "specify", text: null, receiptTokens: 30 };
+
+		const result = trialAccounting([
+			parent,
+			leaf,
+			{ ...leaf, id: "specify/review" },
+		]);
+
+		assert.equal(result.chargedTokens, 30);
+		assert.equal(result.cost.tokens.total, 30);
+		assert.equal(result.cost.coverage.kind, "exact");
+		assert.equal(result.cost.coverage.missingJournals, 0);
+		assert.deepEqual(result.sources, ["specify/draft", "specify/review"]);
+
+		const incomplete = trialAccounting([
+			{ ...parent, receiptTokens: 50 },
+			leaf,
+		]);
+
+		assert.equal(incomplete.chargedTokens, 50);
+		assert.equal(incomplete.cost.tokens.total, 15);
+		assert.equal(incomplete.cost.coverage.kind, "lower_bound");
+	});
 	it("prices journal requests once, not receipt plus journal or duplicate result lines", () => {
 		const text = `${journal}\n${journal}\n`;
 

@@ -2,6 +2,7 @@ import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { parseBenchTrial, type BenchTrial } from "../../src/bench/trial.ts";
 import { regularText } from "../../src/contract/artifacts.ts";
+import { journalCharge } from "../../src/core/journal.ts";
 import { hasDuplicateKey, parseJson } from "../../src/core/json.ts";
 import { digestOf } from "../../src/core/run.ts";
 import { count, digest, literal, record } from "../../src/ledger/schema.ts";
@@ -93,18 +94,53 @@ export async function benchSpend(paths: readonly string[]) {
 			stages.map((stage) => executionCharge(join(runtime, stage))),
 		);
 
+		const journalStages = stages.flatMap((stage) =>
+			stage !== "specify"
+				? [stage]
+				: readdirSync(join(runtime, stage), { withFileTypes: true })
+						.filter(
+							(entry) =>
+								entry.isDirectory() &&
+								["draft", "review", "revision"].includes(entry.name),
+						)
+						.map((entry) => `${stage}/${entry.name}`),
+		);
+
 		const journals = await Promise.all(
-			stages.map((stage) =>
-				boundedText(
+			journalStages.map(async (stage) => ({
+				stage,
+				text: await boundedText(
 					join(runtime, stage, "egress.requests.jsonl"),
 					16 * 1024 * 1024,
 				),
-			),
+			})),
 		);
 
-		const unavailableStages = stages
-			.filter((_, i) => charges[i] === null || journals[i] === null)
-			.sort();
+		const unavailableStages = [
+			...new Set([
+				...stages.filter((stage, i) => {
+					const covered = journals.filter(
+						(journal) =>
+							journal.stage === stage || journal.stage.startsWith(`${stage}/`),
+					);
+
+					const tokens = covered.reduce((sum, journal) => {
+						const charge = journalCharge(journal.text ?? "");
+
+						return sum + charge.tokens + charge.uncertainTokens;
+					}, 0);
+
+					return (
+						charges[i] === null ||
+						covered.length === 0 ||
+						(charges[i]?.total ?? 0) > tokens
+					);
+				}),
+				...journals
+					.filter((journal) => journal.text === null)
+					.map((journal) => journal.stage),
+			]),
+		].sort();
 
 		const recorded = charges.filter((charge) => charge !== null);
 		trials.push({

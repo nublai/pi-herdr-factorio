@@ -146,11 +146,75 @@ Exactly one dimension must be declared. These are the only v1 choices:
   build input. `on` is the baseline.
   The declared selector is required even for that baseline; an absent selector
   is not a variant.
+- `{"kind":"respec","value":"on"}` runs fresh specify and accept stages before
+  build. It implies `buildRevision: on`; it cannot be combined with a model,
+  skill, issue-text, base, or revision-off change.
 
 Stage thinking and arbitrary factory revisions are out of v1. The executing
 factory revision is a fixed pin, not a selectable experiment dimension.
 Thinking outside accept was not historically recorded. Trials label it
 `runtime_default:not_historically_recorded` and retain the pinned runtime.
+
+### Re-specify a frozen task
+
+For an authorized respec experiment, keep the baseline's pins and replace only
+its name and selector, for example `name: "respec-401"` and
+`change: {"kind":"respec","value":"on"}`. Use the same `bench run` command and
+a fresh private state directory for each repetition. The input remains the
+bundle's original base and unchanged admission snapshot, not current main or
+live issue text. Never edit a generated contract or inject `replacesTests`.
+An absent replacement list is valid, including for #789's build-only scope.
+
+This mode uses production's `runSpecify`: draft, separate critique, optional
+revision, and exact named-test declaration checks. Unknown or ambiguous test
+names refuse. Questions end the trial locally; nothing is posted. The generated
+draft is wrapped unchanged in a new trial-bound contract envelope. As in
+production, its rendered summary must fit the GitHub comment limit even though
+the bench does not post it. Specify and accept share a fresh authoring checkout
+from the offline archive adapter, with production's complete file list, including
+`.github/` and published `test/acceptance/` paths. Build and review still use
+separate sanitized trees.
+
+Accept uses `runStage`, the frozen workflow's model, fallback, budget and accept
+reasoning effort, and `controllerDraftChecker`. Its archive adapter serves only
+the frozen repository and SHA from a locally generated gzip archive. It has no
+GitHub fallback. Judge-only gate/execution demands and new-behavior checks that
+read preserved test source retain production's refusals.
+
+Draft feedback is not qualification. The final suite receives a fresh canary and
+must pass `runHeldoutBase` plus `assessBase` before build: two agreeing base
+executions, executable new behavior assertion-red and preservation green, with
+no load, runtime, skip, todo, cancellation or tamper failure. Draft and final
+base checks use production's `localRunner` (bubblewrap), including dependency
+and detail-reporter mounts; candidate gates still use the pinned Docker image.
+Final qualification has at most 180 seconds and only the remaining accept wall
+time. It uses production's systemd scope with 2G memory, 512 tasks, 100% CPU,
+and stop-on-abort through `localRunner`. The build and visible-test deadline
+starts separately at build start. This deadline change also applies to baseline,
+model and skill trials; their visible-test allowance no longer starts at trial
+start.
+
+The fresh contract, suite, canary-bearing check bytes and digests flow through
+visible tests, replacement policy, gates and review. The old oracle is verified
+as part of the frozen bundle, but never reused for respec validation. Private
+artifacts live under `respec/`; `respec/base-receipt.json` and its digest retain
+the final qualification. Trial `respec` metadata records frozen base/archive and
+snapshot bindings, generated digests, effective accept effort and per-session
+requested/observed model evidence. Early failures may have null artifacts;
+successful records require complete proof and authoring-stage evidence. Old
+records without this field still parse.
+
+Before authorized model trials, the coordinator must qualify the bench host's
+local-bwrap accept-base lane as well as the Docker preflight below. Require a
+real assertion-red new-behavior check and preservation-green check on the
+archived base, with the detail reporter and dependencies mounted. Scripted local
+tests establish composition only, not that native host qualification.
+
+For #401 and #789, attempt three fresh trials each only under the current spend
+grant. Before every launch, tally completed and incomplete directories with
+`bench spend` and require the full 540,000-token trial cap to fit below the
+12,000,000-token program stop. Stop and report if it does not fit; do not shrink
+allowances. No trial dispatches a production ticket.
 
 ### State, isolation and accounting
 
@@ -205,13 +269,14 @@ wording. Criteria about local trusted check results have evidence; criteria
 specifically requiring hosted CI remain unverifiable. Neither receipt
 fingerprint claims GitHub provenance.
 
-A trial reuses the accepted contract and suite. It does not rerun specify,
-accept, production's base qualification or tree-disagreement diagnosis, controller
-repair rounds, publication or handoff. Only the selected in-session build revision
-runs. The factory commit, installed assets and workflow are pinned, but provider
-backend drift and unrecorded historical thinking remain replay limits. These
-trials measure the build-to-local-gates-to-review path, not a full historical
-controller run.
+A baseline, model or skill trial reuses the accepted contract and suite and
+does not rerun specify, accept or production's base qualification. A respec trial
+adds fresh specify, accept and final base qualification as described above.
+Neither mode runs tree-disagreement diagnosis, controller repair rounds,
+publication or handoff. Only the selected in-session build revision runs.
+The factory commit, installed assets and workflow are pinned, but provider
+backend drift and unrecorded historical thinking remain replay limits.
+Neither mode measures a full historical controller run.
 
 Only the sanitized workspace enters the builder sandbox. The bundle root,
 `oracle/`, trial records, local Git repository and trusted receipts are not
@@ -236,7 +301,11 @@ raised.
 BenchTrial v1 binds its independent ID to the task and variant. It records the
 outcome, per-stage wall time, total wall time, requested and observed seat models,
 family evidence, and journal-derived accounting. Each execution journal is
-counted once. Receipt and journal usage are reconciled by maximum, not added.
+counted once. Nested `specify/draft`, `specify/review` and optional
+`specify/revision` journals, including fallback requests, are priced as leaves,
+never added to their aggregate specify receipt. A higher aggregate charge
+remains a floor with incomplete price coverage. Receipt and journal usage are
+reconciled by maximum, not added.
 Unsettled dispatch bounds remain uncertain charges. M1 prices observed requests
 as `api_equivalent_estimate`; `billedSpend` is always `unavailable`, and missing
 or uncertain coverage is not a zero-cost success. Trials never write production
@@ -274,11 +343,19 @@ one issue are different tasks. Trials of the same task must use the same
 bundle, issue, cap, factory revision, workflow, tariff, original assets, Node
 version, platform, gate runner, and thinking label.
 
-The selected model, skill file digest, or `buildRevision` value is the only
+The selected model, skill file digest, `respec`, or `buildRevision` value is the only
 permitted difference between variants. `buildRevision: on` is the baseline
 and can pair with one model or skill treatment because those treatments also
-leave the revision enabled. An off treatment paired with a model treatment
-changes two dimensions and fails. Different model stages or skill paths also
+leave the revision enabled. Respec can pair only with that on baseline or
+respec repetitions. Respec versus a model, skill or revision-off treatment
+changes two dimensions and fails. Respec repetitions compare frozen base,
+archive and snapshot bindings, not generated contract, suite or base-receipt
+digests, which may vary. Those output digests remain in each trial's comparison
+provenance; suite text and canaries do not enter the report.
+Historical M6 results with a different factory pin remain incomparable. Six new
+respec trials measure end-to-end re-spec repeatability, not #807's isolated
+effect; old results are context only. An off treatment paired with a model
+treatment changes two dimensions and fails. Different model stages or skill paths also
 fail. Skill treatments may change the resulting runtime assets digest, never
 the original assets pin. The local replacement `file` path is not a treatment
 because its bytes are pinned by digest. Within a named variant, the treatment
@@ -294,7 +371,9 @@ The JSON contains `variants` and `tasks`. Reports include:
   count, `n`, and pass rate. Every recorded outcome remains in the denominator.
   `failureClasses` uses the factory's existing classes. Candidate check and
   policy failures are `candidate`; blocking or unverifiable review judgments
-  are `review`. Missing or malformed evidence is `missing_evidence`, caps are
+  are `review`. Specify questions are `input`, a specification needs-info outcome
+  counted with candidate failures, never a harness failure. Missing or malformed
+  evidence is `missing_evidence`, caps are
   `budget`, refusals are `provider`, and other execution failures are
   `infrastructure`. Install and baseline failures are harness failures, not
   candidate failures. Each trial also reports its class and original reason.
@@ -343,6 +422,8 @@ For an incomplete trial it reads each runtime execution's receipt, high-water
 usage, request journal, and audit through the production `executionCharge`
 reader. That reader reconciles overlapping charges by maximum, retains
 uncertain dispatch bounds, and avoids adding aggregate receipts to their leaves.
+Journal coverage follows the nested specify leaf directories too; absent leaves
+or an aggregate charge above the observed leaf total remain lower-bound evidence.
 Each trial reports charge `coverage` and `unavailableStages`. A missing or
 unreadable stage journal makes a numeric charge `lower_bound`, even when
 another stage or a receipt is readable; no recorded charges means `unavailable`.

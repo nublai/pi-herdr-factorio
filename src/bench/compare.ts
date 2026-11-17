@@ -11,6 +11,8 @@ function selector(change: BenchVariant["change"]): string {
 			return `skill.${change.path}`;
 		case "buildRevision":
 			return "buildRevision";
+		case "respec":
+			return "respec";
 	}
 }
 
@@ -21,6 +23,7 @@ function treatment(change: BenchVariant["change"]): string {
 		case "skill":
 			return change.digest;
 		case "buildRevision":
+		case "respec":
 			return change.value;
 	}
 }
@@ -31,6 +34,14 @@ function dimensions(trial: BenchTrial) {
 			bundleDigest: trial.bundleDigest,
 			issue: trial.issue,
 			tokenCap: trial.tokenCap,
+			...(trial.respec === undefined
+				? undefined
+				: {
+						"respec.baseSha": trial.respec.baseSha,
+						"respec.archiveDigest": trial.respec.archiveDigest,
+						"respec.snapshotDigest": trial.respec.snapshotDigest,
+						"respec.acceptEffort": trial.respec.acceptEffort,
+					}),
 			...Object.fromEntries(
 				Object.entries(trial.variant.pins).map(([key, value]) => [
 					`pins.${key}`,
@@ -53,7 +64,13 @@ function differences(left: BenchTrial, right: BenchTrial): string[] {
 	const leftSelector = selector(left.variant.change);
 	const rightSelector = selector(right.variant.change);
 	const sameVariant = left.variant.name === right.variant.name;
-	const changed = [...a.keys()].filter((key) => a.get(key) !== b.get(key));
+
+	const changed = [...new Set([...a.keys(), ...b.keys()])].filter((key) =>
+		!key.startsWith("respec.") ||
+		(left.respec !== undefined && right.respec !== undefined)
+			? a.get(key) !== b.get(key)
+			: false,
+	);
 
 	const baseline = (change: BenchVariant["change"]) =>
 		change.kind === "buildRevision" && change.value === "on";
@@ -120,6 +137,8 @@ function failureClass(trial: BenchTrial): FailureClassName | null {
 	)
 		return "missing_evidence";
 
+	if (outcome.reason === "specify_questions") return "input";
+
 	if (outcome.reason === "model_refused") return "provider";
 
 	if (outcome.reason === "review_malformed") return "missing_evidence";
@@ -162,7 +181,11 @@ function summarize(trials: readonly BenchTrial[]) {
 		if (classified !== null) {
 			failureClasses[classified] = (failureClasses[classified] ?? 0) + 1;
 
-			if (classified === "candidate" || classified === "review")
+			if (
+				classified === "candidate" ||
+				classified === "review" ||
+				classified === "input"
+			)
 				candidateFailures++;
 			else harnessFailures++;
 		} else if (trial.outcome.kind !== "passed") incomplete++;
@@ -263,6 +286,18 @@ export function compareTrials(
 		tasks.set(trial.originalRunId, task);
 	}
 
+	if ([...declarations.values()].some((change) => change.kind === "respec")) {
+		for (const change of declarations.values()) {
+			if (
+				change.kind === "respec" ||
+				(change.kind === "buildRevision" && change.value === "on")
+			)
+				continue;
+			incompatible.add("respec");
+			incompatible.add(selector(change));
+		}
+	}
+
 	if (incompatible.size > 0)
 		throw new Error(
 			`incomparable_trials:${[...incompatible].sort().join(",")}`,
@@ -348,6 +383,9 @@ export function compareTrials(
 						trials: entries.map((trial) => ({
 							id: trial.id,
 							variantDigest: trial.variantDigest,
+							...(trial.respec === undefined
+								? undefined
+								: { respec: trial.respec }),
 							change: trial.variant.change,
 							outcome: trial.outcome,
 							failureClass: failureClass(trial),

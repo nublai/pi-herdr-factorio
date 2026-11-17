@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
+	chmodSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
@@ -16,7 +17,9 @@ import { basename, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, it, type TestContext } from "node:test";
 import { runBenchCli } from "../../../host/cli/bench.ts";
-import { dockerRunner } from "../../../host/gates/runner.ts";
+import { dockerRunner, localRunner } from "../../../host/gates/runner.ts";
+import { compareTrials } from "../../../src/bench/compare.ts";
+import { parseBenchTrial } from "../../../src/bench/trial.ts";
 import {
 	sandboxHost,
 	type SandboxHostConfig,
@@ -30,6 +33,8 @@ import {
 import { manifestDigest } from "../../../host/bundle/manifest.ts";
 import { digestOf } from "../../../src/core/run.ts";
 import { SECOND_JUDGE } from "../../../src/candidate/review.ts";
+import { inlined, specifySourceFacts } from "../../../src/contract/prompt.ts";
+import { scopeOwner } from "../../../host/isolation/scope.ts";
 import { stageBenchPaths, type BenchRuntime } from "../../../host/bench/run.ts";
 import {
 	objectOf,
@@ -82,19 +87,91 @@ async function harness(
 	builtValue = 1,
 	options: Parameters<typeof benchFixture>[1] & {
 		pi140Request?: boolean;
+		respec?:
+			| "on"
+			| "github-path"
+			| "oversized-summary"
+			| "unknown"
+			| "ambiguous"
+			| "revision"
+			| "revision-unknown"
+			| "questions"
+			| "judge"
+			| "judge-execution"
+			| "preserved"
+			| "replacement"
+			| "missing-base"
+			| "failed-base";
 	} = {},
 ) {
 	const root = mkdtempSync(join(tmpdir(), "bench-m5-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	const f = await benchFixture(root, options);
+
 	const echo = await startEchoFixture(t, 0, { anthropic: "usage" });
 	t.after(() => echo.close());
+
+	const baseRequests: Parameters<typeof localRunner.run>[0][] = [];
+	const workspaces: { stage: string; path: string; published: boolean }[] = [];
+
+	if (options.respec) {
+		writeFileSync(
+			f.variantFile,
+			JSON.stringify({
+				...f.variant,
+				name: "respec",
+				change: { kind: "respec", value: "on" },
+			}),
+		);
+		t.mock.method(
+			localRunner,
+			"run",
+			async (input: Parameters<typeof localRunner.run>[0]) => {
+				baseRequests.push(input);
+
+				if (
+					input.tree.includes("accept-base") &&
+					options.respec === "missing-base"
+				)
+					return { exitCode: 0, stdout: "", stderr: "" };
+
+				if (
+					input.tree.includes("accept-base") &&
+					options.respec === "failed-base"
+				)
+					return { exitCode: 2, stdout: "", stderr: "runner failed" };
+
+				const argv = input.argv.map((arg) =>
+					arg
+						.replaceAll("/g/", `${input.gates}/`)
+						.replaceAll("/w/", `${input.tree}/`)
+						.replaceAll("/d/", `${input.detailReporter}/`),
+				);
+
+				const result = spawnSync(argv[0] ?? "false", argv.slice(1), {
+					cwd: input.tree,
+					encoding: "utf8",
+					timeout: 10000,
+					env: { PATH: process.env.PATH, HOME: join(root, "home") },
+				});
+
+				return {
+					exitCode: result.status ?? 2,
+					stdout: result.stdout,
+					stderr: result.stderr,
+				};
+			},
+		);
+	}
+
 	const calls: string[] = [];
 	const prompts: string[] = [];
 	const buildTools: (readonly string[])[] = [];
 	let service = "not-found";
 	const auditFiles: string[] = [];
 	const reservations: { stage: string; reserve: boolean | undefined }[] = [];
+	let visibleDeadline: number | undefined;
+	let buildHostAt = 0;
 
 	const runtime: BenchRuntime = {
 		exec: async (command, args) => {
@@ -106,8 +183,10 @@ async function harness(
 		assetsDir: f.assets,
 		sourceRoot: f.repository,
 		preflight: async () => {},
-		visible: async (config, ...args) =>
-			runVisibleTests(
+		visible: async (config, ...args) => {
+			visibleDeadline = args[4]?.deadline;
+
+			return runVisibleTests(
 				{
 					...config,
 					launch: (launch) => {
@@ -130,7 +209,8 @@ async function harness(
 					exec: async () => ({ code: 0, stdout: "", stderr: "" }),
 				},
 				...args,
-			),
+			);
+		},
 		gateRunner: {
 			kind: "synthetic-process",
 			async run(input) {
@@ -163,7 +243,13 @@ async function harness(
 			},
 		},
 		createHost(config: SandboxHostConfig) {
-			if (config.stage === "build") buildTools.push([...config.tools]);
+			if (config.stage === "build") {
+				buildTools.push([...config.tools]);
+				buildHostAt = Date.now();
+			}
+
+			if (config.stage === "accept")
+				assert.equal(config.acceptEffort, "medium");
 			let gateway: GatewayHandle | null = null;
 			let output = "";
 			let turns = 0;
@@ -217,7 +303,14 @@ async function harness(
 				stopSandbox: async () => {},
 				async launchPi(model) {
 					calls.push(model);
-					assert.ok(!existsSync(join(config.workspace, "test/acceptance")));
+					workspaces.push({
+						stage: config.stage,
+						path: config.workspace,
+						published: existsSync(join(config.workspace, "test/acceptance")),
+					});
+
+					if (config.stage === "build" || config.stage === "review")
+						assert.ok(!existsSync(join(config.workspace, "test/acceptance")));
 					assert.ok(!existsSync(join(config.workspace, "oracle")));
 					assert.ok(!existsSync(join(config.workspace, ".git")));
 					const stdin = new PassThrough();
@@ -265,7 +358,108 @@ async function harness(
 							});
 							emit({ type: "turn_start" });
 
-							if (config.stage === "build") {
+							if (config.stage === "specify") {
+								const {
+									version: _v,
+									runId: _r,
+									issue: _i,
+									base: _b,
+									snapshot: _s,
+									link: _l,
+									...draft
+								} = f.contract;
+
+								output =
+									basename(config.stageDir ?? "") === "review"
+										? '{"kind":"no_finding"}'
+										: JSON.stringify({
+												kind: "contract",
+												...draft,
+												summary: "Fresh contract",
+												...(options.respec === "github-path"
+													? {
+															evidence: [
+																{
+																	path: ".github/factory/WORKFLOW.md",
+																	start: 1,
+																	end: 1,
+																	fact: "Frozen workflow",
+																},
+															],
+														}
+													: options.respec === "oversized-summary"
+														? {
+																behavior: Array.from({ length: 8 }, () =>
+																	"界".repeat(300),
+																),
+																exclusions: Array.from({ length: 8 }, () =>
+																	"界".repeat(300),
+																),
+															}
+														: {}),
+												acceptance: draft.acceptance.map(
+													({ id: _id, ...criterion }) => criterion,
+												),
+												...(["unknown", "ambiguous", "replacement"].includes(
+													options.respec ?? "",
+												) ||
+												(options.respec === "revision-unknown" &&
+													basename(config.stageDir ?? "") === "revision")
+													? {
+															replacesTests: [
+																{
+																	path: "test/src/value.test.ts",
+																	test:
+																		options.respec === "unknown" ||
+																		options.respec === "revision-unknown"
+																			? "missing"
+																			: "base",
+																	reason: "Synthetic replacement",
+																},
+															],
+														}
+													: undefined),
+											});
+
+								if (
+									(options.respec === "revision" ||
+										options.respec === "revision-unknown") &&
+									basename(config.stageDir ?? "") === "review"
+								)
+									output =
+										'{"kind":"ambiguities","ambiguities":["Clarify the value"]}';
+
+								if (options.respec === "questions")
+									output =
+										'{"kind":"questions","questions":[{"text":"Which value?","cites":[]}]}';
+							} else if (config.stage === "accept") {
+								output = JSON.stringify({
+									...f.suite,
+									scenarios: f.suite.scenarios.map(
+										({ kind: _kind, ...scenario }) =>
+											scenario.id === "S2" &&
+											options.respec?.startsWith("judge")
+												? {
+														...scenario,
+														judge:
+															options.respec === "judge-execution"
+																? "Execute the CLI and inspect its output for value one."
+																: "The trusted gates must pass.",
+													}
+												: scenario,
+									),
+									files: f.suite.files.map((file) => ({
+										...file,
+										content:
+											options.respec === "preserved"
+												? "import { readFileSync } from 'node:fs'; readFileSync('test/src/value.test.ts', 'utf8');\n"
+												: file.content.replace(
+														"private value",
+														"fresh private value",
+													),
+									})),
+								});
+							} else if (config.stage === "build") {
 								put(
 									config.workspace,
 									"src/value.ts",
@@ -299,7 +493,8 @@ async function harness(
 														outcome: "pass",
 														reason: "Synthetic judge pass.",
 													},
-													...(options.replacements
+													...(options.replacements ||
+													options.respec === "replacement"
 														? [
 																{
 																	scenario: "T1",
@@ -433,6 +628,9 @@ async function harness(
 		auditFiles,
 		reservations,
 		buildTools,
+		baseRequests,
+		workspaces,
+		deadline: () => ({ visibleDeadline, buildHostAt }),
 		run,
 		service: (value: string) => {
 			service = value;
@@ -441,6 +639,324 @@ async function harness(
 }
 
 describe("bench run offline CLI", () => {
+	it("respec accepts GitHub evidence with production's complete authoring checkout and file list", {
+		timeout: 60000,
+	}, async (t) => {
+		const f = await harness(t, false, 1, { respec: "github-path" });
+		const result = await f.run();
+		assert.equal(result.code, 0, result.stderr);
+		const trial = parseBenchTrial(result.stdout);
+
+		assert.equal(trial.outcome.kind, "passed", JSON.stringify(trial.outcome));
+
+		const authoring = f.workspaces.filter(
+			({ stage }) => stage === "specify" || stage === "accept",
+		);
+
+		assert.ok(authoring.length >= 3);
+		assert.ok(
+			authoring.every(
+				({ path, published }) =>
+					published && path !== join(f.root, "trial/builder"),
+			),
+		);
+
+		for (const stage of ["specify", "accept"]) {
+			const prompt = f.prompts.find((prompt) =>
+				prompt.includes(`factory's ${stage} stage`),
+			);
+
+			assert.ok(prompt?.includes(".github/factory/WORKFLOW.md"));
+
+			if (stage === "specify")
+				assert.ok(prompt?.includes("test/acceptance/published/secret.test.ts"));
+		}
+	});
+
+	it("respec final base qualification passes production's scope and abort bounds to every runner call", {
+		timeout: 60000,
+	}, async (t) => {
+		const f = await harness(t, false, 1, { respec: "on" });
+		const result = await f.run();
+		const trial = parseBenchTrial(result.stdout);
+		assert.equal(trial.outcome.kind, "passed", JSON.stringify(trial.outcome));
+
+		const requests = f.baseRequests.filter(({ tree }) =>
+			tree.includes("accept-base"),
+		);
+
+		assert.ok(requests.length >= 2);
+		const prefix = `factory-stage-${scopeOwner(join(f.root, "trial"))}-${trial.id.slice(0, 16)}-basecheck-1-`;
+
+		for (const input of requests) {
+			assert.ok(
+				input.scope?.startsWith(prefix),
+				"final base runner needs the production resource scope",
+			);
+			assert.match(input.scope ?? "", /-[0-9a-f]{8}$/);
+			assert.ok(input.signal instanceof AbortSignal);
+			assert.ok(
+				input.deadlineMs !== undefined &&
+					input.deadlineMs > 0 &&
+					input.deadlineMs <= 180000,
+			);
+		}
+
+		assert.equal(new Set(requests.map(({ scope }) => scope)).size, 1);
+	});
+
+	it("respec never invokes gh for draft checking or final base qualification", {
+		timeout: 60000,
+	}, async (t) => {
+		const f = await harness(t, false, 1, { respec: "on" });
+		const bin = join(f.root, "bin");
+		const calls = join(f.root, "gh-calls");
+		put(bin, "gh", `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexit 91\n`);
+		chmodSync(join(bin, "gh"), 0o700);
+		const previous = process.env.PATH;
+		process.env.PATH = `${bin}:${previous}`;
+		t.after(() => {
+			process.env.PATH = previous;
+		});
+		const result = await f.run();
+		assert.equal(
+			existsSync(calls),
+			false,
+			"offline respec attempted the gh CLI fallback",
+		);
+		const trial = parseBenchTrial(result.stdout);
+		assert.equal(trial.outcome.kind, "passed", JSON.stringify(trial.outcome));
+		assert.ok(existsSync(join(f.root, "trial/runtime/accept/draft-1.json")));
+		assert.ok(f.baseRequests.some(({ tree }) => tree.includes("draft-1")));
+		assert.ok(f.baseRequests.some(({ tree }) => tree.includes("accept-base")));
+	});
+
+	it("respec adds production's newline before skills to both authoring prompts", {
+		timeout: 60000,
+	}, async (t) => {
+		const f = await harness(t, false, 1, { respec: "on" });
+		await f.run();
+
+		for (const stage of ["specify", "accept"]) {
+			const prompt = f.prompts.find((prompt) =>
+				prompt.includes(`factory's ${stage} stage`),
+			);
+
+			assert.ok(
+				prompt?.includes("\n\n\n## Skills\n"),
+				`${stage} prompt lacks production's final newline`,
+			);
+		}
+	});
+
+	it("respec records specifySourceFacts for the inlined README", {
+		timeout: 60000,
+	}, async (t) => {
+		const f = await harness(t, false, 1, { respec: "on" });
+		await f.run();
+
+		const receipt = JSON.parse(
+			readFileSync(
+				join(f.root, "trial/runtime/specify/draft/receipt.json"),
+				"utf8",
+			),
+		);
+
+		const facts = specifySourceFacts([
+			inlined(
+				"README.md",
+				readFileSync(join(f.repository, "README.md"), "utf8"),
+				10000,
+			),
+		]);
+
+		assert.equal(receipt.efficiency.initialSourceBytes, facts.bytes);
+	});
+
+	it("respec refuses an unpostable rendered contract summary before accept", {
+		timeout: 60000,
+	}, async (t) => {
+		const f = await harness(t, false, 1, { respec: "oversized-summary" });
+		const result = await f.run();
+		const trial = parseBenchTrial(result.stdout);
+
+		assert.deepEqual(trial.outcome, {
+			kind: "failed",
+			stage: "specify",
+			reason: "specify_too_large_to_post",
+		});
+		assert.equal(
+			f.workspaces.some(({ stage }) => stage === "accept"),
+			false,
+		);
+		assert.equal(trial.respec?.contractDigest, null);
+	});
+
+	it("respec runs real authoring and final base qualification before the unchanged build-to-review path", {
+		timeout: 60000,
+	}, async (t) => {
+		const f = await harness(t, false, 1, { respec: "on" });
+		const result = await f.run();
+		assert.equal(result.code, 0, result.stderr);
+		const trial = parseBenchTrial(result.stdout);
+		assert.equal(trial.outcome.kind, "passed", JSON.stringify(trial.outcome));
+		assert.deepEqual(
+			trial.stages.slice(0, 4).map((stage) => stage.name),
+			["specify", "accept", "accept-base", "build"],
+		);
+		assert.ok(trial.respec?.baseReceiptDigest);
+		assert.notEqual(
+			trial.respec?.contractDigest,
+			JSON.parse(readFileSync(join(f.bundle, "task.json"), "utf8"))
+				.contractDigest,
+		);
+		assert.ok(f.prompts.some((prompt) => prompt.includes("Fresh contract")));
+		assert.ok(f.buildTools.every((tools) => !tools.includes("subagent")));
+		const { visibleDeadline, buildHostAt } = f.deadline();
+		assert.ok(
+			visibleDeadline !== undefined &&
+				visibleDeadline - buildHostAt > 1_799_900,
+		);
+
+		const review = JSON.parse(
+			readFileSync(join(f.root, "trial/review-input.json"), "utf8"),
+		);
+
+		assert.equal(
+			review.binding.acceptanceDigest,
+			trial.respec?.acceptanceDigest,
+		);
+		assert.equal(review.binding.contractDigest, trial.respec?.contractDigest);
+
+		const candidate = execFileSync(
+			"git",
+			[
+				"-C",
+				join(f.root, "trial/repository"),
+				"show",
+				"HEAD:test/acceptance/bench-" +
+					trial.id.slice(0, 16) +
+					"/checks/value.test.ts",
+			],
+			{ encoding: "utf8" },
+		);
+
+		assert.ok(candidate.includes("fresh private value"));
+		assert.ok(candidate.includes("factory-holdout-"));
+		assert.ok(trial.accounting.sources.includes("specify/draft"));
+		assert.ok(!trial.accounting.sources.includes("specify"));
+		const compared = JSON.stringify(compareTrials([trial]));
+		assert.ok(!compared.includes("fresh private value"));
+		assert.ok(!compared.includes("factory-holdout-"));
+		t.diagnostic(
+			JSON.stringify({
+				syntheticTask: 1,
+				mode: "respec",
+				outcome: trial.outcome,
+				stages: trial.stages.map((stage) => stage.name),
+				tokens: trial.accounting.chargedTokens,
+				cost: trial.accounting.cost.estimate,
+				billedSpend: trial.accounting.cost.billedSpend,
+			}),
+		);
+		const before = f.calls.length;
+		rmSync(join(f.root, "trial/trial.json"));
+		assert.match((await f.run()).stderr, /trial_incomplete_refusing_resume/);
+		assert.equal(f.calls.length, before);
+	});
+
+	for (const mode of [
+		"unknown",
+		"ambiguous",
+		"revision-unknown",
+		"questions",
+		"judge",
+		"judge-execution",
+		"preserved",
+		"missing-base",
+		"failed-base",
+	] as const)
+		it(`respec refuses ${mode} before any build`, {
+			timeout: 60000,
+		}, async (t) => {
+			const f = await harness(t, false, 1, {
+				respec: mode,
+				ambiguous: mode === "ambiguous",
+			});
+
+			const result = await f.run();
+			assert.equal(result.code, 0, result.stderr);
+			const trial = parseBenchTrial(result.stdout);
+			assert.equal(trial.outcome.kind, "failed");
+			assert.equal(f.buildTools.length, 0);
+
+			if (mode.startsWith("judge") || mode === "preserved") {
+				const draft = JSON.parse(
+					readFileSync(
+						join(f.root, "trial/runtime/accept/draft-1.json"),
+						"utf8",
+					),
+				);
+
+				assert.equal(draft.feedback.verdict, "judge_refused");
+				assert.equal(
+					draft.feedback.reason,
+					mode === "preserved"
+						? "heldout_reads_preserved_test"
+						: mode === "judge"
+							? "judge_restates_gate"
+							: "judge_requires_execution",
+				);
+			}
+
+			assert.equal(
+				trial.outcome.kind === "failed" ? trial.outcome.stage : "",
+				["unknown", "ambiguous", "revision-unknown", "questions"].includes(mode)
+					? "specify"
+					: mode.includes("base")
+						? "accept-base"
+						: "accept",
+			);
+		});
+
+	for (const mode of ["revision", "replacement"] as const)
+		it(`respec retains real specify ${mode} output downstream`, {
+			timeout: 60000,
+		}, async (t) => {
+			const f = await harness(t, false, 1, { respec: mode });
+			const result = await f.run();
+			assert.equal(result.code, 0, result.stderr);
+			const trial = parseBenchTrial(result.stdout);
+			assert.equal(trial.outcome.kind, "passed", JSON.stringify(trial.outcome));
+
+			if (mode === "revision")
+				assert.ok(trial.accounting.sources.includes("specify/revision"));
+			else {
+				const contract = JSON.parse(
+					readFileSync(join(f.root, "trial/respec/contract.json"), "utf8"),
+				);
+
+				assert.equal(contract.replacesTests[0].test, "base");
+				assert.ok(
+					trial.judges.some((judge) =>
+						judge.judgments.some((judgment) => judgment.scenario === "T1"),
+					),
+				);
+			}
+		});
+
+	it("respec caps all authoring work before build without discarding its leaf charges", {
+		timeout: 60000,
+	}, async (t) => {
+		const f = await harness(t, false, 1, { respec: "on" });
+		const result = await f.run(undefined, 1);
+		assert.equal(result.code, 0, result.stderr);
+		const trial = parseBenchTrial(result.stdout);
+		assert.equal(trial.outcome.kind, "budget_exhausted");
+		assert.ok(trial.accounting.chargedTokens > 0);
+		assert.equal(f.buildTools.length, 0);
+	});
+
 	it("refuses a mismatched Docker gate uid before model calls or a claim", {
 		timeout: 60000,
 	}, async (t) => {
