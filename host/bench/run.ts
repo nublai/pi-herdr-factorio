@@ -722,7 +722,7 @@ export async function runBench(
 				guidance: workflow.guidance,
 				metadata: respec,
 				remaining,
-				host: (name, stage, tools) => {
+				host: (name, stage, tools, attempt = 1) => {
 					const settings = workflow.config.stages[stage];
 
 					const fallback =
@@ -738,9 +738,15 @@ export async function runBench(
 						receiptTokens: 0,
 					});
 
-					return (runtime.createHost ?? sandboxHost)(
-						hostConfig(stage, join(state, "runtime", name), authoring, tools),
-					);
+					return (runtime.createHost ?? sandboxHost)({
+						...hostConfig(
+							stage,
+							join(state, "runtime", name),
+							authoring,
+							tools,
+						),
+						attempt,
+					});
 				},
 				stage: async (name, run) => {
 					activeStage = name;
@@ -758,7 +764,9 @@ export async function runBench(
 
 						for (const journal of journals.filter(
 							(journal) =>
-								journal.id.startsWith("specify/") || journal.id === "accept",
+								journal.id.startsWith("specify/") ||
+								journal.id === "accept" ||
+								journal.id === "accept-retry",
 						)) {
 							if (respec.models.some((model) => model.session === journal.id))
 								continue;
@@ -771,7 +779,7 @@ export async function runBench(
 								session: journal.id,
 								requested:
 									workflow.config.stages[
-										journal.id === "accept" ? "accept" : "specify"
+										journal.id.startsWith("accept") ? "accept" : "specify"
 									].model,
 								observed:
 									textOf(

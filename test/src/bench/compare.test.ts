@@ -362,6 +362,46 @@ describe("BenchComparison", () => {
 		assert.equal(result.variants[0]?.summary.passRate.harnessFailures, 0);
 	});
 
+	for (const [stage, reason, expected] of [
+		["accept-base", "preservation_failed", "base"],
+		["accept-base", "base_load_error", "base"],
+		["accept-base", "base_nondeterministic", "base"],
+		["specify", "specify_failed", "attempts"],
+		["specify", "specify_bad_field", "attempts"],
+		["specify", "specify_unknown_path", "attempts"],
+		["specify", "specify_too_large_to_post", "attempts"],
+		["accept", "accept_schema", "attempts"],
+		["accept", "accept_coverage", "attempts"],
+		["accept", "accept_manifest", "attempts"],
+		["accept", "accept_judge_requires_execution", "attempts"],
+		["accept", "accept_heldout_reads_preserved_test", "attempts"],
+		["accept", "accept_failed", "attempts"],
+		["build", "model_failed", "attempts"],
+		["accept", "accept_refused", "provider"],
+		["specify", "specify_refused", "provider"],
+		["accept-base", "base_runner_error", "infrastructure"],
+		["accept-base", "base_timeout", "infrastructure"],
+		["specify", "specify_skills_unavailable", "missing_evidence"],
+		["prepare", "respec_artifact_publish_failed", "infrastructure"],
+	] as const)
+		it(`classifies ${reason} as ${expected}`, () => {
+			const result = compareTrials([
+				{
+					...syntheticTrial(),
+					outcome: { kind: "failed", stage, reason },
+				},
+			]);
+
+			assert.equal(
+				result.tasks[0]?.variants[0]?.trials[0]?.failureClass,
+				expected,
+			);
+			assert.equal(
+				result.variants[0]?.summary.passRate.harnessFailures,
+				["base", "attempts"].includes(expected) ? 0 : 1,
+			);
+		});
+
 	it("H4 keeps candidate, harness, budget and incomplete outcomes separate using factory classes", () => {
 		const failures = [
 			["visible_tests", "visible_tests_failed"],

@@ -188,7 +188,12 @@ no load, runtime, skip, todo, cancellation or tamper failure. Draft and final
 base checks use production's `localRunner` (bubblewrap), including dependency
 and detail-reporter mounts; candidate gates still use the pinned Docker image.
 Final qualification has at most 180 seconds and only the remaining accept wall
-time. It uses production's systemd scope with 2G memory, 512 tasks, 100% CPU,
+time. An author-fixable base refusal gets production's one accept feedback retry,
+subject to the workflow's attempt limit. The retry uses the shared refusal policy,
+bounded feedback and previous-suite prompt. Both attempts and base checks share
+the accept wall allowance and 100,000-token allowance, and the same trial cap.
+The retry has its own `runtime/accept-retry/` receipt and journal; a second
+refusal stops the trial. It uses production's systemd scope with 2G memory, 512 tasks, 100% CPU,
 and stop-on-abort through `localRunner`. The build and visible-test deadline
 starts separately at build start. This deadline change also applies to baseline,
 model and skill trials; their visible-test allowance no longer starts at trial
@@ -198,7 +203,10 @@ The fresh contract, suite, canary-bearing check bytes and digests flow through
 visible tests, replacement policy, gates and review. The old oracle is verified
 as part of the frozen bundle, but never reused for respec validation. Private
 artifacts live under `respec/`; `respec/base-receipt.json` and its digest retain
-the final qualification. Trial `respec` metadata records frozen base/archive and
+the final qualification. Each attempt also retains its receipt and digest under
+`respec/accept-base-<attempt>/`. A retried first suite is retained under
+`respec/accept-base-1/acceptance/`; the current suite stays in `respec/acceptance/`.
+Trial `respec` metadata records frozen base/archive and
 snapshot bindings, generated digests, effective accept effort and per-session
 requested/observed model evidence. Early failures may have null artifacts;
 successful records require complete proof and authoring-stage evidence. Old
@@ -372,10 +380,12 @@ The JSON contains `variants` and `tasks`. Reports include:
   `failureClasses` uses the factory's existing classes. Candidate check and
   policy failures are `candidate`; blocking or unverifiable review judgments
   are `review`. Specify questions are `input`, a specification needs-info outcome
-  counted with candidate failures, never a harness failure. Missing or malformed
-  evidence is `missing_evidence`, caps are
-  `budget`, refusals are `provider`, and other execution failures are
-  `infrastructure`. Install and baseline failures are harness failures, not
+  counted with candidate failures, never a harness failure. Author-fixable base
+  refusals use `base`. Failed model stages and malformed specify or accept output
+  use production's `attempts` class. Both count with candidate failures, not
+  harness failures. Missing or malformed evidence is `missing_evidence`, caps
+  are `budget`, provider refusals are `provider`, and execution failures such
+  as a base runner error or timeout remain `infrastructure`. Install and baseline failures are harness failures, not
   candidate failures. Each trial also reports its class and original reason.
 - Token and wall-time medians, minima, maxima, and counts.
 - A median labelled `api_equivalent_estimate`, minima and maxima, its coverage

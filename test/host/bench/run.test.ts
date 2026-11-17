@@ -37,6 +37,8 @@ import {
 	type SandboxHostConfig,
 } from "../../../host/sandbox/launch.ts";
 import { LineSplitter } from "../../../host/sandbox/lines.ts";
+import { executionCharge } from "../../../host/sandbox/receipts.ts";
+import { ACCEPTANCE_MAX_TOKENS } from "../../../src/contract/acceptance.ts";
 import { runVisibleTests } from "../../../host/sandbox/visible-tests.ts";
 import {
 	startGatewayProcess,
@@ -45,6 +47,11 @@ import {
 import { manifestDigest } from "../../../host/bundle/manifest.ts";
 import { digestOf } from "../../../src/core/run.ts";
 import { SECOND_JUDGE } from "../../../src/candidate/review.ts";
+import {
+	assessBase,
+	baseRetryFeedback,
+	parseBaseReceipt,
+} from "../../../src/candidate/diagnosis.ts";
 import { inlined, specifySourceFacts } from "../../../src/contract/prompt.ts";
 import { scopeOwner } from "../../../host/isolation/scope.ts";
 import { stageBenchPaths, type BenchRuntime } from "../../../host/bench/run.ts";
@@ -113,7 +120,9 @@ async function harness(
 			| "preserved"
 			| "replacement"
 			| "missing-base"
-			| "failed-base";
+			| "failed-base"
+			| "preservation-retry"
+			| "preservation-twice";
 	} = {},
 	suiteCleanup: (run: () => void) => void = after,
 ) {
@@ -183,7 +192,14 @@ async function harness(
 	const buildTools: (readonly string[])[] = [];
 	let service = "not-found";
 	const auditFiles: string[] = [];
-	const reservations: { stage: string; reserve: boolean | undefined }[] = [];
+
+	const reservations: {
+		stage: string;
+		reserve: boolean | undefined;
+		tokens: number;
+		attempt: number;
+	}[] = [];
+
 	let visibleDeadline: number | undefined;
 	let buildHostAt = 0;
 
@@ -279,6 +295,8 @@ async function harness(
 					reservations.push({
 						stage: basename(config.stageDir ?? ""),
 						reserve: spec.table.ceiling.reserve,
+						tokens: spec.table.ceiling.modelTokens,
+						attempt: config.attempt,
 					});
 					auditFiles.push(spec.auditPath);
 
@@ -411,9 +429,19 @@ async function harness(
 																),
 															}
 														: {}),
-												acceptance: draft.acceptance.map(
-													({ id: _id, ...criterion }) => criterion,
-												),
+												acceptance: [
+													...draft.acceptance.map(
+														({ id: _id, ...criterion }) => criterion,
+													),
+													...(options.respec?.startsWith("preservation-")
+														? [
+																{
+																	kind: "preservation",
+																	text: "Keep the base value.",
+																},
+															]
+														: []),
+												],
 												...(["unknown", "ambiguous", "replacement"].includes(
 													options.respec ?? "",
 												) ||
@@ -462,16 +490,42 @@ async function harness(
 													}
 												: scenario,
 									),
-									files: f.suite.files.map((file) => ({
-										...file,
-										content:
-											options.respec === "preserved"
-												? "import { readFileSync } from 'node:fs'; readFileSync('test/src/value.test.ts', 'utf8');\n"
-												: file.content.replace(
-														"private value",
-														"fresh private value",
+									...(options.respec?.startsWith("preservation-")
+										? {
+												scenarios: [
+													...f.suite.scenarios.map(
+														({ kind: _kind, ...scenario }) => scenario,
 													),
-									})),
+													{
+														id: "S3",
+														criteria: ["A2"],
+														checks: ["preserve.test.ts"],
+														judge: null,
+													},
+												],
+											}
+										: undefined),
+									files: [
+										...f.suite.files.map((file) => ({
+											...file,
+											content:
+												options.respec === "preserved"
+													? "import { readFileSync } from 'node:fs'; readFileSync('test/src/value.test.ts', 'utf8');\n"
+													: file.content.replace(
+															"private value",
+															"fresh private value",
+														),
+										})),
+										...(options.respec?.startsWith("preservation-")
+											? [
+													{
+														path: "preserve.test.ts",
+														type: "node:test",
+														content: `import assert from 'node:assert/strict'; import { test } from 'node:test'; import { value } from '../../../../src/value.ts'; test('preserve base value', () => ${options.respec === "preservation-twice" || basename(config.stageDir ?? "") === "accept" ? "assert.equal(value, 1)" : "assert.ok(Number.isInteger(value))"});\n`,
+													},
+												]
+											: []),
+									],
 								});
 							} else if (config.stage === "build") {
 								put(
@@ -985,6 +1039,119 @@ describe("bench run offline CLI", (suite) => {
 						judge.judgments.some((judgment) => judgment.scenario === "T1"),
 					),
 				);
+			}
+		});
+
+	for (const mode of ["preservation-retry", "preservation-twice"] as const)
+		it(`respec gives ${mode} exactly one production feedback retry`, {
+			timeout: 60000,
+		}, async (t) => {
+			const f = await harness(t, false, 1, { respec: mode });
+			const result = await f.run();
+			assert.equal(result.code, 0, result.stderr);
+			const trial = parseBenchTrial(result.stdout);
+			assert.equal(
+				trial.outcome.kind,
+				mode === "preservation-retry" ? "passed" : "failed",
+				JSON.stringify(trial.outcome),
+			);
+			assert.equal(
+				trial.stages.filter(({ name }) => name === "accept").length,
+				2,
+			);
+			assert.equal(
+				trial.stages.filter(({ name }) => name === "accept-base").length,
+				2,
+			);
+			assert.ok(trial.accounting.sources.includes("accept"));
+			assert.ok(trial.accounting.sources.includes("accept-retry"));
+			assert.ok(
+				trial.respec?.models.some(({ session }) => session === "accept-retry"),
+			);
+
+			const first = parseBaseReceipt(
+				readFileSync(
+					join(f.root, "trial/respec/accept-base-1/base-receipt.json"),
+					"utf8",
+				),
+			);
+
+			assert.ok(first);
+			const { assessment } = assessBase(first.evidence);
+			assert.equal(assessment.kind, "refused");
+
+			if (assessment.kind !== "refused") return;
+			assert.equal(assessment.failure.reason, "preservation_failed");
+
+			const retry = f.prompts.find((prompt) =>
+				prompt.includes("<base-refusal-"),
+			);
+
+			assert.ok(
+				retry?.includes(
+					JSON.stringify(
+						baseRetryFeedback(first, assessment.failure),
+					).replaceAll("<", "\\u003c"),
+				),
+			);
+			assert.ok(retry?.includes("preserve base value"));
+			assert.ok(retry?.includes("<previous-suite-"));
+
+			const charge = await executionCharge(
+				join(f.root, "trial/runtime/accept"),
+			);
+
+			assert.ok(charge);
+			assert.equal(
+				f.reservations.find(({ stage }) => stage === "accept-retry")?.tokens,
+				ACCEPTANCE_MAX_TOKENS - charge.total,
+			);
+			assert.equal(
+				f.reservations.find(({ stage }) => stage === "accept-retry")?.attempt,
+				2,
+			);
+
+			const charges = await Promise.all(
+				trial.accounting.sources.map((source) =>
+					executionCharge(join(f.root, "trial/runtime", source)),
+				),
+			);
+
+			assert.ok(charges.every((charge) => charge !== null));
+			assert.equal(
+				trial.accounting.chargedTokens,
+				charges.reduce((sum, charge) => sum + (charge?.total ?? 0), 0),
+			);
+
+			if (trial.outcome.kind === "failed") {
+				assert.equal(trial.outcome.reason, "preservation_failed");
+				assert.equal(f.buildTools.length, 0);
+			}
+		});
+
+	for (const cap of [48, 49])
+		it(`respec keeps the feedback retry within the same ${cap}-token trial cap`, {
+			timeout: 60000,
+		}, async (t) => {
+			const f = await harness(t, false, 1, { respec: "preservation-retry" });
+			const result = await f.run(undefined, cap);
+			assert.equal(result.code, 0, result.stderr);
+			const trial = parseBenchTrial(result.stdout);
+
+			assert.equal(f.buildTools.length, 0);
+			assert.equal(trial.outcome.kind, "budget_exhausted");
+			assert.equal(trial.outcome.stage, "accept");
+			assert.equal(
+				trial.stages.filter(({ name }) => name === "accept").length,
+				cap === 48 ? 1 : 2,
+			);
+
+			if (cap === 49) {
+				assert.equal(
+					f.reservations.find(({ stage }) => stage === "accept-retry")?.tokens,
+					1,
+				);
+				assert.ok(trial.accounting.sources.includes("accept-retry"));
 			}
 		});
 

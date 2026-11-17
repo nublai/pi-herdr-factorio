@@ -1774,6 +1774,14 @@ describe("specify prompt", () => {
 		assert.ok(!prompt.includes("122\txxx"));
 	});
 
+	it("requires repository file paths rather than directories in files", () => {
+		assert.ok(
+			prompt.includes(
+				"files entries must be repository file paths, not directories.",
+			),
+		);
+	});
+
 	it("carries the guidance at the base commit, the map and the numbered files", () => {
 		assert.ok(prompt.includes(`at commit ${base}`));
 		assert.ok(

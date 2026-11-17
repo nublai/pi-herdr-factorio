@@ -433,6 +433,7 @@ export function parseBenchTrial(raw: string): BenchTrial {
 						"specify/review",
 						"specify/revision",
 						"accept",
+						"accept-retry",
 					].includes(model.session) ||
 					(model.fallback !== null && !isModelId(model.fallback)),
 			))
