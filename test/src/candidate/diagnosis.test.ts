@@ -422,6 +422,7 @@ async function drive(t: { after(fn: () => void): void }, raw: Entry) {
 
 	const ci = await checkCandidate({
 		repository: f.repo,
+		targetRepository: contract.base.repo,
 		gateSha: f.gateSha,
 		candidateSha,
 		nonce,
@@ -2129,6 +2130,7 @@ async function jobWorld(
 
 	const ci = await checkCandidate({
 		repository: f.repo,
+		targetRepository: binding.repo,
 		gateSha: ciGate,
 		candidateSha,
 		nonce,
