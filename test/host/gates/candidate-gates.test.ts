@@ -3557,6 +3557,44 @@ export default eslintCompatPlugin({
 	return { ...f, gateSha: f.commit() };
 }
 
+test("R4 materializes an empty replacement list without expanding the test inventory", async (t) => {
+	const f = repo(t);
+	const path = "test/value.test.ts";
+	f.git("mv", "test/src/example/value.test.ts", path);
+	const gateSha = f.commit();
+	f.put("src/value.ts", 'export const value = "candidate";\n');
+	const candidateSha = f.commit();
+	const dest = join(f.root, "materialized");
+
+	const result = await materializeCandidate({
+		repository: f.root,
+		gateSha,
+		candidateSha,
+		dest,
+		replacements: [],
+	});
+
+	assert.deepEqual(result, { ignoredChanges: [], newTests: [] });
+	assert.equal(
+		readFileSync(join(dest, "src/value.ts"), "utf8"),
+		'export const value = "candidate";\n',
+	);
+	assert.equal(
+		readFileSync(join(dest, path), "utf8"),
+		readFileSync(join(f.root, path), "utf8"),
+	);
+	await assert.rejects(
+		materializeCandidate({
+			repository: f.root,
+			gateSha,
+			candidateSha,
+			dest: join(f.root, "replacement-refused"),
+			replacements: [{ path, test: "value", reason: "Not in the inventory" }],
+		}),
+		/missing_tests/,
+	);
+});
+
 test("R4 accepts a named replacement in the configured test/test.ts and preserves its unnamed tests", async (t) => {
 	const f = agentsRepo(t);
 	const path = "test/test.ts";

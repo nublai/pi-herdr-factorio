@@ -677,13 +677,13 @@ export async function materializeCandidate(input: {
 	const base = await entries(input.repository, input.gateSha);
 	const candidate = await entries(input.repository, input.candidateSha);
 	await exportTree(input.repository, input.gateSha, input.dest);
-	const policy = manifestOf(input.dest);
+	const policy = gatePolicyOf(input.dest);
 
 	const replacements = checkReplacements(
 		base,
 		candidate,
 		input.replacements,
-		policy.tests,
+		input.replacements.length > 0 ? manifestOf(input.dest).tests : [],
 	);
 
 	if (input.tooling !== "running-product") {
@@ -761,13 +761,13 @@ export function materializeFromDirectories(input: {
 }) {
 	const base = inventory(input.gateTree);
 	const candidate = inventory(input.candidateTree);
-	const policy = manifestOf(input.gateTree);
+	const policy = gatePolicyOf(input.gateTree);
 
 	const replacements = checkReplacements(
 		base,
 		candidate,
 		input.replacements,
-		policy.tests,
+		input.replacements.length > 0 ? manifestOf(input.gateTree).tests : [],
 	);
 
 	pinnedMaterializerIdentity(input.gateTree);
