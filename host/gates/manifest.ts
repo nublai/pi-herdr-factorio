@@ -431,7 +431,7 @@ function checkToolConfigs(tree: string, policy: GatePolicy): void {
 		const frozen = owner.startsWith("/g/tooling/");
 
 		if (!ref.startsWith(".") && !ref.startsWith("/") && !project) {
-			if (frozen) return;
+			if (frozen && plugin) return;
 			throw new Error("invalid_gate_manifest");
 		}
 

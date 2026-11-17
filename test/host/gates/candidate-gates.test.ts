@@ -5511,6 +5511,29 @@ test("837a refuses attached config paths, mutable documentation configs and unsu
 	assert.throws(() => manifestOf(f.root), /^Error: invalid_gate_manifest$/);
 });
 
+for (const [label, config, text] of [
+	["TypeScript extends", "tsconfig.json", '{"extends":"@vendor/tsconfig"}'],
+	[
+		"config import",
+		"oxlint.config.ts",
+		'import rules from "@vendor/config"; export default {rules};',
+	],
+] as const)
+	test(`837a refuses unresolved frozen package config: ${label}`, (t) => {
+		const f = permissiveAgentsRepo(t, {
+			typecheck: [
+				"node",
+				"/g/tooling/node_modules/typescript/bin/tsc",
+				"--noEmit",
+				"-p",
+				"/g/tooling/tsconfig.json",
+			],
+		});
+
+		f.put(config, text);
+		assert.throws(() => manifestOf(f.root), /^Error: invalid_gate_manifest$/);
+	});
+
 const CHECK_SCRIPT = "/g/tooling/scripts/check.mjs";
 
 const NODE_CODE_ARGV = [
