@@ -46,7 +46,7 @@ const LEGACY_TEST_GLOB =
 	/^test\/(?:(?:src|host)\/\*\*\/\*\.test\.ts|integration\/\*\.test\.ts)$/;
 
 const NODE_CODE_FLAG =
-	/^(?:-r|--(?:import|require|loader|experimental-loader|eval|print)(?:=|$)|--(?:env-file|inspect))/;
+	/^(?:-[re]|--(?:import|require|loader|experimental-loader|eval|print)(?:=|$)|--(?:env-file|inspect))/;
 
 const CONFIG_FLAGS = new Set([
 	"-c",

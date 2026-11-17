@@ -5378,6 +5378,8 @@ test("837a refuses relay preload, environment and inspector flags at every argv 
 	for (const flag of [
 		"-r",
 		"-r./maestro/x.cjs",
+		"-e",
+		"-eprocess.exit(0)",
 		"--require",
 		"--import",
 		"--loader",
@@ -5393,9 +5395,13 @@ test("837a refuses relay preload, environment and inspector flags at every argv 
 			["node", "/g/tooling/node_modules/tsx/dist/cli.mjs"],
 		])
 			for (const args of [
-				[flag, "./maestro/x.cjs"],
-				[`${flag}=./maestro/x.cjs`],
-				["/g/tooling/node_modules/typescript/bin/tsc", flag, "./maestro/x.cjs"],
+				[flag, "/g/tooling/scripts/exit.mjs"],
+				[`${flag}=/g/tooling/scripts/exit.mjs`],
+				[
+					"/g/tooling/node_modules/typescript/bin/tsc",
+					flag,
+					"/g/tooling/scripts/exit.mjs",
+				],
 			]) {
 				const argv = [...relay, ...args];
 
