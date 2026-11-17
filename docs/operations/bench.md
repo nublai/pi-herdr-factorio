@@ -528,6 +528,18 @@ task bundles and a Git bundle of the desired committed factory checkout.
    `$HOME/bench/gate-smoke/receipt.json`, including an `install` check with
    `exitCode: 0`. Stop on any failure. Do not spend model tokens until this
    preflight passes. It makes npm registry requests but no model requests.
+
+   The 360-second gate limit applies to `baseline_tests` only, not to the
+   preflight's total wall time. The runner derives every later check's deadline
+   from the measured baseline. Record every check's duration with the trial
+   evidence.
+
+   Size the host with that limit in mind. At `76826ef`, `baseline_tests` took
+   about 177 seconds on 4 vCPU and about 312 seconds on 2 vCPU. That leaves a
+   thin margin at 2 vCPU, which is the bench's resting size. Each trial's
+   validation runs the same gate. If a growing suite pushes the baseline near
+   360 seconds, ask the owner to resize the VM before a trial series. Never
+   raise the limit.
 4. Set the private task and variant paths. Generate the baseline's pins from
    the installed files, not from a copied example.
 
