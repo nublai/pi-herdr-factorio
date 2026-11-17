@@ -1,4 +1,4 @@
-import { globSync, readFileSync } from "node:fs";
+import { existsSync, globSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
 	arrayOf,
@@ -338,6 +338,18 @@ export function gatePolicyOf(tree: string): GatePolicy {
 		throw new Error("missing_checks");
 
 	return { checks, sourceRoots, testGlobs };
+}
+
+export function sourceRootsIn(tree: string): readonly string[] {
+	const path = join(tree, ".github/factory/gates/gates.json");
+
+	const value = existsSync(path)
+		? objectOf(parseJson(readFileSync(path, "utf8")))
+		: null;
+
+	return fieldOf(value, "version") === 2
+		? gatePolicyOf(tree).sourceRoots
+		: SOURCE;
 }
 
 export function manifestOf(tree: string) {

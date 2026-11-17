@@ -28,7 +28,7 @@ import {
 	CONTROL_PLANE_PREFIX,
 	COORDINATOR_ONLY_FILES,
 } from "../../src/trust/protected-paths.ts";
-import { gatePolicyOf, SOURCE } from "./manifest.ts";
+import { sourceRootsIn } from "./manifest.ts";
 import { CLEAN_ENV, command } from "./runner.ts";
 
 export const MATERIALIZER_FILES = [
@@ -254,12 +254,6 @@ function checkReplacements(
 	return replacements;
 }
 
-function gateRootsOf(gateTree: string): readonly string[] {
-	return existsSync(join(gateTree, ".github/factory/gates/gates.json"))
-		? gatePolicyOf(gateTree).sourceRoots
-		: SOURCE;
-}
-
 function overlay(input: {
 	readonly base: Inventory;
 	readonly candidate: Inventory;
@@ -381,7 +375,7 @@ export async function materializeCandidate(input: {
 	const candidate = await entries(input.repository, input.candidateSha);
 	const replacements = checkReplacements(base, candidate, input.replacements);
 	await exportTree(input.repository, input.gateSha, input.dest);
-	const sourceRoots = gateRootsOf(input.dest);
+	const sourceRoots = sourceRootsIn(input.dest);
 	const temp = mkdtempSync(join(dirname(input.dest), "candidate-"));
 
 	try {
@@ -443,7 +437,7 @@ export function materializeFromDirectories(input: {
 	const base = inventory(input.gateTree);
 	const candidate = inventory(input.candidateTree);
 	const replacements = checkReplacements(base, candidate, input.replacements);
-	const sourceRoots = gateRootsOf(input.gateTree);
+	const sourceRoots = sourceRootsIn(input.gateTree);
 	cpSync(input.gateTree, input.dest, { recursive: true, errorOnExist: true });
 
 	return overlay({
