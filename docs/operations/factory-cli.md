@@ -600,14 +600,20 @@ The command starts from the gate tree and reads main's gate policy, `.github/fac
 
   Relative arguments are not checked, because checks need them to name their targets, such as `pi-extension`. The validator therefore does not confine what a tool reads under `/w`. A tool given a relative path, or one that discovers configuration by itself, can still read candidate files there. The protection against candidate tool configuration is the version 2 pinning below, not the validator. These refusals are cheap checks, not proof that a command checks anything. Main's policy is owner-reviewed, and the gates trust its argv.
 
-Under version 2, a candidate cannot change lint, format or typecheck configuration through a file inside a source root. After the overlay, the gate keeps main's copy of each file below inside every source root and removes any copy main does not have. It also removes these files when the candidate adds them under `test/`. The pinning covers the files a tool discovers by itself. It does not cover two shapes that only main's own policy can create, so main's policy must not use either: a configuration file that main's command names by a relative path inside a source root, and a `tsconfig` `extends` target that is not a plain relative `.json` path. Both stay candidate-controlled. The pinned files are:
+Under version 2, the gate pins the configuration files listed below inside every source root. After the overlay, it keeps main's copy of each listed file and removes any copy main does not have. It also removes these files when the candidate adds them under `test/`. The pinning covers these file names and the plain relative `.json` targets a main `tsconfig` names. Anything else that main's own tool configuration or command loads from inside a source root stays candidate-controlled:
+
+- a configuration file that main's command names by a relative path, such as `-c pi-extension/lint.json` or `-p pi-extension/tsconfig.jsonc`;
+- a module or file that main's configuration imports or extends under any other name, such as an `oxlint.config.ts` importing `./pi-extension/rules.ts`, or an `.oxlintrc.json` or `biome.json` extending `./pi-extension/extra.json`;
+- a `tsconfig` `extends` or `references` target that is not a plain relative `.json` path, such as `.jsonc`, a name without an extension, an absolute `/w/` path or a path without `./`.
+
+Main's tool configuration must therefore live outside the source roots and must not reference files inside them. #837 tracks closing these paths in code before any dispatch on a repository other than Factorio. The pinned files are:
 
 - `.oxlintrc*` and `oxlint.config.*`;
 - `.eslintrc*`, `eslint.config.*` and `.eslintignore`;
 - `.prettierrc*`, `prettier.config.*`, `.prettierignore` and `package.yaml`;
 - `biome.json`, `biome.jsonc`, `.biome.json` and `.biome.jsonc`;
 - `tsconfig*.json` and `jsconfig*.json`;
-- every `.json` file inside a source root that a main `tsconfig*.json` or `jsconfig*.json` names by a relative path, such as an `extends` target, followed transitively;
+- every `.json` file inside a source root that a main `tsconfig*.json` or `jsconfig*.json` names by a plain relative `./` or `../` path ending in `.json`, such as an `extends` target, followed transitively;
 - `.npmrc`, `.env`, `.env.*`, `.node-version` and `.nvmrc`;
 - `.editorconfig`, `.gitignore` and `.ignore`.
 
