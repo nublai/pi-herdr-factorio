@@ -38,6 +38,7 @@ export async function benchFixture(
 		ignored?: boolean;
 		large?: boolean;
 		ambiguous?: boolean;
+		repositoryGatePolicy?: boolean;
 	} = {},
 ) {
 	const repository = join(root, "source");
@@ -49,14 +50,29 @@ export async function benchFixture(
 	put(
 		repository,
 		".github/factory/gates/gates.json",
-		JSON.stringify({
-			version: 1,
-			testGlobs: ["test/src/**/*.test.ts"],
-			checks: ["typecheck", "lint", "format", "layout", "decisions"].map(
-				(name) => ({ name, argv: ["node", "-e", "0"] }),
-			),
-		}),
+		JSON.stringify(
+			options.repositoryGatePolicy
+				? {
+						version: 2,
+						sourceRoots: ["src"],
+						testGlobs: ["test/src/**/*.test.ts"],
+						checks: ["typecheck", "lint", "format"].map((name) => ({
+							name,
+							argv: ["node", "/g/tooling/tools/check.mjs"],
+						})),
+					}
+				: {
+						version: 1,
+						testGlobs: ["test/src/**/*.test.ts"],
+						checks: ["typecheck", "lint", "format", "layout", "decisions"].map(
+							(name) => ({ name, argv: ["node", "-e", "0"] }),
+						),
+					},
+		),
 	);
+
+	if (options.repositoryGatePolicy)
+		put(repository, "tools/check.mjs", "process.exit(0);\n");
 	const checkout = fileURLToPath(new URL("../../..", import.meta.url));
 
 	for (const file of ["freeze.mjs", "reporter.mjs", "scan-rules.json"])
