@@ -1,3 +1,4 @@
+import { matchesGlob } from "node:path";
 import {
 	type PatchBinding,
 	type PatchRead,
@@ -11,10 +12,11 @@ import type {
 	CandidateEvent,
 	PrObservation,
 } from "../candidate/handoff.ts";
-import type {
-	ReviewInput,
-	ReviewInputRefusal,
-	ReviewReceipt,
+import {
+	type ReviewInput,
+	type ReviewInputRefusal,
+	type ReviewReceipt,
+	trustedTestGlobsOf,
 } from "../candidate/review.ts";
 import type {
 	CandidateEffect,
@@ -60,6 +62,7 @@ import type {
 	StageUsage,
 } from "../core/execution.ts";
 import type { FamilyInput } from "../core/models.ts";
+import { fieldOf, objectOf, parseJson } from "../core/json.ts";
 import { type Digest, type Verdict, digestOf } from "../core/run.ts";
 import type { ExecutionStage, ModelStage } from "../core/stages.ts";
 import type { SnapshotSource } from "../trust/admission.ts";
@@ -126,8 +129,10 @@ export type StageLaunchInput = {
 	readonly prompt: string;
 	readonly source?: SourceFacts;
 	readonly specify?: SpecifyReviewInput;
+	readonly testFiles?: readonly string[];
 	readonly acceptDraft?: {
 		readonly files: ReadonlySet<string>;
+		readonly preservedTests?: ReadonlySet<string>;
 		readonly contract: Contract;
 		readonly digest: ContractDigest;
 		readonly repo: RepoSlug;
@@ -349,6 +354,7 @@ export type Checkout = {
 	readonly files: readonly string[];
 	/** A listed file's text, or `null` when it is over `capBytes` or unreadable. */
 	read(path: string, capBytes: number): Promise<string | null>;
+	readBase?(path: string, capBytes: number): Promise<string | null>;
 };
 
 export type CheckoutResult =
@@ -363,6 +369,7 @@ export type CheckoutResult =
 export type StageInputs = {
 	readonly contract?: Extract<ContractRead, { kind: "found" }>;
 	readonly files: ReadonlySet<string>;
+	readonly preservedTests?: ReadonlySet<string>;
 	readonly source: SnapshotSource;
 	readonly link: Link | null;
 };
@@ -376,6 +383,7 @@ type Prepared = {
 	readonly source?: SourceFacts;
 	readonly build?: StageLaunchInput["build"];
 	readonly specify?: SpecifyReviewInput;
+	readonly testFiles?: readonly string[];
 };
 
 export const UNPREPARED: Prepared = { kind: "ready", inputs: null, prompt: "" };
@@ -519,6 +527,46 @@ export async function stageInputs(
 
 	if (parsed.kind === "invalid") return fail("workflow_invalid");
 
+	let testFiles: readonly string[] | undefined;
+	let preservedTests: ReadonlySet<string> | undefined;
+
+	if (
+		run.stage !== "build" &&
+		checkout.files.includes(".github/factory/gates/gates.json")
+	) {
+		const text = await checkout.readBase?.(
+			".github/factory/gates/gates.json",
+			256 * 1024,
+		);
+
+		if (text == null) return fail("test_inventory_unavailable");
+		const policy = objectOf(parseJson(text));
+		const version = fieldOf(policy, "version");
+		const globs = trustedTestGlobsOf(fieldOf(policy, "testGlobs"));
+
+		if ((version !== 1 && version !== 2) || globs === null)
+			return fail("test_inventory_invalid");
+
+		const groups = globs.map((glob) =>
+			checkout.files.filter(
+				(path) =>
+					!path.startsWith("test/acceptance/") &&
+					!path.startsWith("test/fixtures/") &&
+					matchesGlob(path, glob),
+			),
+		);
+
+		testFiles = groups.flat().sort();
+
+		if (
+			groups.some((files) => files.length === 0) ||
+			new Set(testFiles).size !== testFiles.length
+		)
+			return fail("test_inventory_invalid");
+
+		if (version === 2) preservedTests = new Set(testFiles);
+	}
+
 	if (contract?.kind === "found") {
 		const shown = await sourceExcerpts({
 			files: contract.contract.files,
@@ -527,6 +575,7 @@ export async function stageInputs(
 			identity: `${repo}@${run.workflowSha}${run.stage === "build" && (run.round ?? 0) > 0 ? ` workspace-r${run.round}-${run.attempt}` : ""}`,
 			repair: run.stage === "build" && (run.round ?? 0) > 0,
 			accept: run.stage === "accept",
+			testFiles: preservedTests,
 		});
 
 		let build: Prepared["build"];
@@ -598,6 +647,7 @@ export async function stageInputs(
 			inputs: {
 				contract,
 				files: new Set(checkout.files),
+				preservedTests,
 				source: contract.contract.snapshot.source,
 				link: null,
 			},
@@ -679,6 +729,7 @@ export async function stageInputs(
 	return {
 		kind: "ready",
 		inputs: { files: set, source: stored.receipt.snapshotSource, link },
+		testFiles,
 		source: specifySourceFacts(shown),
 		specify: { title, body, answers, files: checkout.files },
 		prompt: specifyPrompt({

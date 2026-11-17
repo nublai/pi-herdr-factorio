@@ -12,7 +12,7 @@ import {
 	rmSync,
 	writeFileSync,
 } from "node:fs";
-import { dirname, join, posix, resolve } from "node:path";
+import { dirname, join, matchesGlob, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ReplacedTest } from "../../src/contract/contract.ts";
 import { hasControl } from "../../src/contract/parse.ts";
@@ -546,6 +546,7 @@ function overlay(input: {
 	readonly dest: string;
 	readonly sourceRoots: readonly string[];
 	readonly pinToolConfig: boolean;
+	readonly testGlobs: readonly string[];
 	readonly replacements: readonly GateReplacement[];
 	readonly heldoutDir?: string;
 	readonly heldoutDigest?: string;
@@ -622,7 +623,10 @@ function overlay(input: {
 
 			if (
 				additional &&
-				/\.(?:test|cases)\.[cm]?[jt]s$/.test(path) &&
+				(input.pinToolConfig
+					? input.testGlobs.some((glob) => matchesGlob(path, glob)) &&
+						!path.startsWith("test/fixtures/")
+					: /\.(?:test|cases)\.[cm]?[jt]s$/.test(path)) &&
 				!path.startsWith(ACCEPTANCE_SUITE_PREFIX)
 			)
 				newTests.push(path);
@@ -712,6 +716,7 @@ export async function materializeCandidate(input: {
 			candidateDir: join(temp, "tree"),
 			sourceRoots: policy.sourceRoots,
 			pinToolConfig: policy.version === 2,
+			testGlobs: policy.testGlobs,
 			replacements,
 		});
 	} finally {
@@ -780,6 +785,7 @@ export function materializeFromDirectories(input: {
 		candidateDir: input.candidateTree,
 		sourceRoots: policy.sourceRoots,
 		pinToolConfig: policy.version === 2,
+		testGlobs: policy.testGlobs,
 		replacements,
 	});
 }

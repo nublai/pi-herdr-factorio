@@ -213,8 +213,10 @@ async function acceptExcerpts(
 	const evidence = input.evidence.filter((e) => acceptanceSourcePath(e.path));
 	const sources = [...new Set([...evidence.map((e) => e.path), ...named])];
 
-	const tests = files.filter((path) =>
-		/\.(?:test|spec|cases)\.[cm]?[jt]sx?$/.test(path),
+	const tests = files.filter(
+		(path) =>
+			input.testFiles?.has(path) ??
+			/\.(?:test|spec|cases)\.[cm]?[jt]sx?$/.test(path),
 	);
 
 	const harness = new Set(sources.filter((path) => tests.includes(path)));
@@ -488,6 +490,7 @@ export async function sourceExcerpts(input: {
 	readonly identity: string;
 	readonly repair?: boolean;
 	readonly accept?: boolean;
+	readonly testFiles?: ReadonlySet<string>;
 }): Promise<InlinedFile[]> {
 	if (input.accept) return acceptExcerpts(input);
 	const paths = new Set([...input.evidence.map((e) => e.path), ...input.files]);

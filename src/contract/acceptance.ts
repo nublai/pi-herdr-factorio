@@ -680,6 +680,7 @@ export function writeAcceptance(
 	text: string,
 	contract: Pick<Contract, "acceptance" | "replacesTests">,
 	existingFiles: ReadonlySet<string>,
+	preservedTests?: ReadonlySet<string>,
 ): AcceptanceOutput {
 	const parsed = parseAcceptance(text, contract);
 
@@ -693,7 +694,8 @@ export function writeAcceptance(
 				for (const path of literalTestReads(file.content, file.path)) {
 					if (
 						path.startsWith("test/") &&
-						/\.(?:test|cases)\.[cm]?[jt]s$/.test(path) &&
+						(preservedTests?.has(path) ??
+							/\.(?:test|cases)\.[cm]?[jt]s$/.test(path)) &&
 						existingFiles.has(path) &&
 						!(contract.replacesTests ?? []).some((entry) => entry.path === path)
 					)

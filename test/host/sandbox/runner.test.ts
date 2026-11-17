@@ -10925,6 +10925,70 @@ describe("controller-run specify review", () => {
 		}
 	});
 
+	it("837c specify uses the trusted base inventory despite a workspace policy edit", async () => {
+		for (const [path, expected] of [
+			["test/test.ts", "passed"],
+			["test/helper.ts", "failed"],
+		] as const) {
+			const draft = JSON.stringify({
+				kind: "contract",
+				summary: "Change named test",
+				behavior: ["New behavior"],
+				acceptance: [{ kind: "new_behavior", text: "New behavior" }],
+				exclusions: [],
+				compatibility: [],
+				limits: [],
+				files: [path],
+				evidence: [],
+				replacesTests: [{ path, test: "changed", reason: "Ticket" }],
+			});
+
+			const h = setup(expected === "passed" ? [draft, CLEAN_REVIEW] : [draft]);
+
+			try {
+				mkdirSync(join(h.dir, "test"), { recursive: true });
+
+				for (const name of ["test/test.ts", "test/helper.ts"])
+					writeFileSync(
+						join(h.dir, name),
+						'import { test } from "node:test"; test("changed", () => {});\n',
+					);
+				writeFileSync(
+					join(h.dir, ".github/factory/gates/gates.json"),
+					JSON.stringify({
+						version: 2,
+						sourceRoots: ["src"],
+						testGlobs: ["test/helper.ts"],
+						checks: ["typecheck", "lint", "format"].map((name) => ({
+							name,
+							argv: ["/g/tooling/node_modules/.bin/biome", "format", "src"],
+						})),
+					}),
+				);
+				mkdirSync(join(h.dir, "src"), { recursive: true });
+				const specify = h.run.specify;
+				assert.ok(specify);
+
+				const result = await specifyModule.runSpecify(
+					{
+						...h.run,
+						testFiles: ["test/test.ts"],
+						specify: {
+							...specify,
+							files: ["test/test.ts", "test/helper.ts"],
+						},
+					},
+					h.dir,
+					h.create,
+				);
+
+				assert.equal(result.kind, expected, path);
+			} finally {
+				h.close();
+			}
+		}
+	});
+
 	it("R4 validates configured non-suffix replacements and refuses helpers or undeclared names at specify", async () => {
 		for (const [path, source, expected] of [
 			[
@@ -10982,6 +11046,7 @@ describe("controller-run specify review", () => {
 				const result = await specifyModule.runSpecify(
 					{
 						...h.run,
+						testFiles: ["test/test.ts"],
 						specify: { ...specify, files: [path] },
 					},
 					h.dir,

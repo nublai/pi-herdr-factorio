@@ -3650,10 +3650,12 @@ export class Orchestrator {
 			prompt: prepared.prompt,
 			source: prepared.source,
 			specify: prepared.specify,
+			testFiles: prepared.testFiles,
 			acceptDraft:
 				stage === "accept" && prepared.inputs?.contract !== undefined
 					? {
 							files: prepared.inputs.files,
+							preservedTests: prepared.inputs.preservedTests,
 							contract: prepared.inputs.contract.contract,
 							digest: prepared.inputs.contract.digest,
 							repo: prepared.inputs.contract.contract.base.repo,

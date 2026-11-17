@@ -17,6 +17,11 @@ import { fileRunFiles } from "../../../host/controller/run-files.ts";
 import { pinVerification } from "../../../host/controller/state.ts";
 import { readRunCharges } from "../../../host/controller/terminal.ts";
 import { digestOf } from "../../../src/core/run.ts";
+import {
+	type Contract,
+	contractBytes,
+	contractDigestOf,
+} from "../../../src/contract/contract.ts";
 import { isGitSha } from "../../../src/config/schema.ts";
 import { isRepoSlug } from "../../../src/trust/platform.ts";
 import { EXE_DEV_PLATFORM } from "../../../src/trust/platform.ts";
@@ -107,6 +112,152 @@ test("host pin prepares trusted policy and restores pristine checkout without a 
 			statSync(join(state, "accounting", runId, "policy.json")).mode & 0o777,
 			0o600,
 		);
+	} finally {
+		remove();
+	}
+});
+
+test("837c fresh-process recovery of a pre-inventory claim reloads base policy, never workspace policy", async () => {
+	const { root, remove } = fixture();
+
+	try {
+		const state = join(root, "state");
+		const files = fileRunFiles(state);
+		await files.ensureWorkspace(runId);
+		const workspace = files.workspacePath(runId);
+
+		const paths = [
+			".github/factory/WORKFLOW.md",
+			".github/factory/gates/gates.json",
+			"test/test.ts",
+			"test/helper.ts",
+		];
+
+		const base = join(root, "base/repo");
+		mkdirSync(join(base, ".github/factory/gates"), { recursive: true });
+		mkdirSync(join(base, "test"), { recursive: true });
+		writeFileSync(join(base, paths[0] ?? ""), TRUSTED_WORKFLOW);
+		writeFileSync(
+			join(base, paths[1] ?? ""),
+			JSON.stringify({ version: 2, testGlobs: ["test/test.ts"] }),
+		);
+		writeFileSync(
+			join(base, "test/test.ts"),
+			'import { test } from "node:test"; test("preserved", () => {});',
+		);
+		writeFileSync(join(base, "test/helper.ts"), "export const helper = 1;");
+
+		const archive = execFileSync("tar", [
+			"-czf",
+			"-",
+			"-C",
+			join(root, "base"),
+			"repo",
+		]);
+
+		writeFileSync(join(root, "base.tgz"), archive);
+		mkdirSync(join(workspace, ".github/factory/gates"), { recursive: true });
+		writeFileSync(
+			join(workspace, ".github/factory/WORKFLOW.md"),
+			TRUSTED_WORKFLOW,
+		);
+		writeFileSync(
+			join(workspace, ".github/factory/gates/gates.json"),
+			JSON.stringify({ version: 1, testGlobs: ["test/helper.ts"] }),
+		);
+		mkdirSync(join(state, "checkouts"), { recursive: true });
+		writeFileSync(
+			join(state, "checkouts", `${runId}.json`),
+			JSON.stringify({ sha, files: paths, omitted: 0 }),
+		);
+		assert.equal(
+			await files.writeClaim({
+				runId,
+				issue: 42,
+				eventId: "99",
+				seq: 1,
+				status: "running",
+				stage: "accept",
+				attempt: 1,
+				usage: 73,
+			}),
+			true,
+		);
+
+		const contract: Contract = {
+			version: 2,
+			runId,
+			issue: 42,
+			base: { repo, sha },
+			snapshot: {
+				digest: digestOf("snapshot"),
+				source: "unedited",
+				eventId: "99",
+				eventAt: "2026-11-17T00:00:00Z",
+			},
+			link: null,
+			summary: "Change behavior",
+			behavior: ["New behavior"],
+			acceptance: [{ id: "A1", kind: "new_behavior", text: "New behavior" }],
+			exclusions: [],
+			compatibility: [],
+			limits: [],
+			files: ["test/test.ts"],
+			evidence: [],
+		};
+
+		const bytes = contractBytes(contract);
+		assert.equal(
+			await files.writeContract({
+				contract,
+				bytes,
+				digest: contractDigestOf(bytes),
+			}),
+			true,
+		);
+
+		for (const offline of [false, true]) {
+			const stdout = execFileSync(
+				process.execPath,
+				[
+					"--experimental-strip-types",
+					"--input-type=module",
+					"-e",
+					`
+				import { readFileSync } from 'node:fs';
+				import { fileRunFiles } from ${JSON.stringify(new URL("../../../host/controller/run-files.ts", import.meta.url).href)};
+				import { checkoutWorkspace } from ${JSON.stringify(new URL("../../../host/controller/checkout.ts", import.meta.url).href)};
+				import { stageInputs } from ${JSON.stringify(new URL("../../../src/controller/launch.ts", import.meta.url).href)};
+				import { accepted } from ${JSON.stringify(new URL("../../../src/controller/effects.ts", import.meta.url).href)};
+				const files = fileRunFiles(${JSON.stringify(state)});
+				const run = { ...(await files.listClaims())[0], workflowSha: ${JSON.stringify(sha)}, workflowDigest: ${JSON.stringify(digestOf(TRUSTED_WORKFLOW))}, snapshotDigest: ${JSON.stringify(contract.snapshot.digest)}, inputs: null };
+				const input = { files, repo: ${JSON.stringify(repo)}, platform: ${JSON.stringify(EXE_DEV_PLATFORM)}, env: (name) => name === 'HOME' ? '/home/factory' : undefined, store: {}, log() {}, executor: { checkout: async (input) => checkoutWorkspace({ ...input, stateDir: ${JSON.stringify(state)}, fetch: async (repo, sha) => { if (sha !== run.workflowSha) throw new Error('wrong revision'); return ${offline ? "null" : `readFileSync(${JSON.stringify(join(root, "base.tgz"))})`}; } }) } };
+				const prepared = await stageInputs(input, run);
+				if (prepared.kind !== 'ready') { console.log(JSON.stringify(prepared)); }
+				else {
+					run.inputs = prepared.inputs;
+					const output = JSON.stringify({ version: 2, scenarios: [{ id: 'S1', criteria: ['A1'], checks: ['behavior.test.ts'], judge: null }], files: [{ path: 'behavior.test.ts', type: 'node:test', content: "import { readFileSync } from 'node:fs'; readFileSync('test/test.ts');" }] });
+					console.log(JSON.stringify({ kind: prepared.kind, preserved: [...(prepared.inputs.preservedTests ?? [])], refused: accepted(input, null, run, output) === null }));
+				}
+			`,
+				],
+				{ encoding: "utf8", timeout: 10000 },
+			);
+
+			const result = JSON.parse(stdout);
+
+			if (offline)
+				assert.deepEqual(result, {
+					kind: "fail",
+					why: "test_inventory_unavailable",
+				});
+			else
+				assert.deepEqual(result, {
+					kind: "ready",
+					preserved: ["test/test.ts"],
+					refused: true,
+				});
+		}
 	} finally {
 		remove();
 	}

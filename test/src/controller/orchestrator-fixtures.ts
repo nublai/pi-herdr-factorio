@@ -568,6 +568,11 @@ export class FakeExecutor implements StageExecutor {
 			omitted: this.checkoutOmitted,
 			checkout: {
 				files: [...tree.keys()].sort(),
+				async readBase(path, cap) {
+					const text = tree.get(path);
+
+					return text === undefined || text.length > cap ? null : text;
+				},
 				async read(path, cap) {
 					const text = tree.get(path);
 

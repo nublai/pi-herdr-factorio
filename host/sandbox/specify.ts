@@ -24,7 +24,6 @@ import {
 import { fieldOf, objectOf, parseJson, textOf } from "../../src/core/json.ts";
 import type { StageLaunchInput } from "../../src/controller/launch.ts";
 import { PINNED_VERSIONS } from "../bundle/manifest.ts";
-import { manifestOf } from "../gates/manifest.ts";
 import {
 	type SPECIFY_SESSIONS,
 	MAX_RECEIPT_BYTES,
@@ -80,21 +79,17 @@ async function parseDeclared(
 	text: string,
 	workspace: string,
 	files: readonly string[],
+	testFiles: readonly string[] | undefined,
 ): Promise<SpecifyOutput> {
 	const parsed = parseSpecifyOutput(text, new Set(files));
 
 	if (parsed.kind !== "contract") return parsed;
 
 	const replacements = parsed.draft.replacesTests ?? [];
-	let tests: readonly string[] = [];
 
-	if (replacements.length > 0) {
-		try {
-			tests = manifestOf(workspace).tests;
-		} catch {
-			return { kind: "malformed", reason: "bad_field" };
-		}
-	}
+	const tests =
+		testFiles ??
+		files.filter((path) => /^test\/.*\.(?:test|cases)\.[cm]?[jt]s$/.test(path));
 
 	const checkout = checkoutOf(workspace, files);
 
@@ -370,6 +365,7 @@ export async function runSpecify(
 		draft.text ?? "",
 		input.workspace,
 		review.files,
+		input.testFiles,
 	);
 
 	if (parsed.kind === "malformed")
@@ -402,8 +398,14 @@ export async function runSpecify(
 	if (revision.outcome.kind !== "passed") return finish(revision.outcome, null);
 
 	if (
-		(await parseDeclared(revision.text ?? "", input.workspace, review.files))
-			.kind === "malformed"
+		(
+			await parseDeclared(
+				revision.text ?? "",
+				input.workspace,
+				review.files,
+				input.testFiles,
+			)
+		).kind === "malformed"
 	)
 		return finish({ kind: "failed", exit: "malformed" }, null);
 

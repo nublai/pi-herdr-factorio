@@ -94,6 +94,7 @@ export function controllerDraftChecker(config: {
 			text,
 			config.input.contract,
 			config.input.files,
+			config.input.preservedTests,
 		);
 
 		if (parsed.kind !== "suite") {

@@ -1,6 +1,9 @@
 import { ACCEPTANCE_MAX_TOKENS } from "../../../src/contract/acceptance.ts";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { controllerDraftChecker } from "../../../host/controller/checkers.ts";
 import { describe, it } from "node:test";
 import { parseMarker } from "../../../src/trust/markers.ts";
 import {
@@ -29,6 +32,69 @@ import {
 } from "./orchestrator-fixtures.ts";
 
 describe("held-out acceptance stage", () => {
+	it("837c carries the trusted Agents inventory to both draft and final acceptance checks", async (t) => {
+		const { github, executor, logs, start } = world();
+		github.add(labeled(14));
+		executor.tree.set(
+			".github/factory/gates/gates.json",
+			JSON.stringify({ version: 2, testGlobs: ["test/test.ts"] }),
+		);
+		executor.tree.set(
+			"test/test.ts",
+			'import { test } from "node:test"; test("preserved", () => {});',
+		);
+		executor.tree.set("test/helper.ts", "export const fixture = 1;");
+		executor.behaviors = [{ kind: "pass", usage: 100 }];
+		executor.acceptBehavior = { kind: "pass", usage: 20 };
+
+		const suite = JSON.parse(ACCEPTANCE_TEXT);
+		suite.files[0].content =
+			"import { readFileSync } from 'node:fs'; readFileSync('test/test.ts');";
+		executor.acceptText = JSON.stringify(suite);
+		await once(start());
+		assert.deepEqual(executor.launches[0]?.testFiles, ["test/test.ts"]);
+
+		const input = executor.launches.find(
+			(launch) => launch.stage === "accept",
+		)?.acceptDraft;
+
+		assert.ok(input);
+		assert.equal(input.preservedTests?.has("test/test.ts"), true);
+		assert.equal(input.preservedTests?.has("test/helper.ts"), false);
+		assert.ok(
+			logs.some(
+				(log) =>
+					log.event === "acceptance_malformed" &&
+					log.fields.reason === "heldout_reads_preserved_test",
+			),
+		);
+
+		const dir = mkdtempSync(join(tmpdir(), "837c-draft-"));
+		t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+		const check = controllerDraftChecker({
+			stateDir: dir,
+			stageDir: dir,
+			attempt: 1,
+			input,
+			fetch: async () => {
+				throw new Error("must refuse before execution");
+			},
+		});
+
+		const feedback = await check(executor.acceptText, {
+			run: 1,
+			signal: new AbortController().signal,
+			deadline: Date.now() + 1000,
+		});
+
+		assert.ok(
+			feedback !== null &&
+				"reason" in feedback &&
+				feedback.reason === "heldout_reads_preserved_test",
+		);
+	});
+
 	for (const effort of ["default", "low"] as const)
 		it(`forwards ${effort} trusted reasoning effort only to accept`, async () => {
 			const { github, executor, start } = world();
