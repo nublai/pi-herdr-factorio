@@ -23,6 +23,12 @@
 			"export": "reviewSeats"
 		},
 		"files": {
+			"docs/operations/examples/target-ci.yml": {
+				"owner": "host/gates",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "R3"
+			},
 			"src/bench/compare.ts": {
 				"owner": "src/bench",
 				"seats": ["code-review", "security-review", "simplify"],
@@ -3336,8 +3342,10 @@
 			"kind": "paths",
 			"reader": "host/controller/checkers.ts",
 			"tokens": {
-				"Buffer.from(source).equals(materializerIdentity(gate))": 1,
-				"materializerIdentity(fileURLToPath(new URL(\"../..\", import.meta.url)))": 1
+				"gateMaterializerIdentity(gate)": 1,
+				"fileURLToPath(new URL(\"../..\", import.meta.url))": 1,
+				"identity.equals(materializerIdentity(product))": 1,
+				"identity.equals(productMaterializerIdentity(product))": 1
 			},
 			"targets": [
 				{
@@ -5066,9 +5074,15 @@
 			"reader": "host/gates/materialize.ts",
 			"tokens": {
 				"export const MATERIALIZER_FILES = [ \"host/gates/gates.ts\", \"host/gates/materialize.ts\", \"host/gates/manifest.ts\", \"host/gates/runner.ts\", \"host/gates/base.ts\", \"host/gates/draft-reporter.mjs\", ] as const;": 1,
-				"digestOf(readFileSync(file))": 1
+				"digestOf(readFileSync(file))": 1,
+				"fileURLToPath(new URL(\"../..\", import.meta.url))": 1
 			},
 			"targets": [
+				{
+					"path": ".",
+					"type": "dir",
+					"via": { "from": "reader", "path": "../.." }
+				},
 				{
 					"path": "host/gates/gates.ts",
 					"type": "file"

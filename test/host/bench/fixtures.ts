@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { exportBundle } from "../../../host/bench/export.ts";
 import { manifestDigest } from "../../../host/bundle/manifest.ts";
+import { MATERIALIZER_FILES } from "../../../host/gates/materialize.ts";
 import { bundleJson } from "../../../src/bench/bundle.ts";
 import { isGitSha } from "../../../src/config/schema.ts";
 import { fileArtifacts } from "../../../src/contract/artifacts.ts";
@@ -39,6 +40,7 @@ export async function benchFixture(
 		large?: boolean;
 		ambiguous?: boolean;
 		repositoryGatePolicy?: boolean;
+		historicalMaterializer?: boolean;
 	} = {},
 ) {
 	const repository = join(root, "source");
@@ -81,6 +83,11 @@ export async function benchFixture(
 			`.github/factory/gates/${file}`,
 			readFileSync(join(checkout, ".github/factory/gates", file)),
 		);
+
+	if (options.historicalMaterializer)
+		for (const path of MATERIALIZER_FILES)
+			put(repository, path, "export const materializer = 'historical';\n");
+
 	put(repository, ".oxlintrc.json", "{}");
 	put(
 		repository,

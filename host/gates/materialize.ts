@@ -1,3 +1,4 @@
+import ts from "typescript";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -12,6 +13,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { dirname, join, posix, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ReplacedTest } from "../../src/contract/contract.ts";
 import { hasControl } from "../../src/contract/parse.ts";
 import {
@@ -42,10 +44,13 @@ export const MATERIALIZER_FILES = [
 	"host/gates/draft-reporter.mjs",
 ] as const;
 
-export function materializerIdentity(tree: string): Buffer {
+export function materializerIdentity(
+	tree: string,
+	files: readonly string[] = MATERIALIZER_FILES,
+): Buffer {
 	return Buffer.from(
 		JSON.stringify(
-			MATERIALIZER_FILES.map((path) => {
+			files.map((path) => {
 				const file = join(tree, path);
 				const stat = lstatSync(file);
 
@@ -57,7 +62,132 @@ export function materializerIdentity(tree: string): Buffer {
 	);
 }
 
+const TARGET_GATE_FILES = ["freeze.mjs", "reporter.mjs", "scan-rules.json"];
+const PRODUCT_ROOT = fileURLToPath(new URL("../..", import.meta.url));
+
+function productMaterializerFiles(tree: string): string[] {
+	const files = new Set<string>();
+
+	const pending: string[] = [
+		...MATERIALIZER_FILES,
+		"host/cli/index.ts",
+		"host/controller/checkers.ts",
+		"package.json",
+		"package-lock.json",
+		...TARGET_GATE_FILES.map((name) => `.github/factory/gates/${name}`),
+	];
+
+	while (pending.length > 0) {
+		const path = pending.pop();
+
+		if (path === undefined || files.has(path)) continue;
+
+		if (!safePath(path) || !lstatSync(join(tree, path)).isFile())
+			throw new Error("unsupported_materializer");
+		files.add(path);
+
+		if (!/\.[cm]?[jt]s$/.test(path)) continue;
+
+		for (const imported of ts.preProcessFile(
+			readFileSync(join(tree, path), "utf8"),
+			true,
+			true,
+		).importedFiles) {
+			if (imported.fileName.startsWith("."))
+				pending.push(
+					posix.normalize(posix.join(posix.dirname(path), imported.fileName)),
+				);
+		}
+	}
+
+	return [...files].sort();
+}
+
+export function productMaterializerIdentity(tree: string): Buffer {
+	return materializerIdentity(tree, productMaterializerFiles(tree));
+}
+
 export const SHA = /^[a-f0-9]{40}$/;
+
+function pinnedMaterializerIdentity(tree: string): Buffer | null {
+	const policy = join(tree, ".github/factory/gates/gates.json");
+
+	if (!existsSync(policy)) return null;
+	const parsed = objectOf(parseJson(readFileSync(policy, "utf8")));
+
+	if (fieldOf(parsed, "version") === 2) gatePolicyOf(tree);
+	const value = fieldOf(parsed, "toolingRevision");
+
+	if (value === undefined) return null;
+	const revision = textOf(value);
+
+	try {
+		if (revision === null || !SHA.test(revision))
+			throw new Error("unsupported_materializer");
+
+		const gitBytes = (...args: string[]) =>
+			execFileSync("git", ["-C", PRODUCT_ROOT, ...args], {
+				env: {
+					...CLEAN_ENV,
+					GIT_CONFIG_GLOBAL: "/dev/null",
+					GIT_CONFIG_NOSYSTEM: "1",
+				},
+				timeout: 5_000,
+				maxBuffer: 2 * 1024 * 1024,
+				stdio: ["ignore", "pipe", "ignore"],
+			});
+
+		if (
+			gitBytes("rev-parse", "HEAD").toString().trim() !== revision ||
+			gitBytes("status", "--porcelain").length !== 0
+		)
+			throw new Error("unsupported_materializer");
+		const paths = productMaterializerFiles(PRODUCT_ROOT);
+
+		const files = gitBytes("ls-tree", "-z", revision, "--", ...paths)
+			.toString()
+			.split("\0")
+			.filter(Boolean);
+
+		if (
+			files.length !== paths.length ||
+			files.some((row) => !/^100(?:644|755) blob [a-f0-9]{40}\t/.test(row))
+		)
+			throw new Error("unsupported_materializer");
+
+		const identity = Buffer.from(
+			JSON.stringify(
+				paths.map((path) => [
+					path,
+					digestOf(gitBytes("show", "--no-textconv", `${revision}:${path}`)),
+				]),
+			),
+		);
+
+		if (!identity.equals(materializerIdentity(PRODUCT_ROOT, paths)))
+			throw new Error("unsupported_materializer");
+
+		for (const name of TARGET_GATE_FILES) {
+			const path = `.github/factory/gates/${name}`;
+
+			if (
+				!lstatSync(join(tree, path)).isFile() ||
+				!readFileSync(join(tree, path)).equals(
+					gitBytes("show", "--no-textconv", `${revision}:${path}`),
+				)
+			)
+				throw new Error("unsupported_materializer");
+		}
+
+		return identity;
+	} catch {
+		throw new Error("unsupported_materializer");
+	}
+}
+
+export function gateMaterializerIdentity(tree: string): Buffer {
+	return pinnedMaterializerIdentity(tree) ?? materializerIdentity(tree);
+}
 
 function isDocumentation(
 	path: string,
@@ -538,6 +668,7 @@ export async function materializeCandidate(input: {
 	readonly gateSha: string;
 	readonly candidateSha: string;
 	readonly dest: string;
+	readonly tooling?: "running-product";
 	readonly replacements: readonly GateReplacement[];
 	readonly heldoutDir?: string;
 	readonly heldoutDigest?: string;
@@ -547,6 +678,21 @@ export async function materializeCandidate(input: {
 	const replacements = checkReplacements(base, candidate, input.replacements);
 	await exportTree(input.repository, input.gateSha, input.dest);
 	const policy = gatePolicyOf(input.dest);
+
+	if (input.tooling !== "running-product") {
+		try {
+			if (
+				pinnedMaterializerIdentity(input.dest) === null &&
+				!materializerIdentity(input.dest).equals(
+					materializerIdentity(PRODUCT_ROOT),
+				)
+			)
+				throw new Error("unsupported_materializer");
+		} catch {
+			throw new Error("unsupported_materializer");
+		}
+	}
+
 	const temp = mkdtempSync(join(dirname(input.dest), "candidate-"));
 
 	try {
@@ -610,6 +756,7 @@ export function materializeFromDirectories(input: {
 	const candidate = inventory(input.candidateTree);
 	const replacements = checkReplacements(base, candidate, input.replacements);
 	const policy = gatePolicyOf(input.gateTree);
+	pinnedMaterializerIdentity(input.gateTree);
 	cpSync(input.gateTree, input.dest, { recursive: true, errorOnExist: true });
 
 	return overlay({

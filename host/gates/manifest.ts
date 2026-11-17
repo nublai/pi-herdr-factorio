@@ -331,11 +331,15 @@ function policyCheck(
 }
 
 export function gatePolicyOf(tree: string): GatePolicy {
-	const value = objectOf(
-		parseJson(
-			readFileSync(join(tree, ".github/factory/gates/gates.json"), "utf8"),
-		),
-	);
+	let text: string;
+
+	try {
+		text = readFileSync(join(tree, ".github/factory/gates/gates.json"), "utf8");
+	} catch {
+		throw new Error("invalid_gate_manifest");
+	}
+
+	const value = objectOf(parseJson(text));
 
 	const version = fieldOf(value, "version");
 	const rawChecks = arrayOf(fieldOf(value, "checks"));
@@ -343,6 +347,17 @@ export function gatePolicyOf(tree: string): GatePolicy {
 
 	if (
 		(version !== 1 && version !== 2) ||
+		(version === 2 &&
+			Object.keys(value ?? {}).some(
+				(key) =>
+					![
+						"version",
+						"checks",
+						"testGlobs",
+						"sourceRoots",
+						"toolingRevision",
+					].includes(key),
+			)) ||
 		rawChecks === null ||
 		testGlobs === null ||
 		(version === 1 && testGlobs.some((p) => !LEGACY_TEST_GLOB.test(p))) ||
