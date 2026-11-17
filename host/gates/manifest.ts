@@ -8,6 +8,7 @@ import {
 	textOf,
 	textsOf,
 	type JsonObject,
+	type JsonValue,
 } from "../../src/core/json.ts";
 
 export const CHECK_NAMES = [
@@ -18,6 +19,32 @@ export const CHECK_NAMES = [
 	"decisions",
 ];
 
+export const SOURCE = [
+	"src",
+	"extension",
+	"host",
+	"skills",
+	"scripts",
+	".pi/skills",
+	"docs/models",
+];
+
+const REQUIRED_CHECKS = ["typecheck", "lint", "format"];
+
+const RESERVED_CHECKS = [
+	"install",
+	"baseline_tests",
+	"main_tests",
+	"candidate_tests",
+	"heldout",
+];
+
+const LEGACY_TEST_GLOB =
+	/^test\/(?:(?:src|host)\/\*\*\/\*\.test\.ts|integration\/\*\.test\.ts)$/;
+
+export const TEST_GLOB =
+	/^test\/(?!(?:acceptance|fixtures)\/)(?:[a-zA-Z0-9_-][a-zA-Z0-9_.-]*\/)*(?:\*\*\/)?(?:\*\.(?:test|cases)|[a-zA-Z0-9_-][a-zA-Z0-9_.-]*)\.[cm]?[jt]s$/;
+
 export type Dependency = {
 	readonly path: string;
 	readonly version: string;
@@ -26,10 +53,10 @@ export type Dependency = {
 	readonly installScript: boolean;
 };
 
-type GateManifest = {
+type GatePolicy = {
+	readonly sourceRoots: readonly string[];
 	readonly testGlobs: readonly string[];
 	readonly checks: readonly { name: string; argv: readonly string[] }[];
-	readonly tests: readonly string[];
 };
 
 function specs(value: JsonObject | null): void {
@@ -204,40 +231,85 @@ export function readDependencies(tree: string) {
 	);
 }
 
-export function manifestOf(tree: string): GateManifest {
+function sourceRootsOf(value: JsonValue | undefined): readonly string[] {
+	const roots = textsOf(value);
+
+	if (
+		roots === null ||
+		roots.length === 0 ||
+		roots.length > 32 ||
+		roots.some(
+			(root) =>
+				root.length >= 512 ||
+				(root !== ".pi/skills" &&
+					!/^[a-zA-Z0-9_-][a-zA-Z0-9_.-]*(?:\/[a-zA-Z0-9_-][a-zA-Z0-9_.-]*)*$/.test(
+						root,
+					)) ||
+				/^test(?:\/|$)/.test(root) ||
+				root.split("/").includes("node_modules") ||
+				roots.some((other) => other !== root && root.startsWith(`${other}/`)),
+		) ||
+		new Set(roots).size !== roots.length
+	)
+		throw new Error("invalid_gate_manifest");
+
+	return roots;
+}
+
+function runsTooling(argv: readonly string[]): boolean {
+	const [program, ...rest] = argv;
+	const at = program === "node" ? rest.findIndex((a) => !a.startsWith("-")) : 0;
+	const script = program === "node" ? rest[at] : program;
+
+	return (
+		script !== undefined &&
+		script.startsWith("/g/tooling/") &&
+		!script.split("/").includes("..") &&
+		(program !== "node" ||
+			rest
+				.slice(0, at)
+				.every(
+					(flag) =>
+						flag.startsWith("--") && !/^--(?:eval|print)(?:=|$)/.test(flag),
+				))
+	);
+}
+
+function policyCheck(name: string, argv: readonly string[]): boolean {
+	return (
+		/^[a-z][a-z0-9_]{0,63}$/.test(name) &&
+		!RESERVED_CHECKS.includes(name) &&
+		!name.endsWith("_deadline_control") &&
+		runsTooling(argv)
+	);
+}
+
+export function gatePolicyOf(tree: string): GatePolicy {
 	const value = objectOf(
 		parseJson(
 			readFileSync(join(tree, ".github/factory/gates/gates.json"), "utf8"),
 		),
 	);
 
+	const version = fieldOf(value, "version");
 	const rawChecks = arrayOf(fieldOf(value, "checks"));
 	const testGlobs = textsOf(fieldOf(value, "testGlobs"));
+	const accepted = version === 1 ? LEGACY_TEST_GLOB : TEST_GLOB;
 
 	if (
-		fieldOf(value, "version") !== 1 ||
+		(version !== 1 && version !== 2) ||
 		rawChecks === null ||
 		testGlobs === null ||
 		testGlobs.length === 0 ||
+		testGlobs.length > 32 ||
 		new Set(testGlobs).size !== testGlobs.length ||
-		testGlobs.some(
-			(p) =>
-				!/^test\/(?:(?:src|host)\/\*\*\/\*\.test\.ts|integration\/\*\.test\.ts)$/.test(
-					p,
-				),
-		)
+		testGlobs.some((p) => p.length >= 512 || !accepted.test(p)) ||
+		(version === 1 && fieldOf(value, "sourceRoots") !== undefined)
 	)
 		throw new Error("invalid_gate_manifest");
 
-	const tests = testGlobs
-		.flatMap((pattern) => {
-			const files = globSync(pattern, { cwd: tree });
-
-			if (files.length === 0) throw new Error("missing_tests");
-
-			return files;
-		})
-		.sort();
+	const sourceRoots =
+		version === 1 ? SOURCE : sourceRootsOf(fieldOf(value, "sourceRoots"));
 
 	const checks = rawChecks.map((item) => {
 		const obj = objectOf(item);
@@ -245,21 +317,46 @@ export function manifestOf(tree: string): GateManifest {
 		const argv = textsOf(fieldOf(obj, "argv"));
 
 		if (
-			!CHECK_NAMES.includes(name) ||
 			argv === null ||
 			argv.length === 0 ||
-			argv.some((a) => a.includes("\0"))
+			argv.some((a) => a.includes("\0")) ||
+			(version === 1 ? !CHECK_NAMES.includes(name) : !policyCheck(name, argv))
 		)
 			throw new Error("invalid_gate_manifest");
 
 		return { name, argv };
 	});
 
+	const names = new Set(checks.map((c) => c.name));
+
 	if (
-		checks.length !== CHECK_NAMES.length ||
-		new Set(checks.map((c) => c.name)).size !== CHECK_NAMES.length
+		names.size !== checks.length ||
+		(version === 1
+			? checks.length !== CHECK_NAMES.length
+			: checks.length > 12 || REQUIRED_CHECKS.some((name) => !names.has(name)))
 	)
 		throw new Error("missing_checks");
 
-	return { checks, tests, testGlobs };
+	return { checks, sourceRoots, testGlobs };
+}
+
+export function manifestOf(tree: string) {
+	const policy = gatePolicyOf(tree);
+
+	const tests = policy.testGlobs
+		.flatMap((pattern) => {
+			const files = globSync(pattern, {
+				cwd: tree,
+				exclude: ["test/acceptance/**", "test/fixtures/**"],
+			});
+
+			if (files.length === 0) throw new Error("missing_tests");
+
+			return files;
+		})
+		.sort();
+
+	if (new Set(tests).size !== tests.length) throw new Error("duplicate_tests");
+
+	return { ...policy, tests };
 }

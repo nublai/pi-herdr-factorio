@@ -85,11 +85,13 @@ export type TrustedEvidence = {
 
 const TRUSTED_CHECKS_MAX = 32;
 
-export const TRUSTED_TEST_GLOBS = [
-	"test/src/**/*.test.ts",
-	"test/host/**/*.test.ts",
-	"test/integration/*.test.ts",
-];
+const TRUSTED_TEST_GLOBS_MAX = 32;
+
+export function isTrustedTestGlob(glob: string): boolean {
+	return /^test\/(?!(?:acceptance|fixtures)\/)(?:[a-zA-Z0-9_-][a-zA-Z0-9_.-]*\/)*(?:\*\*\/)?(?:\*\.(?:test|cases)|[a-zA-Z0-9_-][a-zA-Z0-9_.-]*)\.[cm]?[jt]s$/.test(
+		glob,
+	);
+}
 
 function trustedChecks(
 	value: JsonValue | undefined,
@@ -105,9 +107,9 @@ function trustedChecks(
 		globs === null ||
 		(globs !== "globs not recorded" &&
 			(globs.length === 0 ||
-				globs.length > TRUSTED_TEST_GLOBS.length ||
+				globs.length > TRUSTED_TEST_GLOBS_MAX ||
 				new Set(globs).size !== globs.length ||
-				globs.some((glob) => !TRUSTED_TEST_GLOBS.includes(glob))))
+				globs.some((glob) => !isTrustedTestGlob(glob))))
 	)
 		return null;
 

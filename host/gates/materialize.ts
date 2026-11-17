@@ -28,6 +28,7 @@ import {
 	CONTROL_PLANE_PREFIX,
 	COORDINATOR_ONLY_FILES,
 } from "../../src/trust/protected-paths.ts";
+import { gatePolicyOf, SOURCE } from "./manifest.ts";
 import { CLEAN_ENV, command } from "./runner.ts";
 
 export const MATERIALIZER_FILES = [
@@ -54,25 +55,18 @@ export function materializerIdentity(tree: string): Buffer {
 	);
 }
 
-export const SOURCE = [
-	"src",
-	"extension",
-	"host",
-	"skills",
-	"scripts",
-	".pi/skills",
-	"docs/models",
-];
-
 export const SHA = /^[a-f0-9]{40}$/;
 
-function isDocumentation(path: string): boolean {
+function isDocumentation(
+	path: string,
+	sourceRoots: readonly string[],
+): boolean {
 	return (
 		path.endsWith(".md") &&
 		!path.startsWith(CONTROL_PLANE_PREFIX) &&
 		!path.startsWith(".pi/") &&
 		!path.startsWith(ACCEPTANCE_SUITE_PREFIX) &&
-		!SOURCE.some((dir) => path.startsWith(`${dir}/`))
+		!sourceRoots.some((dir) => path.startsWith(`${dir}/`))
 	);
 }
 
@@ -260,16 +254,23 @@ function checkReplacements(
 	return replacements;
 }
 
+function gateRootsOf(gateTree: string): readonly string[] {
+	return existsSync(join(gateTree, ".github/factory/gates/gates.json"))
+		? gatePolicyOf(gateTree).sourceRoots
+		: SOURCE;
+}
+
 function overlay(input: {
 	readonly base: Inventory;
 	readonly candidate: Inventory;
 	readonly candidateDir: string;
 	readonly dest: string;
+	readonly sourceRoots: readonly string[];
 	readonly replacements: readonly GateReplacement[];
 	readonly heldoutDir?: string;
 	readonly heldoutDigest?: string;
 }) {
-	const { base, candidate, replacements } = input;
+	const { base, candidate, replacements, sourceRoots } = input;
 	const source = input.candidateDir;
 	const ignoredChanges: string[] = [];
 	const newTests: string[] = [];
@@ -295,7 +296,7 @@ function overlay(input: {
 		force: true,
 	});
 
-	for (const dir of SOURCE) {
+	for (const dir of sourceRoots) {
 		rmSync(join(input.dest, dir), { recursive: true, force: true });
 
 		if (existsSync(join(source, dir)))
@@ -305,11 +306,11 @@ function overlay(input: {
 	}
 
 	for (const path of base.keys())
-		if (isDocumentation(path) && !candidate.has(path))
+		if (isDocumentation(path, sourceRoots) && !candidate.has(path))
 			rmSync(join(input.dest, path), { force: true });
 
 	for (const [path, item] of candidate) {
-		if (isDocumentation(path)) {
+		if (isDocumentation(path, sourceRoots)) {
 			if (item.blob !== base.get(path)?.blob) {
 				mkdirSync(dirname(join(input.dest, path)), { recursive: true });
 				cpSync(join(source, path), join(input.dest, path));
@@ -318,7 +319,7 @@ function overlay(input: {
 			continue;
 		}
 
-		const fromSource = SOURCE.some((dir) => path.startsWith(`${dir}/`));
+		const fromSource = sourceRoots.some((dir) => path.startsWith(`${dir}/`));
 		const replacement = replacements.some((r) => r.path === path);
 
 		const additional =
@@ -380,6 +381,7 @@ export async function materializeCandidate(input: {
 	const candidate = await entries(input.repository, input.candidateSha);
 	const replacements = checkReplacements(base, candidate, input.replacements);
 	await exportTree(input.repository, input.gateSha, input.dest);
+	const sourceRoots = gateRootsOf(input.dest);
 	const temp = mkdtempSync(join(dirname(input.dest), "candidate-"));
 
 	try {
@@ -390,6 +392,7 @@ export async function materializeCandidate(input: {
 			base,
 			candidate,
 			candidateDir: join(temp, "tree"),
+			sourceRoots,
 			replacements,
 		});
 	} finally {
@@ -440,6 +443,7 @@ export function materializeFromDirectories(input: {
 	const base = inventory(input.gateTree);
 	const candidate = inventory(input.candidateTree);
 	const replacements = checkReplacements(base, candidate, input.replacements);
+	const sourceRoots = gateRootsOf(input.gateTree);
 	cpSync(input.gateTree, input.dest, { recursive: true, errorOnExist: true });
 
 	return overlay({
@@ -447,6 +451,7 @@ export function materializeFromDirectories(input: {
 		base,
 		candidate,
 		candidateDir: input.candidateTree,
+		sourceRoots,
 		replacements,
 	});
 }
