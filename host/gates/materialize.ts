@@ -63,6 +63,7 @@ export function materializerIdentity(
 }
 
 const TARGET_GATE_FILES = ["freeze.mjs", "reporter.mjs", "scan-rules.json"];
+const PRODUCT_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 
 function productMaterializerFiles(tree: string): string[] {
 	const files = new Set<string>();
@@ -123,10 +124,9 @@ function pinnedMaterializerIdentity(tree: string): Buffer | null {
 	try {
 		if (revision === null || !SHA.test(revision))
 			throw new Error("unsupported_materializer");
-		const product = fileURLToPath(new URL("../..", import.meta.url));
 
 		const gitBytes = (...args: string[]) =>
-			execFileSync("git", ["-C", product, ...args], {
+			execFileSync("git", ["-C", PRODUCT_ROOT, ...args], {
 				env: {
 					...CLEAN_ENV,
 					GIT_CONFIG_GLOBAL: "/dev/null",
@@ -142,7 +142,7 @@ function pinnedMaterializerIdentity(tree: string): Buffer | null {
 			gitBytes("status", "--porcelain").length !== 0
 		)
 			throw new Error("unsupported_materializer");
-		const paths = productMaterializerFiles(product);
+		const paths = productMaterializerFiles(PRODUCT_ROOT);
 
 		const files = gitBytes("ls-tree", "-z", revision, "--", ...paths)
 			.toString()
@@ -164,7 +164,7 @@ function pinnedMaterializerIdentity(tree: string): Buffer | null {
 			),
 		);
 
-		if (!identity.equals(materializerIdentity(product, paths)))
+		if (!identity.equals(materializerIdentity(PRODUCT_ROOT, paths)))
 			throw new Error("unsupported_materializer");
 
 		for (const name of TARGET_GATE_FILES) {
@@ -677,7 +677,19 @@ export async function materializeCandidate(input: {
 	const replacements = checkReplacements(base, candidate, input.replacements);
 	await exportTree(input.repository, input.gateSha, input.dest);
 	const policy = gatePolicyOf(input.dest);
-	pinnedMaterializerIdentity(input.dest);
+
+	try {
+		if (
+			pinnedMaterializerIdentity(input.dest) === null &&
+			!materializerIdentity(input.dest).equals(
+				materializerIdentity(PRODUCT_ROOT),
+			)
+		)
+			throw new Error("unsupported_materializer");
+	} catch {
+		throw new Error("unsupported_materializer");
+	}
+
 	const temp = mkdtempSync(join(dirname(input.dest), "candidate-"));
 
 	try {

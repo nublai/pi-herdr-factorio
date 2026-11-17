@@ -129,6 +129,9 @@ function repo(t: { after(fn: () => void): void }) {
 		readFileSync(".github/factory/gates/scan-rules.json", "utf8"),
 	);
 	put(".oxlintrc.json", "{}");
+
+	for (const member of MATERIALIZER_FILES)
+		put(member, readFileSync(member, "utf8"));
 	git("add", ".");
 	git("commit", "-qm", "main");
 	const gateSha = git("rev-parse", "HEAD");
@@ -223,6 +226,7 @@ async function pinnedProduct(
 
 function externalTarget(t: { after(fn: () => void): void }, revision: string) {
 	const f = repo(t);
+	f.git("rm", "-rq", "host");
 
 	const policy = JSON.parse(
 		readFileSync(join(f.root, ".github/factory/gates/gates.json"), "utf8"),
@@ -252,10 +256,17 @@ function externalTarget(t: { after(fn: () => void): void }, revision: string) {
 	};
 }
 
+const mustNotRun: GateRunner = {
+	kind: "must-not-run",
+	run: async () => assert.fail("unverified tooling ran"),
+};
+
 async function diagnoseExternal(
 	product: Awaited<ReturnType<typeof pinnedProduct>>,
 	f: ReturnType<typeof externalTarget>,
+	runner: GateRunner = localRunner,
 ) {
+	let runnerCalls = 0;
 	const repo = "giuseppecrj/pi-herdr-agents";
 	assert.ok(isRepoSlug(repo));
 	const runId = digestOf("external-tooling-run");
@@ -275,7 +286,14 @@ async function diagnoseExternal(
 				sha,
 			]);
 		},
-		runner: localRunner,
+		runner: {
+			kind: runner.kind,
+			run: async (input) => {
+				runnerCalls++;
+
+				return runner.run(input);
+			},
+		},
 	});
 
 	const facts = new Promise<DiagnosisFacts>((finish, reject) => {
@@ -303,6 +321,9 @@ async function diagnoseExternal(
 	const result = await facts;
 	await owner.stop(runId);
 
+	if (runner === mustNotRun)
+		assert.equal(runnerCalls, 0, "diagnosis ran unverified tooling");
+
 	return result;
 }
 
@@ -326,7 +347,7 @@ async function externalRefused(
 
 	assert.equal(receipt.reason, "unsupported_materializer");
 	assert.equal(receipt.checks.length, 0);
-	const facts = await diagnoseExternal(product, f);
+	const facts = await diagnoseExternal(product, f, mustNotRun);
 	assert.ok(facts.replay?.kind === "unavailable");
 	assert.equal(facts.replay.reason, "unsupported_materializer");
 }
@@ -372,6 +393,8 @@ test("R3 F2 refuses an older pin with identical materializer files when installe
 });
 
 for (const member of [
+	"host/cli/index.ts",
+	"package-lock.json",
 	"src/candidate/review.ts",
 	".github/factory/gates/scan.ts",
 	"src/core/json.ts",
@@ -386,6 +409,46 @@ for (const member of [
 		);
 		assert.equal(product.git("status", "--porcelain"), "");
 		await externalRefused(product, externalTarget(t, product.revision));
+	});
+}
+
+for (const key of [undefined, "toolingRevison"]) {
+	test(`R3 unpinned external v1 target refuses before execution (${key ?? "missing pin"})`, async (t) => {
+		const product = await pinnedProduct(t);
+		const f = externalTarget(t, product.revision);
+
+		const policy = JSON.parse(readFileSync(join(f.root, GATE_POLICY), "utf8"));
+
+		delete policy.toolingRevision;
+
+		if (key !== undefined) policy[key] = product.revision;
+		f.put(GATE_POLICY, JSON.stringify(policy));
+		f.put(".github/factory/gates/reporter.mjs", "throw new Error('DRIFT');\n");
+		const gateSha = gitSha(f.commit());
+		await externalRefused(product, { ...f, gateSha, candidateSha: gateSha });
+	});
+}
+
+for (const pin of [undefined, "b".repeat(40)]) {
+	test(`R3 PROBE2 gate and replay retain main's pin when the candidate ${pin === undefined ? "deletes" : "replaces"} it`, async (t) => {
+		const product = await pinnedProduct(t);
+		const f = externalTarget(t, product.revision);
+
+		const policy = JSON.parse(readFileSync(join(f.root, GATE_POLICY), "utf8"));
+
+		f.put(GATE_POLICY, JSON.stringify({ ...policy, toolingRevision: pin }));
+
+		for (const member of MATERIALIZER_FILES)
+			f.put(member, readFileSync(join(product.root, member), "utf8"));
+		const candidateSha = gitSha(f.commit());
+		const member = "package-lock.json";
+		product.git("update-index", "--skip-worktree", member);
+		writeFileSync(
+			join(product.root, member),
+			readFileSync(join(product.root, member), "utf8") + "\n",
+		);
+		assert.equal(product.git("status", "--porcelain"), "");
+		await externalRefused(product, { ...f, candidateSha });
 	});
 }
 
@@ -547,11 +610,15 @@ test("R3 G1 missing gates.json follows the unpinned identity path and gives the 
 
 	assert.equal(receipt.reason, "invalid_gate_manifest");
 
-	const facts = await diagnoseExternal(product, {
-		...f,
-		gateSha,
-		candidateSha: gateSha,
-	});
+	const facts = await diagnoseExternal(
+		product,
+		{
+			...f,
+			gateSha,
+			candidateSha: gateSha,
+		},
+		mustNotRun,
+	);
 
 	assert.ok(facts.replay?.kind === "unavailable");
 	assert.equal(facts.replay.reason, "unsupported_tree");
@@ -635,7 +702,7 @@ test("R3 external tooling revision mismatch is rejected before gate execution an
 
 	assert.equal(receipt.reason, "unsupported_materializer");
 	assert.equal(receipt.checks.length, 0);
-	const facts = await diagnoseExternal(product, f);
+	const facts = await diagnoseExternal(product, f, mustNotRun);
 	assert.equal(facts.replay?.kind, "unavailable");
 	assert.ok(facts.replay?.kind === "unavailable");
 	assert.equal(facts.replay.reason, "unsupported_materializer");
@@ -690,7 +757,7 @@ test("R3 every modified installed gate member is rejected despite the correct pr
 			member,
 		);
 		assert.equal(existsSync(dest), false, member);
-		const facts = await diagnoseExternal(product, f);
+		const facts = await diagnoseExternal(product, f, mustNotRun);
 		assert.equal(facts.replay?.kind, "unavailable", member);
 		assert.ok(facts.replay?.kind === "unavailable");
 		assert.equal(facts.replay.reason, "unsupported_materializer", member);
@@ -754,6 +821,11 @@ test("R3 tooling pins are exact commit SHAs, and candidate edits cannot remove o
 
 		assert.equal(receipt.status, "passed", JSON.stringify(receipt));
 		assert.deepEqual(receipt.ignoredChanges, [policyPath]);
+		const facts = await diagnoseExternal(product, { ...f, candidateSha });
+		assert.ok(facts.replay?.kind === "observed");
+		assert.equal(facts.replay.gate.projection.passed, true);
+		assert.equal(facts.replay.full.projection.passed, true);
+		rmSync(join(f.root, "private-diagnosis"), { recursive: true, force: true });
 	}
 });
 
@@ -786,6 +858,7 @@ test("R3 a bad external candidate still fails gates and both diagnostic replays"
 test("R3 a pinned Agents-shaped version 2 target passes real static tools, gates and native replay without Factorio source", async (t) => {
 	const product = await pinnedProduct(t);
 	const f = agentsRepo(t);
+	f.git("rm", "-rq", "host");
 	f.put(
 		GATE_POLICY,
 		JSON.stringify({ ...agentsPolicy(), toolingRevision: product.revision }),
