@@ -266,8 +266,7 @@ function contractOf(
 		if (
 			!isRepoPath(path) ||
 			!path.startsWith("test/") ||
-			path.startsWith(ACCEPTANCE_SUITE_PREFIX) ||
-			!/\.(?:test|cases)\.[cm]?[jt]s$/.test(path)
+			path.startsWith(ACCEPTANCE_SUITE_PREFIX)
 		)
 			reject("bad_field");
 

@@ -32,7 +32,7 @@ import {
 	CONTROL_PLANE_PREFIX,
 	COORDINATOR_ONLY_FILES,
 } from "../../src/trust/protected-paths.ts";
-import { gatePolicyOf } from "./manifest.ts";
+import { gatePolicyOf, manifestOf } from "./manifest.ts";
 import { CLEAN_ENV, command } from "./runner.ts";
 
 export const MATERIALIZER_FILES = [
@@ -367,7 +367,6 @@ export function replacementsOf(text: string): readonly GateReplacement[] {
 			!safePath(path) ||
 			!path.startsWith("test/") ||
 			path.startsWith(ACCEPTANCE_SUITE_PREFIX) ||
-			!/\.(?:test|cases)\.[cm]?[jt]s$/.test(path) ||
 			!lineOf(reason) ||
 			seen.has(key)
 		)
@@ -526,11 +525,13 @@ function checkReplacements(
 	base: Inventory,
 	candidate: Inventory,
 	list: readonly GateReplacement[],
+	tests: readonly string[],
 ): readonly GateReplacement[] {
 	const replacements = replacementsOf(JSON.stringify(list));
 
 	for (const item of replacements) {
-		if (!base.has(item.path)) throw new Error("invalid_replacements");
+		if (!base.has(item.path) || !tests.includes(item.path))
+			throw new Error("invalid_replacements");
 
 		if (!candidate.has(item.path)) throw new Error("replacement_deleted");
 	}
@@ -675,9 +676,15 @@ export async function materializeCandidate(input: {
 }) {
 	const base = await entries(input.repository, input.gateSha);
 	const candidate = await entries(input.repository, input.candidateSha);
-	const replacements = checkReplacements(base, candidate, input.replacements);
 	await exportTree(input.repository, input.gateSha, input.dest);
-	const policy = gatePolicyOf(input.dest);
+	const policy = manifestOf(input.dest);
+
+	const replacements = checkReplacements(
+		base,
+		candidate,
+		input.replacements,
+		policy.tests,
+	);
 
 	if (input.tooling !== "running-product") {
 		try {
@@ -754,8 +761,15 @@ export function materializeFromDirectories(input: {
 }) {
 	const base = inventory(input.gateTree);
 	const candidate = inventory(input.candidateTree);
-	const replacements = checkReplacements(base, candidate, input.replacements);
-	const policy = gatePolicyOf(input.gateTree);
+	const policy = manifestOf(input.gateTree);
+
+	const replacements = checkReplacements(
+		base,
+		candidate,
+		input.replacements,
+		policy.tests,
+	);
+
 	pinnedMaterializerIdentity(input.gateTree);
 	cpSync(input.gateTree, input.dest, { recursive: true, errorOnExist: true });
 

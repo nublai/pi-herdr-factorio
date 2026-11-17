@@ -24,6 +24,7 @@ import {
 import { fieldOf, objectOf, parseJson, textOf } from "../../src/core/json.ts";
 import type { StageLaunchInput } from "../../src/controller/launch.ts";
 import { PINNED_VERSIONS } from "../bundle/manifest.ts";
+import { manifestOf } from "../gates/manifest.ts";
 import {
 	type SPECIFY_SESSIONS,
 	MAX_RECEIPT_BYTES,
@@ -84,9 +85,23 @@ async function parseDeclared(
 
 	if (parsed.kind !== "contract") return parsed;
 
+	const replacements = parsed.draft.replacesTests ?? [];
+	let tests: readonly string[] = [];
+
+	if (replacements.length > 0) {
+		try {
+			tests = manifestOf(workspace).tests;
+		} catch {
+			return { kind: "malformed", reason: "bad_field" };
+		}
+	}
+
 	const checkout = checkoutOf(workspace, files);
 
-	for (const replaced of parsed.draft.replacesTests ?? []) {
+	for (const replaced of replacements) {
+		if (!tests.includes(replaced.path))
+			return { kind: "malformed", reason: "bad_field" };
+
 		const source = await checkout.read(replaced.path, NAMED_FILE_READ_BYTES);
 
 		const count =

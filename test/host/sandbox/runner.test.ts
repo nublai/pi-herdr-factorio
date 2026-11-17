@@ -8566,7 +8566,7 @@ describe("stage skills", () => {
 		);
 		assert.match(
 			trusted,
-			/Trusted gates separately run baseline, main and candidate tests, typecheck, lint and format/,
+			/Trusted gates separately run baseline, main and candidate tests and the checks named by the target repository's gate policy on main/,
 		);
 		assert.match(
 			trusted,
@@ -10688,6 +10688,14 @@ describe("multi-seat candidate review", () => {
 describe("controller-run specify review", () => {
 	function setup(texts: readonly string[], tokens = 10) {
 		const dir = mkdtempSync(join(tmpdir(), "factory-specify-review-"));
+		mkdirSync(join(dir, ".github/factory/gates"), { recursive: true });
+		writeFileSync(
+			join(dir, ".github/factory/gates/gates.json"),
+			JSON.stringify({
+				...JSON.parse(readFileSync(".github/factory/gates/gates.json", "utf8")),
+				testGlobs: ["test/src/**/*.test.ts"],
+			}),
+		);
 
 		const calls: { dir: string; tools: readonly string[]; prompt: string }[] =
 			[];
@@ -10911,6 +10919,80 @@ describe("controller-run specify review", () => {
 				assert.equal(result.kind, kind);
 				assert.equal(h.calls.length, texts.length);
 				assert.equal(existsSync(join(h.dir, "output.txt")), kind === "passed");
+			} finally {
+				h.close();
+			}
+		}
+	});
+
+	it("R4 validates configured non-suffix replacements and refuses helpers or undeclared names at specify", async () => {
+		for (const [path, source, expected] of [
+			[
+				"test/test.ts",
+				'test("changed", () => {});\ntest("unnamed", () => {});',
+				"passed",
+			],
+			["test/test.ts", 'test("other", () => {});', "failed"],
+			[
+				"test/test.ts",
+				'test("changed", () => {});\ntest("changed", () => {});',
+				"failed",
+			],
+			["test/helper.test.ts", 'test("changed", () => {});', "failed"],
+		] as const) {
+			const draft = JSON.stringify({
+				kind: "contract",
+				summary: "Change the named test",
+				behavior: ["Use the new behavior"],
+				acceptance: [{ kind: "new_behavior", text: "New behavior is checked" }],
+				exclusions: [],
+				compatibility: [],
+				limits: [],
+				files: [path],
+				evidence: [],
+				replacesTests: [{ path, test: "changed", reason: "Ticket changes it" }],
+			});
+
+			const h = setup(expected === "passed" ? [draft, CLEAN_REVIEW] : [draft]);
+
+			try {
+				mkdirSync(join(h.dir, "test"), { recursive: true });
+				mkdirSync(join(h.dir, ".github/factory/gates"), { recursive: true });
+				writeFileSync(
+					join(h.dir, path),
+					`import { test } from "node:test";\n${source}\n`,
+				);
+				writeFileSync(
+					join(h.dir, ".github/factory/gates/gates.json"),
+					JSON.stringify({
+						version: 2,
+						sourceRoots: ["src"],
+						testGlobs: ["test/test.ts"],
+						checks: ["typecheck", "lint", "format"].map((name) => ({
+							name,
+							argv: ["/g/tooling/node_modules/.bin/biome", "format", "src"],
+						})),
+					}),
+				);
+				mkdirSync(join(h.dir, "src"), { recursive: true });
+				writeFileSync(join(h.dir, "src/value.ts"), "export const value = 1;\n");
+				const specify = h.run.specify;
+				assert.ok(specify);
+
+				const result = await specifyModule.runSpecify(
+					{
+						...h.run,
+						specify: { ...specify, files: [path] },
+					},
+					h.dir,
+					h.create,
+				);
+
+				assert.equal(result.kind, expected, `${path}: ${source}`);
+				assert.equal(
+					existsSync(join(h.dir, "output.txt")),
+					expected === "passed",
+				);
 			} finally {
 				h.close();
 			}
