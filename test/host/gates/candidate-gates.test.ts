@@ -638,7 +638,10 @@ for (const [name, policy] of [
 	["unparsable gates.json", "{"],
 	["empty gates.json", ""],
 	["array gates.json", "[]"],
-	["changed six-file identity", '{"version":1}'],
+	[
+		"changed six-file identity",
+		readFileSync(".github/factory/gates/gates.json", "utf8"),
+	],
 	[
 		"unpinned external tree without the six files",
 		readFileSync(".github/factory/gates/gates.json", "utf8"),
@@ -654,10 +657,7 @@ for (const [name, policy] of [
 		if (name === "changed six-file identity") {
 			for (const path of MATERIALIZER_FILES)
 				f.put(path, readFileSync(join(product.root, path), "utf8"));
-			f.put(
-				"host/gates/base.ts",
-				readFileSync(join(product.root, "host/gates/base.ts"), "utf8") + "\n",
-			);
+			rmSync(join(f.root, "host/gates/base.ts"));
 		}
 
 		f.git("add", "-A", "--", ".github");
@@ -714,6 +714,153 @@ for (const [name, policy] of [
 		assert.equal(feedback?.verdict, "would_refuse");
 		assert.equal(feedback?.reason, "base_tree_unsupported");
 		assert.deepEqual(receipt.evidence.source, {
+			kind: "unavailable",
+			reason: "tree_refused",
+		});
+	});
+}
+
+for (const mode of [
+	"installed-product lag",
+	"accepted N1 gate assets",
+] as const) {
+	test(`837b self-hosted Factorio v1 draft qualifies with ${mode}`, async (t) => {
+		const product = await pinnedProduct(t);
+		const f = await externalBase(t, product, false);
+		f.put(GATE_POLICY, readFileSync(GATE_POLICY, "utf8"));
+
+		for (const path of MATERIALIZER_FILES)
+			f.put(
+				path,
+				readFileSync(join(product.root, path), "utf8") +
+					(mode === "installed-product lag" ? "\n" : ""),
+			);
+
+		assert.equal(
+			materializerIdentity(f.root).equals(materializerIdentity(product.root)),
+			mode !== "installed-product lag",
+		);
+
+		if (mode === "accepted N1 gate assets") {
+			for (const name of ["freeze.mjs", "reporter.mjs", "scan-rules.json"]) {
+				const path = `.github/factory/gates/${name}`;
+				f.put(path, readFileSync(join(product.root, path), "utf8") + "\n");
+				assert.ok(
+					!readFileSync(join(f.root, path)).equals(
+						readFileSync(join(product.root, path)),
+					),
+				);
+			}
+		}
+
+		f.git("add", "host", ".github");
+		f.git("commit", "-qm", mode);
+		const sha = gitSha(f.git("rev-parse", "HEAD"));
+		const stageDir = join(f.stateDir, "draft");
+		mkdirSync(stageDir, { recursive: true, mode: 0o700 });
+		let calls = 0;
+		const repo = "nublai/pi-herdr-factorio";
+		assert.ok(isRepoSlug(repo));
+
+		const check = product.controllerDraftChecker({
+			stateDir: f.stateDir,
+			stageDir,
+			attempt: 1,
+			input: {
+				contract: { ...f.contract, base: { repo, sha } },
+				digest: f.binding.contractDigest,
+				repo,
+				issue: f.binding.issue,
+				baseSha: sha,
+				files: new Set(),
+			},
+			fetch: async () =>
+				execFileSync("git", [
+					"-C",
+					f.root,
+					"archive",
+					"--format=tar.gz",
+					"--prefix=target/",
+					sha,
+				]),
+			runner: {
+				kind: localRunner.kind,
+				run(input) {
+					calls++;
+
+					return localRunner.run(input);
+				},
+			},
+		});
+
+		const feedback = await check(f.text, {
+			signal: new AbortController().signal,
+			deadline: Date.now() + 30_000,
+			run: 1,
+		});
+
+		assert.equal(feedback?.verdict, "would_qualify");
+		assert.equal(calls, 2);
+
+		const receipt = JSON.parse(
+			readFileSync(join(stageDir, "draft-1.json"), "utf8"),
+		).receipt;
+
+		assert.equal(receipt.evidence.source.kind, "ready");
+		assert.equal(receipt.evidence.execution.kind, "observed");
+		assert.equal(receipt.evidence.repeat.kind, "observed");
+	});
+}
+
+for (const [name, pin] of [
+	["null pin", null],
+	["bad pin", "bad"],
+	["unparsable pin-looking policy", "{"],
+] as const) {
+	test(`837b base refuses ${name} even with six files`, async (t) => {
+		const product = await pinnedProduct(t);
+		const f = await externalBase(t, product, false);
+		const tree = join(f.root, "base-export");
+		await exportTree(f.root, f.binding.baseSha, tree);
+		writeFileSync(
+			join(tree, GATE_POLICY),
+			pin === "{"
+				? '{"version":1,"toolingRevision":'
+				: JSON.stringify({
+						...JSON.parse(readFileSync(GATE_POLICY, "utf8")),
+						toolingRevision: pin,
+					}),
+		);
+
+		for (const path of MATERIALIZER_FILES) {
+			mkdirSync(dirname(join(tree, path)), { recursive: true });
+			cpSync(join(product.root, path), join(tree, path));
+		}
+
+		let calls = 0;
+
+		const evidence = await product.runHeldoutBase({
+			tree,
+			cacheDir: join(f.stateDir, "cache"),
+			binding: f.binding,
+			contract: f.contract,
+			suite: f.suite,
+			canary: f.canary,
+			startedAt: Date.now(),
+			deadline: Date.now() + 30_000,
+			workDir: join(f.stateDir, "malformed"),
+			runner: {
+				kind: mustNotRun.kind,
+				run(input) {
+					calls++;
+
+					return mustNotRun.run(input);
+				},
+			},
+		});
+
+		assert.equal(calls, 0);
+		assert.deepEqual(evidence.source, {
 			kind: "unavailable",
 			reason: "tree_refused",
 		});

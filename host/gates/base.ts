@@ -45,14 +45,13 @@ import { ACCEPTANCE_SUITE_PREFIX } from "../../src/trust/protected-paths.ts";
 
 import {
 	type Dependency,
+	gatePolicyOf,
 	readDependencies,
 	validateDependencies,
 } from "./manifest.ts";
 import {
 	gateMaterializerIdentity,
 	heldoutOf,
-	materializerIdentity,
-	productMaterializerIdentity,
 	safePath,
 } from "./materialize.ts";
 import {
@@ -440,14 +439,8 @@ async function runBase(
 
 		if (input.refused === undefined && input.tooling !== "running-product") {
 			try {
-				const identity = gateMaterializerIdentity(input.tree);
-				const product = fileURLToPath(new URL("../..", import.meta.url));
-
-				if (
-					!identity.equals(materializerIdentity(product)) &&
-					!identity.equals(productMaterializerIdentity(product))
-				)
-					throw new Error("unsupported_materializer");
+				gatePolicyOf(input.tree);
+				gateMaterializerIdentity(input.tree);
 			} catch {
 				source = { kind: "unavailable", reason: "tree_refused" };
 
