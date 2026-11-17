@@ -403,7 +403,7 @@ export function oracleKey(
 	};
 }
 
-export const BASE_PROTOCOL_VERSION = "heldout-base-v2-4";
+export const BASE_PROTOCOL_VERSION = "heldout-base-v2-5";
 
 const UNSUPPORTED_TREE: ReadonlySet<string> = new Set([
 	"tree_partial",
@@ -847,7 +847,7 @@ const BASE_REASON_SENTENCES: Readonly<Record<BaseReason, string>> = {
 	base_todo: "A check left a test as todo.",
 	base_cancelled: "A check cancelled a test.",
 	base_tree_unsupported:
-		"The unchanged base tree is partial or lacks its trusted gates.",
+		"The unchanged base tree was refused because it is partial, unsafe, or lacks its trusted gates.",
 	base_interrupted:
 		"Base qualification was interrupted on every accept attempt.",
 	base_nondeterministic: "Two base runs of the checks gave different results.",

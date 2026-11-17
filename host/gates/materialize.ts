@@ -1,4 +1,5 @@
 import ts from "typescript";
+import { isUtf8 } from "node:buffer";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -278,6 +279,81 @@ export function safePath(path: string): boolean {
 					p !== "node_modules",
 			)
 	);
+}
+
+const BYTE_SAFE_ATTRIBUTES = new Set([
+	"text",
+	"-text",
+	"text=auto",
+	"binary",
+	"eol=lf",
+	"diff",
+	"-diff",
+	"merge",
+	"-merge",
+	"whitespace",
+]);
+
+const ATTRIBUTE_ESCAPES = new Map([
+	["a", "\x07"],
+	["b", "\b"],
+	["f", "\f"],
+	["n", "\n"],
+	["r", "\r"],
+	["t", "\t"],
+	["v", "\v"],
+	['"', '"'],
+	["\\", "\\"],
+]);
+
+export function byteSafeAttributes(bytes: Buffer): boolean {
+	if (!isUtf8(bytes) || bytes.includes(0)) return false;
+
+	for (const raw of bytes
+		.toString("utf8")
+		.replace(/^\uFEFF/, "")
+		.split("\n")) {
+		const line = raw.replace(/^[ \t\r]+|[ \t\r]+$/g, "");
+
+		if (line === "" || line.startsWith("#")) continue;
+
+		const fields =
+			/^(?:"((?:[^"\\]|\\(?:[abfnrtv"\\]|[0-3][0-7]{2}))*)"|((?!")[^ \t\r]+))(?:[ \t\r]+([^\n]*))?$/.exec(
+				line,
+			);
+
+		if (fields === null) return false;
+
+		const pattern = (fields[1] ?? fields[2] ?? "").replace(
+			/\\([0-3][0-7]{2}|[abfnrtv"\\])/g,
+			(_, value: string) =>
+				ATTRIBUTE_ESCAPES.get(value) ??
+				String.fromCharCode(Number.parseInt(value, 8)),
+		);
+
+		if (
+			pattern === "" ||
+			pattern.startsWith("[attr]") ||
+			pattern.startsWith("!")
+		)
+			return false;
+
+		if (
+			(fields[3] ?? "")
+				.split(/[ \t\r]+/)
+				.filter(Boolean)
+				.some(
+					(attribute) =>
+						!BYTE_SAFE_ATTRIBUTES.has(attribute) &&
+						!/^[-!]?linguist-[A-Za-z0-9_.-]+(?:=[^ \t\r\v\f]*)?$/.test(
+							attribute,
+						),
+				)
+		)
+			return false;
+	}
+
+	return true;
 }
 
 export async function entries(
@@ -678,6 +754,14 @@ export async function materializeCandidate(input: {
 	const base = await entries(input.repository, input.gateSha);
 	const candidate = await entries(input.repository, input.candidateSha);
 	await exportTree(input.repository, input.gateSha, input.dest);
+
+	for (const path of base.keys())
+		if (
+			posix.basename(path) === ".gitattributes" &&
+			!byteSafeAttributes(readFileSync(join(input.dest, path)))
+		)
+			throw new Error("unsafe_tree");
+
 	const policy = gatePolicyOf(input.dest);
 
 	const replacements = checkReplacements(
@@ -732,18 +816,23 @@ function inventory(tree: string): Inventory {
 
 			if (
 				!safePath(path) ||
-				entry.name === ".gitattributes" ||
 				stat.isSymbolicLink() ||
 				(!stat.isDirectory() && !stat.isFile())
 			)
 				throw new Error("unsafe_tree");
 
 			if (stat.isDirectory()) walk(path);
-			else
+			else {
+				const bytes = readFileSync(join(tree, path));
+
+				if (entry.name === ".gitattributes" && !byteSafeAttributes(bytes))
+					throw new Error("unsafe_tree");
+
 				found.set(path, {
 					mode: stat.mode & 0o111 ? "100755" : "100644",
-					blob: digestOf(readFileSync(join(tree, path))),
+					blob: digestOf(bytes),
 				});
+			}
 		}
 	};
 

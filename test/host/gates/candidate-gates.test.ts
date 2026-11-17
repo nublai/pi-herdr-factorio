@@ -25,6 +25,7 @@ import type { DiagnosisFacts } from "../../../host/controller/checkers.ts";
 import { fileRunFiles } from "../../../host/controller/run-files.ts";
 import { checkCandidate, receiptPasses } from "../../../host/gates/gates.ts";
 import {
+	byteSafeAttributes,
 	exportTree,
 	heldoutDigest,
 	materializeCandidate,
@@ -36,7 +37,11 @@ import {
 	gateMaterializerIdentity,
 	productMaterializerIdentity,
 } from "../../../host/gates/materialize.ts";
-import { runDraftBase, runHeldoutBase } from "../../../host/gates/base.ts";
+import {
+	baseTreeDigest,
+	runDraftBase,
+	runHeldoutBase,
+} from "../../../host/gates/base.ts";
 import {
 	manifestOf,
 	validateDependencies,
@@ -587,6 +592,304 @@ async function externalBase(
 		canary,
 		fetch,
 	};
+}
+
+test("byte-safe attributes parse only the documented allowlist", () => {
+	for (const attribute of [
+		"text",
+		"-text",
+		"text=auto",
+		"binary",
+		"eol=lf",
+		"diff",
+		"-diff",
+		"merge",
+		"-merge",
+		"whitespace",
+		"linguist-generated",
+		"linguist-language=TypeScript",
+		"-linguist-vendored",
+		"!linguist-generated",
+	])
+		assert.equal(
+			byteSafeAttributes(Buffer.from(`* ${attribute}\n`)),
+			true,
+			attribute,
+		);
+
+	for (const text of [
+		"",
+		" \t\r\n# * export-ignore\n",
+		"\uFEFF* text=auto eol=lf\r\n*.png binary\r\n",
+		'"path with spaces" text\n',
+		'"path\\040with\\tspaces" -text\n',
+		"*\ttext\reol=lf\n",
+		"path-with-no-attributes\n",
+	])
+		assert.equal(
+			byteSafeAttributes(Buffer.from(text)),
+			true,
+			JSON.stringify(text),
+		);
+});
+
+test("byte-safe attributes refuse unknown states, macros, conversions, and malformed input", () => {
+	for (const attribute of [
+		"export-ignore",
+		"-export-ignore",
+		"!export-ignore",
+		"export-ignore=false",
+		"export-subst",
+		"-export-subst",
+		"!export-subst",
+		"export-subst=false",
+		"ident",
+		"-ident",
+		"!ident",
+		"filter=custom",
+		"filter",
+		"-filter",
+		"!filter",
+		"working-tree-encoding=UTF-16",
+		"eol=crlf",
+		"eol=native",
+		"!eol",
+		"-eol",
+		"text=other",
+		"!text",
+		"diff=custom",
+		"merge=custom",
+		"unknown",
+	])
+		assert.equal(
+			byteSafeAttributes(Buffer.from(`* ${attribute}\n`)),
+			false,
+			attribute,
+		);
+
+	for (const text of [
+		"[attr]custom text\n",
+		"[attr]binary -text\n",
+		'"[attr]custom" text\n',
+		'"\\133attr\\135custom" text\n',
+		"* binary\n[attr]binary export-ignore\n",
+		'"unterminated text\n',
+		'"bad\\q" text\n',
+		"* text # comment\n",
+		"* text\0\n* export-ignore\n",
+		"* text\n\u00a0# export-ignore\n",
+		"* text\vbinary\n",
+	])
+		assert.equal(
+			byteSafeAttributes(Buffer.from(text)),
+			false,
+			JSON.stringify(text),
+		);
+
+	assert.equal(byteSafeAttributes(Buffer.from([0xff])), false);
+});
+
+test("byte-safe attributes share root and nested directory-tree refusal rules", async (t) => {
+	const f = repo(t);
+	const tree = join(f.root, "base-export");
+	await exportTree(f.root, f.gateSha, tree);
+
+	for (const path of [".gitattributes", "src/.gitattributes"]) {
+		writeFileSync(join(tree, path), "* text=auto eol=lf\n*.png binary\n");
+		assert.doesNotThrow(() => baseTreeDigest(tree));
+		assert.doesNotThrow(() =>
+			materializeFromDirectories({
+				gateTree: tree,
+				candidateTree: tree,
+				dest: join(f.root, "safe"),
+				replacements: [],
+			}),
+		);
+		rmSync(join(f.root, "safe"), { recursive: true, force: true });
+		writeFileSync(join(tree, path), "* export-ignore\n");
+		assert.throws(() => baseTreeDigest(tree), /unsafe_tree/);
+		assert.throws(
+			() =>
+				materializeFromDirectories({
+					gateTree: tree,
+					candidateTree: tree,
+					dest: join(f.root, "refused"),
+					replacements: [],
+				}),
+			/unsafe_tree/,
+		);
+		assert.equal(existsSync(join(f.root, "refused")), false);
+		rmSync(join(tree, path));
+	}
+
+	mkdirSync(join(tree, ".git/info"), { recursive: true });
+	writeFileSync(join(tree, ".git/info/attributes"), "* text\n");
+	assert.throws(() => baseTreeDigest(tree), /unsafe_tree/);
+	assert.throws(
+		() =>
+			materializeFromDirectories({
+				gateTree: tree,
+				candidateTree: tree,
+				dest: join(f.root, "refused"),
+				replacements: [],
+			}),
+		/unsafe_tree/,
+	);
+});
+
+test("byte-safe attributes qualify through the pinned base caller and diagnosis replay", async (t) => {
+	const product = await pinnedProduct(t);
+	const f = await externalBase(t, product, false);
+	const tree = join(f.root, "base-export");
+	await exportTree(f.root, f.binding.baseSha, tree);
+
+	for (const path of [".gitattributes", "src/.gitattributes"])
+		writeFileSync(join(tree, path), "* text=auto eol=lf\n*.png binary\n");
+
+	const evidence = await product.runHeldoutBase({
+		tree,
+		cacheDir: join(f.stateDir, "cache"),
+		binding: f.binding,
+		contract: f.contract,
+		suite: f.suite,
+		canary: f.canary,
+		startedAt: Date.now(),
+		deadline: Date.now() + 30_000,
+		workDir: join(f.stateDir, "base"),
+	});
+
+	assert.equal(evidence.source.kind, "ready");
+	assert.equal(assessBase(evidence).assessment.kind, "ready");
+
+	for (const path of [".gitattributes", "src/.gitattributes"])
+		f.put(path, "* text=auto eol=lf\n*.png binary\n");
+	const sha = gitSha(f.commit());
+
+	const receipt = await product.checkCandidate({
+		...f,
+		gateSha: sha,
+		candidateSha: sha,
+		repository: f.root,
+		nonce: "safe-attributes",
+		output: join(f.stateDir, "ci"),
+		runner: miniRunner,
+		install: false,
+	});
+
+	assert.equal(receipt.status, "passed", receipt.reason ?? "");
+
+	const facts = await diagnoseExternal(product, {
+		...f,
+		gateSha: sha,
+		candidateSha: sha,
+	});
+
+	assert.equal(facts.replay?.kind, "observed");
+	assert.ok(facts.replay?.kind === "observed");
+	assert.equal(facts.replay.gate.projection.passed, true);
+	assert.equal(facts.replay.full.projection.passed, true);
+});
+
+for (const attribute of ["export-ignore", "export-subst", "filter=custom"]) {
+	test(`unsafe attributes ${attribute} are source refusals before any runner call`, async (t) => {
+		const product = await pinnedProduct(t);
+		const f = await externalBase(t, product, false);
+		const tree = join(f.root, "base-export");
+		await exportTree(f.root, f.binding.baseSha, tree);
+		writeFileSync(join(tree, ".gitattributes"), `src/value.ts ${attribute}\n`);
+		let calls = 0;
+
+		const runner: GateRunner = {
+			kind: mustNotRun.kind,
+			run(input) {
+				calls++;
+
+				return mustNotRun.run(input);
+			},
+		};
+
+		for (const tooling of [undefined, "running-product"] as const) {
+			const evidence = await product.runHeldoutBase({
+				tooling,
+				tree,
+				cacheDir: join(f.stateDir, "cache"),
+				binding: f.binding,
+				contract: f.contract,
+				suite: f.suite,
+				canary: f.canary,
+				startedAt: Date.now(),
+				deadline: Date.now() + 30_000,
+				workDir: join(f.stateDir, "base"),
+				runner,
+			});
+
+			assert.equal(calls, 0);
+			assert.deepEqual(evidence.source, {
+				kind: "unavailable",
+				reason: "tree_refused",
+			});
+			const assessed = assessBase(evidence);
+			assert.equal(assessed.assessment.kind, "refused");
+			assert.ok(assessed.assessment.kind === "refused");
+			assert.equal(assessed.assessment.failure.reason, "base_tree_unsupported");
+		}
+
+		f.put(".gitattributes", `src/value.ts ${attribute}\n`);
+		const sha = gitSha(f.commit());
+
+		const receipt = await product.checkCandidate({
+			...f,
+			gateSha: sha,
+			candidateSha: sha,
+			repository: f.root,
+			nonce: "unsafe-attributes",
+			output: join(f.stateDir, "ci"),
+			runner,
+			install: false,
+		});
+
+		assert.equal(calls, 0);
+		assert.equal(receipt.reason, "unsafe_tree");
+		assert.equal(receipt.checks.length, 0);
+
+		const stageDir = join(f.stateDir, "draft");
+		mkdirSync(stageDir, { recursive: true, mode: 0o700 });
+
+		const check = product.controllerDraftChecker({
+			stateDir: f.stateDir,
+			stageDir,
+			attempt: 1,
+			input: {
+				contract: { ...f.contract, base: { ...f.contract.base, sha } },
+				digest: f.binding.contractDigest,
+				repo: f.binding.repo,
+				issue: f.binding.issue,
+				baseSha: sha,
+				files: new Set(),
+			},
+			fetch: async () =>
+				execFileSync("git", [
+					"-C",
+					f.root,
+					"archive",
+					"--format=tar.gz",
+					"--prefix=target/",
+					sha,
+				]),
+			runner,
+		});
+
+		const feedback = await check(f.text, {
+			signal: new AbortController().signal,
+			deadline: Date.now() + 30_000,
+			run: 1,
+		});
+
+		assert.equal(calls, 0);
+		assert.equal(feedback?.verdict, "would_refuse");
+		assert.equal(feedback?.reason, "base_tree_unsupported");
+		assert.match(feedback?.sentence ?? "", /tree was refused/);
+	});
 }
 
 test("837b pinned qualification equals unchanged Factorio v1 base results", async (t) => {
