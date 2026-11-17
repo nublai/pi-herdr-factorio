@@ -4275,7 +4275,7 @@ function agentsRepo(t: { after(fn: () => void): void }) {
 	f.put("test/acceptance/old/checks/a.test.ts", 'throw new Error("HELD");\n');
 	f.put(
 		"tools/oxlint/anti-slop/index.ts",
-		`import { eslintCompatPlugin } from ${JSON.stringify(import.meta.resolve("@oxlint/plugins"))};
+		`import { eslintCompatPlugin } from "@oxlint/plugins";
 export default eslintCompatPlugin({
 	meta: { name: "fixture" },
 	rules: {
@@ -4527,6 +4527,10 @@ const TOOLS = resolve("node_modules");
 const toolingRunner: GateRunner = {
 	kind: "test-process",
 	async run(input) {
+		const modules = join(input.gates, "tooling/node_modules");
+
+		if (!existsSync(modules)) symlinkSync(TOOLS, modules, "dir");
+
 		const args = input.argv.map((a) =>
 			a.startsWith("/g/tooling/node_modules/")
 				? `${TOOLS}/${a.slice("/g/tooling/node_modules/".length)}`
@@ -4977,10 +4981,11 @@ test("a candidate cannot weaken main's TypeScript config through a nested tsconf
 		);
 
 		assert.deepEqual(await nestedAttack(f, gateSha, "tsc"), {
-			status: "failed",
-			failed: ["typecheck"],
-			ignoredChanges: [base, "maestro/tsconfig.json"].sort(),
+			status: "incomplete",
+			failed: [],
+			ignoredChanges: [],
 		});
+		assert.throws(() => manifestOf(f.root), /^Error: invalid_gate_manifest$/);
 	}
 });
 
@@ -5206,6 +5211,304 @@ test("Factorio's gate policy yields today's checks, source roots, test inventory
 		"test/src/example/value.test.ts",
 	]);
 	assert.equal(receiptPasses(receipt), true);
+});
+
+const CONFIG_REACH_CASES = [
+	[
+		"R1 jsonc / Grok 4",
+		"tsconfig.json",
+		'{"extends":"./maestro/base.jsonc"}',
+		"maestro/base.jsonc",
+		"{}",
+	],
+	[
+		"R1 extensionless",
+		"tsconfig.json",
+		'{"extends":"./maestro/base"}',
+		"maestro/base",
+		"{}",
+	],
+	[
+		"R1 absolute",
+		"tsconfig.json",
+		'{"extends":"/w/maestro/base.json"}',
+		"maestro/base.json",
+		"{}",
+	],
+	[
+		"R1 escaped",
+		"tsconfig.json",
+		String.raw`{"extends":".\/maestro/base.json"}`,
+		"maestro/base.json",
+		"{}",
+	],
+	[
+		"Grok 1 oxlint import",
+		"oxlint.config.ts",
+		'import rules from "./maestro/rules.ts"; export default rules;',
+		"maestro/rules.ts",
+		"export default {};",
+	],
+	[
+		"Grok 2 oxlint extends",
+		".oxlintrc.json",
+		'{"extends":["./maestro/rules.json"]}',
+		"maestro/rules.json",
+		"{}",
+	],
+	[
+		"Grok 3 biome extends",
+		"biome.json",
+		'{"extends":["./maestro/extra.json"]}',
+		"maestro/extra.json",
+		"{}",
+	],
+	[
+		"Grok 5 references",
+		"tsconfig.json",
+		'{"references":[{"path":"maestro/settings.json"}]}',
+		"maestro/settings.json",
+		"{}",
+	],
+] as const;
+
+for (const [label, config, text, target, content] of CONFIG_REACH_CASES)
+	test(`837a refuses candidate config reach: ${label}`, async (t) => {
+		const f = permissiveAgentsRepo(
+			t,
+			config.startsWith("oxlint") || config.startsWith(".oxlint")
+				? {
+						lint: [OXLINT, "-c", `/w/${config}`, ...AGENTS_LINTED],
+					}
+				: {},
+		);
+
+		f.put(config, text);
+		f.put(target, content);
+		const gateSha = f.commit();
+		f.put(target, `${content}\n`);
+		let calls = 0;
+
+		const receipt = await checkCandidate({
+			...gateInput(f, f.commit()),
+			gateSha,
+			runner: {
+				kind: "test-process",
+				async run() {
+					calls++;
+
+					return { exitCode: 0, stdout: "", stderr: "" };
+				},
+			},
+		});
+
+		assert.equal(receipt.status, "incomplete");
+		assert.equal(receipt.reason, "invalid_gate_manifest");
+		assert.equal(calls, 0);
+	});
+
+for (const [label, argv] of [
+	["R2 relative lint config", [OXLINT, "-c", "maestro/lint.json", "maestro"]],
+	[
+		"Grok 6 relative project",
+		[
+			"node",
+			"/g/tooling/node_modules/typescript/bin/tsc",
+			"-p",
+			"maestro/tsconfig.jsonc",
+		],
+	],
+	[
+		"R3 relay require",
+		[
+			"/g/tooling/node_modules/.bin/tsx",
+			"-r",
+			"./maestro/x.cjs",
+			"/g/tooling/node_modules/typescript/bin/tsc",
+		],
+	],
+] as const)
+	test(`837a refuses candidate config reach: ${label}`, (t) => {
+		const f = permissiveAgentsRepo(t, { lint: argv });
+		assert.throws(() => manifestOf(f.root), /^Error: invalid_gate_manifest$/);
+	});
+
+for (const name of ["freeze.mjs", "reporter.mjs", "scan-rules.json"])
+	test(`837a N1 compares unpinned self-hosted ${name}`, async (t) => {
+		const f = repo(t);
+		f.put(`.github/factory/gates/${name}`, "changed\n");
+		const gateSha = f.commit();
+		assert.throws(
+			() => gateMaterializerIdentity(f.root),
+			/unsupported_materializer/,
+		);
+		await assert.rejects(
+			materializeCandidate({
+				repository: f.root,
+				gateSha,
+				candidateSha: gateSha,
+				dest: join(f.root, "out"),
+				replacements: [],
+			}),
+			/unsupported_materializer/,
+		);
+	});
+
+test("837a accepts the published Agents onboarding policy and keeps Factorio v1 equal", (t) => {
+	const f = agentsRepo(t);
+
+	const example =
+		"docs/operations/examples/onboarding/pi-herdr-agents/.github/factory/gates/gates.json";
+
+	f.put(GATE_POLICY, readFileSync(example, "utf8"));
+	assert.doesNotThrow(() => manifestOf(f.root));
+	const legacy = repo(t);
+	const before = manifestOf(legacy.root);
+
+	legacy.put("tsconfig.json", '{"extends":"/w/src/base.jsonc"}');
+	legacy.put("src/base.jsonc", "{}");
+
+	assert.ok(JSON.stringify(manifestOf(legacy.root)) === JSON.stringify(before));
+});
+
+test("837a refuses relay preload, environment and inspector flags at every argv position", (t) => {
+	const f = agentsRepo(t);
+	const policy = agentsPolicy();
+
+	for (const flag of [
+		"-r",
+		"-r./maestro/x.cjs",
+		"--require",
+		"--import",
+		"--loader",
+		"--experimental-loader",
+		"--env-file",
+		"--env-file-if-exists",
+		"--inspect",
+		"--inspect-brk",
+		"--inspect-port",
+	])
+		for (const relay of [
+			["/g/tooling/node_modules/.bin/tsx"],
+			["node", "/g/tooling/node_modules/tsx/dist/cli.mjs"],
+		])
+			for (const args of [
+				[flag, "./maestro/x.cjs"],
+				[`${flag}=./maestro/x.cjs`],
+				["/g/tooling/node_modules/typescript/bin/tsc", flag, "./maestro/x.cjs"],
+			]) {
+				const argv = [...relay, ...args];
+
+				f.put(
+					GATE_POLICY,
+					JSON.stringify({
+						...policy,
+						checks: policy.checks.map((c) =>
+							c.name === "lint"
+								? {
+										...c,
+										argv: [
+											...relay,
+											"/g/tooling/node_modules/typescript/bin/tsc",
+										],
+									}
+								: c,
+						),
+					}),
+				);
+				assert.doesNotThrow(() => manifestOf(f.root));
+				f.put(
+					GATE_POLICY,
+					JSON.stringify({
+						...policy,
+						checks: policy.checks.map((c) =>
+							c.name === "lint" ? { ...c, argv } : c,
+						),
+					}),
+				);
+				assert.throws(
+					() => manifestOf(f.root),
+					/^Error: invalid_gate_manifest$/,
+					JSON.stringify(argv),
+				);
+			}
+});
+
+test("837a follows config references transitively and refuses unresolved or dynamic references", (t) => {
+	for (const [config, text] of [
+		["tsconfig.json", '{"extends":"./settings/strict.jsonc"}'],
+		["biome.json", '{"extends":["./settings/format.json"]}'],
+	] as const) {
+		const f = agentsRepo(t);
+
+		f.put(config, text);
+		f.put(
+			"settings/strict.jsonc",
+			'{/* JSONC */ "compilerOptions":{"strict":true},}',
+		);
+		f.put("settings/format.json", "{}");
+		assert.doesNotThrow(() => manifestOf(f.root));
+		f.put("settings/strict.jsonc", '{"extends":"../maestro/base.jsonc"}');
+		f.put("settings/format.json", '{"extends":["../maestro/extra.json"]}');
+		f.put("maestro/base.jsonc", "{}");
+		f.put("maestro/extra.json", "{}");
+		assert.throws(() => manifestOf(f.root), /^Error: invalid_gate_manifest$/);
+	}
+
+	for (const text of [
+		"export default await import(process.env.CONFIG);",
+		"export default {jsPlugins:[{specifier:process.env.PLUGIN}]};",
+		'import rules from "/w/maestro/rules.ts"; export default rules;',
+		'import rules from "./missing.ts"; export default rules;',
+		'import {readFileSync} from "node:fs"; export default JSON.parse(readFileSync("./maestro/rules.json", "utf8"));',
+		'import rules from "file:///w/maestro/rules.ts"; export default rules;',
+	]) {
+		const f = agentsRepo(t);
+
+		f.put("oxlint.config.ts", text);
+		assert.throws(() => manifestOf(f.root), /^Error: invalid_gate_manifest$/);
+	}
+});
+
+test("837a permits declarative frozen config imports while refusing a transitive workspace reference", (t) => {
+	const f = agentsRepo(t);
+
+	f.put(
+		"oxlint.config.ts",
+		'import rules from "./settings/rules.ts"; export default {rules};',
+	);
+	f.put("settings/rules.ts", 'export default {"no-debugger":"error"};');
+	assert.doesNotThrow(() => manifestOf(f.root));
+	f.put("settings/rules.ts", 'export default {extends:["./base.json"]};');
+	f.put("settings/base.json", '{"extends":["/w/maestro/rules.json"]}');
+	f.put("maestro/rules.json", "{}");
+	assert.throws(() => manifestOf(f.root), /^Error: invalid_gate_manifest$/);
+});
+
+test("837a refuses attached config paths, mutable documentation configs and unsupported tools", (t) => {
+	for (const argv of [
+		[OXLINT, "-cmaestro/lint.json", "maestro"],
+		["node", "/g/tooling/scripts/check-layout.mjs", "--root", "/w"],
+		["/g/tooling/scripts/arbitrary-wrapper.mjs"],
+		[
+			"node",
+			"/g/tooling/node_modules/typescript/bin/tsc",
+			"-pmaestro/settings.jsonc",
+		],
+		...["vitest", "jest", "mocha", "babel", "stylelint", "dprint"].map(
+			(tool) => [`/g/tooling/node_modules/.bin/${tool}`],
+		),
+	]) {
+		const f = permissiveAgentsRepo(t, { lint: argv });
+
+		assert.throws(() => manifestOf(f.root), /^Error: invalid_gate_manifest$/);
+	}
+
+	const f = agentsRepo(t);
+
+	f.put("tsconfig.json", '{"extends":"./docs/settings.md"}');
+	f.put("docs/settings.md", "{}");
+	assert.throws(() => manifestOf(f.root), /^Error: invalid_gate_manifest$/);
 });
 
 const CHECK_SCRIPT = "/g/tooling/scripts/check.mjs";
@@ -5443,9 +5746,9 @@ test("a repository gate policy refuses unsafe roots, test globs and checks, and 
 					argv: [
 						"node",
 						"--experimental-strip-types",
-						"/g/tooling/scripts/check-layout.mjs",
-						"--root",
-						"/w",
+						"/g/tooling/node_modules/typescript/bin/tsc",
+						"--project",
+						"/w/tsconfig.json",
 					],
 				},
 			],
@@ -5461,9 +5764,8 @@ test("a repository gate policy refuses unsafe roots, test globs and checks, and 
 						"node",
 						"--no-warnings",
 						"--experimental-strip-types",
-						"/g/tooling/scripts/check-layout.mjs",
-						"--root=/w",
-						"pi-extension",
+						"/g/tooling/node_modules/typescript/bin/tsc",
+						"--project=/w/tsconfig.json",
 					],
 				},
 			],
