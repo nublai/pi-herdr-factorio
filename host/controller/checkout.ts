@@ -473,7 +473,10 @@ function baseReader(
 
 			return read.kind === "ok" ? read.entries : null;
 		});
-		const entry = (await source)?.find((entry) => entry.path === path);
+		const entries = await source;
+
+		if (entries === null) return { kind: "unavailable" };
+		const entry = entries.find((entry) => entry.path === path);
 
 		return entry?.kind === "file" && entry.data.length <= capBytes
 			? entry.data.toString("utf8")

@@ -96,6 +96,8 @@ test("host pin prepares trusted policy and restores pristine checkout without a 
 
 		if (first.kind !== "ready") assert.fail("checkout");
 		assert.equal(await first.checkout.read("README.md", 100), "original\n");
+		assert.equal(await first.checkout.readBase?.("README.md", 1), null);
+		assert.equal(await first.checkout.readBase?.("missing.json", 100), null);
 		writeFileSync(join(input.workspace, "README.md"), "candidate edit\n");
 		const restored = await checkoutBuildWorkspace(input);
 		assert.equal(restored.kind, "ready");
@@ -216,7 +218,13 @@ test("837c fresh-process recovery of a pre-inventory claim reloads base policy, 
 			true,
 		);
 
-		for (const offline of [false, true]) {
+		for (const failure of [
+			"none",
+			"offline",
+			"timeout",
+			"rejected",
+			"tarball",
+		] as const) {
 			const stdout = execFileSync(
 				process.execPath,
 				[
@@ -231,7 +239,7 @@ test("837c fresh-process recovery of a pre-inventory claim reloads base policy, 
 				import { accepted } from ${JSON.stringify(new URL("../../../src/controller/effects.ts", import.meta.url).href)};
 				const files = fileRunFiles(${JSON.stringify(state)});
 				const run = { ...(await files.listClaims())[0], workflowSha: ${JSON.stringify(sha)}, workflowDigest: ${JSON.stringify(digestOf(TRUSTED_WORKFLOW))}, snapshotDigest: ${JSON.stringify(contract.snapshot.digest)}, inputs: null };
-				const input = { files, repo: ${JSON.stringify(repo)}, platform: ${JSON.stringify(EXE_DEV_PLATFORM)}, env: (name) => name === 'HOME' ? '/home/factory' : undefined, store: {}, log() {}, executor: { checkout: async (input) => checkoutWorkspace({ ...input, stateDir: ${JSON.stringify(state)}, fetch: async (repo, sha) => { if (sha !== run.workflowSha) throw new Error('wrong revision'); return ${offline ? "null" : `readFileSync(${JSON.stringify(join(root, "base.tgz"))})`}; } }) } };
+				const input = { files, repo: ${JSON.stringify(repo)}, platform: ${JSON.stringify(EXE_DEV_PLATFORM)}, env: (name) => name === 'HOME' ? '/home/factory' : undefined, store: {}, log() {}, executor: { checkout: async (input) => checkoutWorkspace({ ...input, stateDir: ${JSON.stringify(state)}, fetch: async (repo, sha) => { if (sha !== run.workflowSha) throw new Error('wrong revision'); ${failure === "rejected" ? "throw new Error('transient fetch');" : `return ${failure === "none" ? `readFileSync(${JSON.stringify(join(root, "base.tgz"))})` : failure === "timeout" ? "{ kind: 'timeout' }" : failure === "tarball" ? "Buffer.from('truncated download')" : "null"};`} } }) } };
 				const prepared = await stageInputs(input, run);
 				if (prepared.kind !== 'ready') { console.log(JSON.stringify(prepared)); }
 				else {
@@ -246,10 +254,9 @@ test("837c fresh-process recovery of a pre-inventory claim reloads base policy, 
 
 			const result = JSON.parse(stdout);
 
-			if (offline)
+			if (failure !== "none")
 				assert.deepEqual(result, {
-					kind: "fail",
-					why: "test_inventory_unavailable",
+					kind: "wait",
 				});
 			else
 				assert.deepEqual(result, {

@@ -354,7 +354,10 @@ export type Checkout = {
 	readonly files: readonly string[];
 	/** A listed file's text, or `null` when it is over `capBytes` or unreadable. */
 	read(path: string, capBytes: number): Promise<string | null>;
-	readBase?(path: string, capBytes: number): Promise<string | null>;
+	readBase?(
+		path: string,
+		capBytes: number,
+	): Promise<string | null | { readonly kind: "unavailable" }>;
 };
 
 export type CheckoutResult =
@@ -538,6 +541,8 @@ export async function stageInputs(
 			".github/factory/gates/gates.json",
 			256 * 1024,
 		);
+
+		if (text instanceof Object) return wait("test_inventory");
 
 		if (text == null) return fail("test_inventory_unavailable");
 		const policy = objectOf(parseJson(text));
