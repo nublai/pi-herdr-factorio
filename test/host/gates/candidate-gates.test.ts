@@ -253,6 +253,7 @@ function repo(t: { after(fn: () => void): void }) {
 
 	return {
 		root,
+		targetRepository: "nublai/pi-herdr-factorio",
 		git,
 		put,
 		gateSha,
@@ -374,6 +375,7 @@ function externalTarget(t: { after(fn: () => void): void }, revision: string) {
 
 	return {
 		...f,
+		targetRepository: "giuseppecrj/pi-herdr-agents",
 		gateSha,
 		candidateSha,
 		heldoutDir,
@@ -1183,7 +1185,7 @@ for (const name of ["freeze.mjs", "reporter.mjs", "scan-rules.json"]) {
 	});
 }
 
-test("837d gates require a Factorio origin and nine running-product files to self-host", async (t) => {
+test("837d gates use trusted identity and nine files, never origin, to self-host", async (t) => {
 	const f = repo(t);
 
 	for (const path of [
@@ -1194,44 +1196,194 @@ test("837d gates require a Factorio origin and nine running-product files to sel
 	])
 		assert.ok(readFileSync(join(f.root, path)).equals(readFileSync(path)));
 
-	for (const [index, origin] of [
-		"https://github.com/nublai/pi-herdr-factorio.git",
-		"https://github.com/nublai/pi-herdr-factorio",
-		"git@github.com:nublai/pi-herdr-factorio.git",
-		"ssh://git@github.com/nublai/pi-herdr-factorio.git",
-		"https://github.com/giuseppecrj/pi-herdr-agents.git",
-		"https://github.com/other/pi-herdr-factorio.git",
-		"https://github.com/nublai/pi-herdr-factorio-fork.git",
-		"https://github.com.invalid/nublai/pi-herdr-factorio.git",
-		null,
-	].entries()) {
-		if (origin === null) f.git("remote", "remove", "origin");
-		else f.git("remote", "set-url", "origin", origin);
-		let calls = 0;
+	const results = [];
 
-		const receipt = await checkCandidate({
-			...gateInput(f, f.gateSha),
-			output: join(f.root, `origin-${index}`),
-			runner: {
-				kind: miniRunner.kind,
-				run(input) {
-					calls++;
+	for (const targetRepository of [
+		"nublai/pi-herdr-factorio",
+		"giuseppecrj/pi-herdr-agents",
+		undefined,
+	])
+		for (const origin of [
+			"https://github.com/nublai/pi-herdr-factorio.git",
+			"https://github.com/giuseppecrj/pi-herdr-agents.git",
+			null,
+		]) {
+			f.git("config", "remote.origin.url", origin ?? "unused");
 
-					return miniRunner.run(input);
+			if (origin === null) f.git("config", "--unset-all", "remote.origin.url");
+			let calls = 0;
+
+			const receipt = await checkCandidate({
+				...gateInput(f, f.gateSha),
+				targetRepository,
+				output: join(f.root, `identity-${results.length}`),
+				runner: {
+					kind: miniRunner.kind,
+					run(input) {
+						calls++;
+
+						return miniRunner.run(input);
+					},
 				},
-			},
-		});
+			});
 
-		if (index < 4) {
-			assert.equal(receipt.status, "passed", origin ?? "missing");
-			assert.ok(calls > 0);
+			const result = {
+				targetRepository,
+				origin,
+				calls,
+				status: receipt.status,
+				reason: receipt.reason,
+			};
+
+			t.diagnostic(JSON.stringify(result));
+			results.push(result);
+		}
+
+	for (const result of results) {
+		if (result.targetRepository === "nublai/pi-herdr-factorio") {
+			assert.equal(result.status, "passed", JSON.stringify(result));
+			assert.ok(result.calls > 0);
 		} else {
 			assert.equal(
-				receipt.reason,
+				result.reason,
 				"unsupported_materializer",
-				origin ?? "missing",
+				JSON.stringify(result),
 			);
-			assert.equal(calls, 0);
+			assert.equal(result.calls, 0);
+		}
+	}
+});
+
+test("837d Factorio hosted-CI invocation self-hosts with the workflow's repository identity", (t) => {
+	if (!sandboxAvailable(t)) return;
+	const f = repo(t);
+	f.git("remote", "remove", "origin");
+	const workflow = parseYaml(readFileSync(".github/workflows/ci.yml", "utf8"));
+
+	const step = workflow.jobs.gates.steps.find(
+		(s: { name?: string }) => s.name === "Run trusted gates",
+	);
+
+	assert.equal(step.env.TARGET_REPO, "${{ github.repository }}");
+	assert.match(step.run, /--target-repo "\$TARGET_REPO"/);
+	const output = join(f.root, "actions");
+
+	const result = spawnSync(
+		"bash",
+		[
+			"-euc",
+			`${step.run.trimEnd().replace("host/cli/index.ts", JSON.stringify(resolve("host/cli/index.ts")))} --runner local`,
+		],
+		{
+			cwd: f.root,
+			encoding: "utf8",
+			timeout: 30_000,
+			env: {
+				PATH: process.env.PATH,
+				HOME: f.root,
+				TMPDIR: tmpdir(),
+				CANDIDATE_SHA: f.gateSha,
+				GATE_SHA: f.gateSha,
+				NONCE: "hosted-ci",
+				TARGET_REPO: "nublai/pi-herdr-factorio",
+				RUNNER_TEMP: output,
+				REPLACEMENTS: "[]",
+				REPLACEMENTS_DIGEST: replacementDigest([]),
+				HELDOUT_DIR: "",
+				HELDOUT_DIGEST: "",
+			},
+		},
+	);
+
+	assert.equal(result.status, 0, result.stderr || result.stdout);
+
+	const receipt = JSON.parse(
+		readFileSync(join(output, "gate-results/receipt.json"), "utf8"),
+	);
+
+	assert.equal(receipt.status, "passed");
+	assert.equal(receipt.nonce, "hosted-ci");
+	assert.equal(receipt.checks.length, 9);
+	assert.equal(receiptPasses(receipt), true);
+});
+
+test("837d private gates derive repository identity from the verified contract and refuse conflicts", async (t) => {
+	if (!sandboxAvailable(t)) return;
+	const product = await pinnedProduct(t);
+	const f = await externalBase(t, product, false);
+
+	const policy = JSON.parse(readFileSync(join(f.root, GATE_POLICY), "utf8"));
+	f.put(GATE_POLICY, JSON.stringify({ ...policy, toolingRevision: undefined }));
+
+	for (const path of MATERIALIZER_FILES)
+		f.put(path, readFileSync(join(product.root, path), "utf8"));
+	const sha = gitSha(f.commit());
+	const repo = "nublai/pi-herdr-factorio";
+	assert.ok(isRepoSlug(repo));
+
+	const contract: Contract = {
+		...f.contract,
+		runId: digestOf("trusted private gate repo"),
+		base: { repo, sha },
+	};
+
+	const bytes = contractBytes(contract);
+	const digest = contractDigestOf(bytes);
+	assert.ok(
+		await fileRunFiles(f.stateDir).writeContract({ contract, bytes, digest }),
+	);
+	f.git("remote", "set-url", "origin", "https://github.com/other/target.git");
+
+	for (const [label, args, expected] of [
+		["contract", [], 0],
+		["matching", ["--target-repo", repo], 0],
+		["conflict", ["--target-repo", "other/target"], 2],
+		["invalid", ["--target-repo", "not-a-slug"], 2],
+	] as const) {
+		const output = join(f.root, `private-${label}`);
+
+		const result = spawnSync(
+			process.execPath,
+			[
+				join(product.root, "host/cli/index.ts"),
+				"gates",
+				"--repository",
+				f.root,
+				"--gate-sha",
+				sha,
+				"--candidate-sha",
+				sha,
+				"--nonce",
+				"private-ci",
+				"--output",
+				output,
+				"--runner",
+				"local",
+				"--state-dir",
+				f.stateDir,
+				"--run-id",
+				contract.runId,
+				"--contract-digest",
+				digest,
+				...args,
+			],
+			{ encoding: "utf8", timeout: 30_000 },
+		);
+
+		assert.equal(result.status, expected, result.stderr || result.stdout);
+
+		if (expected === 0) {
+			const receipt = JSON.parse(
+				readFileSync(join(output, "receipt.json"), "utf8"),
+			);
+
+			assert.equal(receiptPasses(receipt), true);
+		} else {
+			assert.match(
+				result.stderr,
+				label === "conflict" ? /target_repo_mismatch/ : /invalid_target_repo/,
+			);
+			assert.equal(existsSync(join(output, "receipt.json")), false);
 		}
 	}
 });
@@ -1303,6 +1455,7 @@ for (const policyCase of [
 			} else if (surface === "gates") {
 				const receipt = await product.checkCandidate({
 					repository: f.root,
+					targetRepository: f.binding.repo,
 					gateSha: sha,
 					candidateSha: sha,
 					nonce: "unpinned-external",
@@ -2318,6 +2471,7 @@ test("merged tree routes imports to candidate source and preserves every unnamed
 
 	const result = await materializeCandidate({
 		repository: f.root,
+		targetRepository: f.targetRepository,
 		gateSha: f.gateSha,
 		candidateSha: sha,
 		dest,
@@ -2351,6 +2505,7 @@ test("merged tree takes candidate documentation outside .github while main keeps
 
 	const result = await materializeCandidate({
 		repository: f.root,
+		targetRepository: f.targetRepository,
 		gateSha,
 		candidateSha: sha,
 		dest,
@@ -2391,6 +2546,7 @@ test("merged tree takes candidate scripts but still drops nested config inside t
 
 	const result = await materializeCandidate({
 		repository: f.root,
+		targetRepository: f.targetRepository,
 		gateSha,
 		candidateSha: sha,
 		dest,
@@ -2430,6 +2586,7 @@ test("merged tree takes maintained skills and formal TypeScript, never private P
 
 	const result = await materializeCandidate({
 		repository: f.root,
+		targetRepository: f.targetRepository,
 		gateSha,
 		candidateSha: sha,
 		dest,
@@ -2495,6 +2652,7 @@ for (const path of [
 
 			const receipt = await checkCandidate({
 				repository: f.root,
+				targetRepository: f.targetRepository,
 				gateSha,
 				candidateSha,
 				nonce: "protected",
@@ -2534,6 +2692,7 @@ test("gate refuses a valid decisions append with an advanced checkpoint", {
 
 	const receipt = await checkCandidate({
 		repository: f.root,
+		targetRepository: f.targetRepository,
 		gateSha,
 		candidateSha: f.commit(),
 		nonce: "protected",
@@ -2554,6 +2713,7 @@ test("a candidate defect cannot pass preserved regression tests; receipts bind b
 
 	const receipt = await checkCandidate({
 		repository: f.root,
+		targetRepository: f.targetRepository,
 		gateSha: f.gateSha,
 		candidateSha,
 		nonce: "unit",
@@ -2595,6 +2755,7 @@ test("contract replacement is exact, digest checked, and new tests still veto", 
 
 	const receipt = await checkCandidate({
 		repository: f.root,
+		targetRepository: f.targetRepository,
 		gateSha: f.gateSha,
 		candidateSha,
 		nonce: "unit",
@@ -2617,6 +2778,7 @@ test("contract replacement is exact, digest checked, and new tests still veto", 
 
 	const failing = await checkCandidate({
 		repository: f.root,
+		targetRepository: f.targetRepository,
 		gateSha: f.gateSha,
 		candidateSha: f.commit(),
 		nonce: "unit",
@@ -2718,6 +2880,7 @@ for (const cheat of [
 
 		const receipt = await checkCandidate({
 			repository: f.root,
+			targetRepository: f.targetRepository,
 			gateSha: f.gateSha,
 			candidateSha: f.commit(),
 			nonce: "unit",
@@ -2780,6 +2943,7 @@ for (const [name, body, bad] of [
 function gateInput(f: ReturnType<typeof repo>, candidateSha: string) {
 	return {
 		repository: f.root,
+		targetRepository: f.targetRepository,
 		gateSha: f.gateSha,
 		candidateSha,
 		nonce: "unit",
@@ -4431,6 +4595,7 @@ test("bad manifests, stale bases, missing checks and tampered replacement digest
 
 	const input = {
 		repository: f.root,
+		targetRepository: f.targetRepository,
 		gateSha: f.gateSha,
 		candidateSha,
 		nonce: "unit",
@@ -4787,6 +4952,7 @@ test("R4 materializes an empty replacement list without expanding the test inven
 
 	const result = await materializeCandidate({
 		repository: f.root,
+		targetRepository: f.targetRepository,
 		gateSha,
 		candidateSha,
 		dest,
@@ -4850,6 +5016,7 @@ test("R4 accepts a named replacement in the configured test/test.ts and preserve
 	const dest = join(f.root, "materialized");
 	await materializeCandidate({
 		repository: f.root,
+		targetRepository: f.targetRepository,
 		gateSha,
 		candidateSha,
 		dest,
@@ -4934,13 +5101,13 @@ const toolingRunner: GateRunner = {
 		if (!existsSync(modules)) symlinkSync(TOOLS, modules, "dir");
 
 		const args = input.argv.map((a) =>
-			a.startsWith("/g/tooling/node_modules/")
-				? `${TOOLS}/${a.slice("/g/tooling/node_modules/".length)}`
-				: a.startsWith("/g/")
-					? `${input.gates}/${a.slice(3)}`
-					: a.startsWith("/w/")
-						? `${input.tree}/${a.slice(3)}`
-						: a,
+			a.replace(/\/g\/tooling\/node_modules\/|\/g\/|\/w\//g, (mount) =>
+				mount === "/g/tooling/node_modules/"
+					? `${TOOLS}/`
+					: mount === "/g/"
+						? `${input.gates}/`
+						: `${input.tree}/`,
+			),
 		);
 
 		const result = spawnSync(args[0] ?? "node", args.slice(1), {
@@ -5009,6 +5176,7 @@ test("a pi-herdr-agents gate policy overlays its source roots and deletions, kee
 			(dest: string) =>
 				materializeCandidate({
 					repository: f.root,
+					targetRepository: f.targetRepository,
 					gateSha: f.gateSha,
 					candidateSha,
 					dest,
@@ -5312,6 +5480,82 @@ async function nestedAttack(
 	};
 }
 
+for (const attached of [false, true])
+	for (const frozen of [false, true])
+		test(`837a ignore-path control/attack with real oxlint (${attached ? "attached" : "separate"}, ${frozen ? "frozen" : "mutable"})`, async (t) => {
+			const path = `${frozen ? "/g/tooling/" : ""}docs/lintignore.md`;
+
+			const f = permissiveAgentsRepo(t, {
+				lint: [
+					OXLINT,
+					"--disable-nested-config",
+					...(attached ? [`--ignore-path=${path}`] : ["--ignore-path", path]),
+					"-c",
+					"/g/tooling/.oxlintrc.json",
+					"maestro",
+				],
+			});
+
+			f.git("rm", "-q", "oxlint.config.ts");
+			f.put(".oxlintrc.json", '{"rules":{"no-debugger":"error"}}\n');
+			f.put("docs/lintignore.md", "# main ignores nothing\n");
+			const gateSha = f.commit();
+			const results = [];
+
+			for (const attack of [false, true]) {
+				f.put(
+					"maestro/value.ts",
+					'export const value = "candidate";\ndebugger;\n',
+				);
+
+				if (attack) f.put("docs/lintignore.md", "maestro/value.ts\n");
+				let calls = 0;
+
+				const receipt = await checkCandidate({
+					...gateInput(f, f.commit()),
+					gateSha,
+					output: join(f.root, `ignore-${attack}`),
+					runner: {
+						kind: toolingRunner.kind,
+						async run(input) {
+							calls++;
+							const result = await toolingRunner.run(input);
+
+							if (input.argv[0] === OXLINT && result.exitCode !== 0)
+								assert.match(result.stdout + result.stderr, /no-debugger/);
+
+							return result;
+						},
+					},
+				});
+
+				const result = {
+					attack,
+					calls,
+					status: receipt.status,
+					reason: receipt.reason,
+					lint: receipt.checks.find((c) => c.name === "lint")?.exitCode,
+				};
+
+				t.diagnostic(JSON.stringify(result));
+				results.push(result);
+			}
+
+			for (const result of results) {
+				if (frozen) {
+					assert.equal(result.lint, 1, JSON.stringify(result));
+					assert.equal(result.status, "failed");
+				} else {
+					assert.equal(
+						result.reason,
+						"invalid_gate_manifest",
+						JSON.stringify(result),
+					);
+					assert.equal(result.calls, 0);
+				}
+			}
+		});
+
 test("a candidate's nested oxlint config cannot turn off main's lint rule under a version 2 policy", async (t) => {
 	for (const [nested, text] of [
 		["maestro/.oxlintrc.json", '{ "rules": { "no-debugger": "off" } }\n'],
@@ -5448,6 +5692,7 @@ test("a version 2 overlay keeps main's nested Prettier, ESLint, oxlint, Biome, T
 			(dest: string) =>
 				materializeCandidate({
 					repository: f.root,
+					targetRepository: f.targetRepository,
 					gateSha,
 					candidateSha,
 					dest,
@@ -5797,6 +6042,32 @@ test("837a refuses relay preload, environment and inspector flags at every argv 
 		"--inspect",
 		"--inspect-brk",
 		"--inspect-port",
+		"--experimental-config-file",
+		"--experimental-default-config-file",
+		"--config-file",
+		"--test-reporter",
+		"--test-reporter-destination",
+		"--test-global-setup",
+		"--test-rerun-failures",
+		"--bench-reporter",
+		"--conditions",
+		"-C",
+		"--snapshot-blob",
+		"--openssl-config",
+		"--experimental-package-map",
+		"--vfs-load",
+		"--build-snapshot",
+		"--build-snapshot-config",
+		"--experimental-sea-config",
+		"--build-sea",
+		"--experimental-policy",
+		"--policy-integrity",
+		"--icu-data-dir",
+		"--localstorage-file",
+		"--run",
+		"--entry-url",
+		"--prof-process",
+		"--experimental_config_file",
 	])
 		for (const relay of [
 			["/g/tooling/node_modules/.bin/tsx"],
@@ -5809,6 +6080,10 @@ test("837a refuses relay preload, environment and inspector flags at every argv 
 					"/g/tooling/node_modules/typescript/bin/tsc",
 					flag,
 					"/g/tooling/scripts/exit.mjs",
+				],
+				[
+					"/g/tooling/node_modules/typescript/bin/tsc",
+					`${flag}=/g/tooling/scripts/exit.mjs`,
 				],
 			]) {
 				const argv = [...relay, ...args];
@@ -5846,6 +6121,184 @@ test("837a refuses relay preload, environment and inspector flags at every argv 
 					JSON.stringify(argv),
 				);
 			}
+});
+
+test("837a classifies tool file options independently of their suffix or argument shape", (t) => {
+	for (const [tool, flags] of [
+		["oxlint", ["-c", "--config", "--tsconfig"]],
+		["eslint", ["-c", "--config"]],
+		["prettier", ["--config"]],
+		["biome", ["--config-path"]],
+		["tsc", ["-p", "--project", "--PROJECT"]],
+	] as const)
+		for (const flag of flags) {
+			const f = permissiveAgentsRepo(t, {});
+			f.put("docs/settings.md", "{}");
+
+			for (const path of [
+				"docs/settings.md",
+				"/w/docs/settings.md",
+				"maestro/settings",
+				"test/settings",
+			]) {
+				f.put(path.replace(/^\/w\//, ""), "{}");
+
+				for (const args of [[flag, path], [`${flag}=${path}`]]) {
+					const argv = [`/g/tooling/node_modules/.bin/${tool}`, ...args];
+					const policy = agentsPolicy();
+					f.put(
+						GATE_POLICY,
+						JSON.stringify({
+							...policy,
+							checks: policy.checks.map((c) =>
+								c.name === "lint" ? { ...c, argv } : c,
+							),
+						}),
+					);
+					assert.throws(
+						() => manifestOf(f.root),
+						/^Error: invalid_gate_manifest$/,
+						JSON.stringify(argv),
+					);
+				}
+			}
+		}
+
+	for (const [tool, flags] of [
+		["oxlint", ["--ignore-path"]],
+		["eslint", ["--ignore-path", "--suppressions-location"]],
+		["prettier", ["--ignore-path"]],
+	] as const)
+		for (const flag of flags) {
+			const f = permissiveAgentsRepo(t, {});
+			const policy = agentsPolicy();
+			f.git("rm", "-q", "oxlint.config.ts");
+			f.put("settings/ignore.json", "# opaque ignore data, not JSON\n");
+			f.put("docs/ignore.md", "# mutable\n");
+
+			for (const path of [
+				"/dev/null",
+				"settings/ignore.json",
+				"/g/tooling/docs/ignore.md",
+				"docs/ignore.md",
+			])
+				for (const args of [[flag, path], [`${flag}=${path}`]]) {
+					const argv = [`/g/tooling/node_modules/.bin/${tool}`, ...args];
+					f.put(
+						GATE_POLICY,
+						JSON.stringify({
+							...policy,
+							checks: policy.checks.map((c) =>
+								c.name === "lint" ? { ...c, argv } : c,
+							),
+						}),
+					);
+
+					if (path === "docs/ignore.md")
+						assert.throws(
+							() => manifestOf(f.root),
+							/^Error: invalid_gate_manifest$/,
+							JSON.stringify(argv),
+						);
+					else
+						assert.doesNotThrow(() => manifestOf(f.root), JSON.stringify(argv));
+				}
+		}
+});
+
+test("837a refuses unsupported file loaders and response-file indirection", (t) => {
+	for (const [tool, flags] of [
+		[
+			"eslint",
+			[
+				"--parser",
+				"--parser-options",
+				"--plugin",
+				"--rulesdir",
+				"--resolve-plugins-relative-to",
+				"-f",
+				"--format",
+				"--stdin-filename",
+				"--cache",
+				"--cache-file",
+				"--cache-location",
+			],
+		],
+		[
+			"prettier",
+			[
+				"--plugin",
+				"--plugin-search-dir",
+				"--find-config-path",
+				"--stdin-filepath",
+				"--cache",
+				"--cache-location",
+			],
+		],
+		["biome", ["--vcs-root", "--stdin-file-path", "--use-server"]],
+		[
+			"tsc",
+			[
+				"-b",
+				"--build",
+				"-i",
+				"--incremental",
+				"--composite",
+				"--tsBuildInfoFile",
+			],
+		],
+	] as const)
+		for (const flag of flags) {
+			const f = permissiveAgentsRepo(t, {
+				lint: [`/g/tooling/node_modules/.bin/${tool}`],
+			});
+
+			assert.doesNotThrow(() => manifestOf(f.root));
+
+			const policy = JSON.parse(
+				readFileSync(join(f.root, GATE_POLICY), "utf8"),
+			);
+
+			for (const args of [
+				[flag, "/g/tooling/settings"],
+				[`${flag}=/g/tooling/settings`],
+			]) {
+				const argv = [`/g/tooling/node_modules/.bin/${tool}`, ...args];
+				f.put(
+					GATE_POLICY,
+					JSON.stringify({
+						...policy,
+						checks: policy.checks.map((c: { name: string; argv: string[] }) =>
+							c.name === "lint" ? { ...c, argv } : c,
+						),
+					}),
+				);
+				assert.throws(
+					() => manifestOf(f.root),
+					/^Error: invalid_gate_manifest$/,
+					JSON.stringify(argv),
+				);
+			}
+		}
+
+	for (const argv of [
+		[
+			OXLINT,
+			"--ignore-path",
+			"docs/missing.md",
+			"/g/tooling/node_modules/.bin/tsc",
+		],
+		["/g/tooling/node_modules/.bin/tsc", "@docs/options.md"],
+		["/g/tooling/node_modules/.bin/tsc", "-p"],
+		[OXLINT, "--ignore-path"],
+	]) {
+		const f = permissiveAgentsRepo(t, { lint: argv });
+		assert.throws(
+			() => manifestOf(f.root),
+			/^Error: invalid_gate_manifest$/,
+			JSON.stringify(argv),
+		);
+	}
 });
 
 test("837a follows config references transitively and refuses unresolved or dynamic references", (t) => {

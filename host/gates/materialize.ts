@@ -261,26 +261,6 @@ export async function git(
 	return result.stdout;
 }
 
-async function targetRepository(repository: string): Promise<string | null> {
-	try {
-		const origin = await git(repository, [
-			"config",
-			"--local",
-			"--get",
-			"remote.origin.url",
-		]);
-
-		const match =
-			/^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?\/?$/.exec(
-				origin.trim(),
-			);
-
-		return match?.[1]?.toLowerCase() ?? null;
-	} catch {
-		return null;
-	}
-}
-
 export function safePath(path: string): boolean {
 	return (
 		path.length > 0 &&
@@ -686,6 +666,7 @@ function overlay(input: {
 
 export async function materializeCandidate(input: {
 	readonly repository: string;
+	readonly targetRepository?: string;
 	readonly gateSha: string;
 	readonly candidateSha: string;
 	readonly dest: string;
@@ -712,7 +693,7 @@ export async function materializeCandidate(input: {
 				pinnedMaterializerIdentity(input.dest) === null &&
 				!gateMaterializerIdentity(
 					input.dest,
-					await targetRepository(input.repository),
+					input.targetRepository ?? null,
 				).equals(materializerIdentity(PRODUCT_ROOT))
 			)
 				throw new Error("unsupported_materializer");

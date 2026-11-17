@@ -24,6 +24,7 @@ import {
 	textOf,
 } from "../../src/core/json.ts";
 import { isDigest } from "../../src/core/run.ts";
+import { isRepoSlug } from "../../src/trust/platform.ts";
 import { countsOf, heldoutProjection } from "./base.ts";
 import {
 	CHECK_NAMES,
@@ -98,6 +99,7 @@ export type GateReceipt = {
 
 export type CandidateInput = {
 	readonly repository: string;
+	readonly targetRepository?: string;
 	readonly gateSha: string;
 	readonly candidateSha: string;
 	readonly nonce: string;
@@ -673,6 +675,7 @@ export async function runGatesCli(
 			strict: true,
 			options: {
 				repository: { type: "string" },
+				"target-repo": { type: "string" },
 				"gate-sha": { type: "string" },
 				"candidate-sha": { type: "string" },
 				nonce: { type: "string" },
@@ -703,7 +706,11 @@ export async function runGatesCli(
 			);
 
 		let replacements = replacementsOf(values.replacements ?? "[]"),
-			digest = values["replacements-digest"];
+			digest = values["replacements-digest"],
+			targetRepository = values["target-repo"];
+
+		if (targetRepository !== undefined && !isRepoSlug(targetRepository))
+			throw new Error("invalid_target_repo");
 
 		if (values["state-dir"] || values["run-id"] || values["contract-digest"]) {
 			const runId = values["run-id"] ?? "",
@@ -721,6 +728,13 @@ export async function runGatesCli(
 
 			if (stored.kind !== "found" || stored.digest !== contractDigest)
 				throw new Error("private_contract_unavailable");
+
+			if (
+				targetRepository !== undefined &&
+				targetRepository !== stored.contract.base.repo
+			)
+				throw new Error("target_repo_mismatch");
+			targetRepository = stored.contract.base.repo;
 			replacements = stored.contract.replacesTests ?? [];
 			digest = replacementDigest(replacements);
 		}
@@ -734,6 +748,7 @@ export async function runGatesCli(
 
 		const receipt = await checkCandidate({
 			repository: resolve(values.repository),
+			targetRepository,
 			gateSha: values["gate-sha"],
 			candidateSha: values["candidate-sha"],
 			nonce: values.nonce,

@@ -45,20 +45,114 @@ const RESERVED_CHECKS = [
 const LEGACY_TEST_GLOB =
 	/^test\/(?:(?:src|host)\/\*\*\/\*\.test\.ts|integration\/\*\.test\.ts)$/;
 
-const NODE_CODE_FLAG =
-	/^(?:-[re]|--(?:import|require|loader|experimental-loader|eval|print)(?:=|$)|--(?:env-file|inspect))/;
+type FileOption = "config" | "biome" | "ignore" | "refuse";
 
-const CONFIG_FLAGS = new Set([
-	"-c",
-	"--config",
-	"--config-path",
-	"-p",
-	"--project",
-	"--tsconfig",
-	"--plugin",
-	"-b",
-	"--build",
-]);
+type ToolFileOptions = Readonly<
+	Record<string, Readonly<Record<string, FileOption>>>
+>;
+
+// CLI sources and refusal rationale: docs/operations/factory-cli.md#tool-file-options.
+const FILE_OPTIONS = {
+	oxlint: {
+		"-c": "config",
+		"--config": "config",
+		"--tsconfig": "config",
+		"--ignore-path": "ignore",
+	},
+	eslint: {
+		"-c": "config",
+		"--config": "config",
+		"--ignore-path": "ignore",
+		"--suppressions-location": "ignore",
+		"--parser": "refuse",
+		"--parser-options": "refuse",
+		"--plugin": "refuse",
+		"--rulesdir": "refuse",
+		"--resolve-plugins-relative-to": "refuse",
+		"-f": "refuse",
+		"--format": "refuse",
+		"--stdin-filename": "refuse",
+		"--cache": "refuse",
+		"--cache-file": "refuse",
+		"--cache-location": "refuse",
+	},
+	prettier: {
+		"--config": "config",
+		"--ignore-path": "ignore",
+		"--plugin": "refuse",
+		"--plugin-search-dir": "refuse",
+		"--find-config-path": "refuse",
+		"--stdin-filepath": "refuse",
+		"--cache": "refuse",
+		"--cache-location": "refuse",
+	},
+	biome: {
+		"--config-path": "biome",
+		"--vcs-root": "refuse",
+		"--stdin-file-path": "refuse",
+		"--use-server": "refuse",
+	},
+	tsc: {
+		"-p": "config",
+		"--project": "config",
+		"-b": "refuse",
+		"--build": "refuse",
+		"-i": "refuse",
+		"--incremental": "refuse",
+		"--composite": "refuse",
+		"--tsbuildinfofile": "refuse",
+	},
+	node: {
+		"--require": "refuse",
+		"--import": "refuse",
+		"--loader": "refuse",
+		"--experimental-loader": "refuse",
+		"--eval": "refuse",
+		"--print": "refuse",
+		"--env-file": "refuse",
+		"--env-file-if-exists": "refuse",
+		"--experimental-config-file": "refuse",
+		"--experimental-default-config-file": "refuse",
+		"--config-file": "refuse",
+		"--test-reporter": "refuse",
+		"--test-reporter-destination": "refuse",
+		"--test-global-setup": "refuse",
+		"--test-rerun-failures": "refuse",
+		"--bench-reporter": "refuse",
+		"--conditions": "refuse",
+		"--snapshot-blob": "refuse",
+		"--build-snapshot": "refuse",
+		"--build-snapshot-config": "refuse",
+		"--experimental-sea-config": "refuse",
+		"--build-sea": "refuse",
+		"--experimental-policy": "refuse",
+		"--policy-integrity": "refuse",
+		"--experimental-package-map": "refuse",
+		"--vfs-load": "refuse",
+		"--openssl-config": "refuse",
+		"--icu-data-dir": "refuse",
+		"--localstorage-file": "refuse",
+		"--run": "refuse",
+		"--entry-url": "refuse",
+		"--prof-process": "refuse",
+	},
+} satisfies ToolFileOptions;
+
+function toolFileOptions(tool: string): Readonly<Record<string, FileOption>> {
+	return (
+		Object.entries(FILE_OPTIONS).find(([name]) => name === tool)?.[1] ?? {}
+	);
+}
+
+function nodeCodeFlag(arg: string): boolean {
+	const flag = arg.split("=", 1)[0]?.replaceAll("_", "-") ?? "";
+
+	return (
+		/^-[reC]/.test(arg) ||
+		/^(?:--env-file|--inspect|--debug-port)/.test(flag) ||
+		toolFileOptions("node")[flag] === "refuse"
+	);
+}
 
 const CONFIG_NAME =
 	/^(?:[jt]sconfig.*\.jsonc?|\.oxlintrc(?:\..+)?|oxlint\.config\..+|\.eslintrc(?:\..+)?|eslint\.config\..+|\.prettierrc(?:\..+)?|prettier\.config\..+|\.?biome\.jsonc?)$/;
@@ -77,7 +171,7 @@ const NODE_RELAYS = new Set([
 	"/g/tooling/node_modules/tsx/dist/cli.mjs",
 ]);
 
-const NO_CHECK_FLAGS = ["--version", "-v", "--help", "-h"];
+const NO_CHECK_FLAGS = ["--version", "-v", "-V", "--help", "-h"];
 
 const NODE_FLAGS = ["--experimental-strip-types", "--no-warnings"];
 
@@ -324,22 +418,62 @@ function candidatePath(arg: string, roots: readonly string[]): boolean {
 	});
 }
 
+function fileArgument(argv: readonly string[], index: number) {
+	const scriptAt =
+		argv[0] === "node"
+			? argv.findIndex((arg, i) => i > 0 && !arg.startsWith("-"))
+			: 0;
+
+	const script = argv[scriptAt] ?? "";
+
+	const program = NODE_RELAYS.has(script)
+		? argv.slice(scriptAt + 1).find((arg) => !arg.startsWith("-"))
+		: script;
+
+	const tool = posix.basename(program ?? "");
+
+	const options = toolFileOptions(tool);
+
+	const arg =
+		tool === "tsc" ? (argv[index] ?? "").toLowerCase() : (argv[index] ?? "");
+
+	const flag = arg.split("=", 1)[0] ?? "";
+	const kind = options[flag];
+
+	if (kind !== undefined)
+		return {
+			kind,
+			separate: !argv[index]?.includes("="),
+			value: argv[index]?.includes("=")
+				? (argv[index]?.slice(flag.length + 1) ?? "")
+				: (argv[index + 1] ?? ""),
+		};
+
+	const short = Object.keys(options).find(
+		(key) => /^-[a-z]$/.test(key) && arg.startsWith(key),
+	);
+
+	return short === undefined
+		? undefined
+		: {
+				kind: options[short],
+				separate: false,
+				value: argv[index]?.slice(2) ?? "",
+			};
+}
+
 function configArgument(
 	argv: readonly string[],
 	index: number,
 ): string | undefined {
-	const arg = argv[index] ?? "";
-	const [flag, value] = arg.split("=", 2);
-
-	if (CONFIG_FLAGS.has(flag ?? "")) return value ?? argv[index + 1];
-
-	return /^-[cp].+/.test(arg) ? arg.slice(2) : undefined;
+	return fileArgument(argv, index)?.value;
 }
 
 function checkToolConfigs(tree: string, policy: GatePolicy): void {
-	const pending: { path: string; plugin: boolean }[] = [];
+	const pending: { path: string; plugin: boolean; kind?: FileOption }[] = [];
 	const seen = new Set<string>();
 	const explicit = new Set<string>();
+	const opaque = new Set<string>();
 
 	const tools = policy.checks.flatMap(({ argv }) =>
 		argv
@@ -349,14 +483,21 @@ function checkToolConfigs(tree: string, policy: GatePolicy): void {
 
 	for (const { argv } of policy.checks)
 		for (const index of argv.keys()) {
-			const path = configArgument(argv, index);
+			const file = fileArgument(argv, index);
 
-			if (path !== undefined) {
+			if (file !== undefined) {
+				if (file.kind === "refuse" || !file.value || file.value.startsWith("-"))
+					throw new Error("invalid_gate_manifest");
+
+				if (file.kind === "ignore" && file.value === "/dev/null") continue;
+
 				const normalized = posix.normalize(
-					path.startsWith("/") ? path : `/w/${path}`,
+					file.value.startsWith("/") ? file.value : `/w/${file.value}`,
 				);
 
-				pending.push({ path: normalized, plugin: false });
+				pending.push({ path: normalized, plugin: false, kind: file.kind });
+
+				if (file.kind === "ignore") opaque.add(normalized);
 				explicit.add(normalized.replace(/^\/g\/tooling\//, "/w/"));
 			}
 		}
@@ -371,6 +512,8 @@ function checkToolConfigs(tree: string, policy: GatePolicy): void {
 				);
 
 				const relative = path.replace(/^\/(?:w|g\/tooling)\//, "");
+
+				if (opaque.has(path)) continue;
 
 				if (
 					lstatSync(join(tree, relative), { throwIfNoEntry: false })?.isFile()
@@ -447,8 +590,8 @@ function checkToolConfigs(tree: string, policy: GatePolicy): void {
 		const next = pending.pop();
 
 		if (next === undefined) continue;
-		const { path: requested, plugin } = next;
-		const key = `${plugin}:${requested}`;
+		const { path: requested, plugin, kind } = next;
+		const key = `${kind}:${plugin}:${requested}`;
 
 		if (seen.has(key)) continue;
 		seen.add(key);
@@ -472,15 +615,27 @@ function checkToolConfigs(tree: string, policy: GatePolicy): void {
 		)
 			throw new Error("invalid_gate_manifest");
 
-		const path = [
-			relative,
-			`${relative}.json`,
-			posix.join(relative, "tsconfig.json"),
-		].find((p) =>
+		const path = (
+			kind === "ignore"
+				? [relative]
+				: kind === "biome"
+					? [
+							relative,
+							posix.join(relative, "biome.json"),
+							posix.join(relative, "biome.jsonc"),
+						]
+					: [
+							relative,
+							`${relative}.json`,
+							posix.join(relative, "tsconfig.json"),
+						]
+		).find((p) =>
 			lstatSync(join(tree, p), { throwIfNoEntry: false })?.isFile(),
 		);
 
 		if (path === undefined) throw new Error("invalid_gate_manifest");
+
+		if (kind === "ignore") continue;
 		const text = readFileSync(join(tree, path), "utf8");
 
 		if (/\.[cm]?[jt]s$/.test(path)) {
@@ -696,7 +851,8 @@ function runsTooling(
 		supportedProgram(script, program === "node" ? rest.slice(at + 1) : rest) &&
 		argv.every(
 			(arg, index) =>
-				!NODE_CODE_FLAG.test(arg) &&
+				!nodeCodeFlag(arg) &&
+				!arg.startsWith("@") &&
 				!NO_CHECK_FLAGS.includes(arg) &&
 				!arg.split(/[/=,:]/).includes("..") &&
 				!candidatePath(arg, roots) &&
@@ -714,8 +870,8 @@ function runsTooling(
 						(root) =>
 							path.startsWith(`${root}/`) ||
 							(path === root &&
-								(CONFIG_FLAGS.has(argv[index - 1] ?? "") ||
-									CONFIG_FLAGS.has(arg.split("=", 1)[0] ?? ""))),
+								(fileArgument(argv, index - 1)?.separate === true ||
+									fileArgument(argv, index) !== undefined)),
 					);
 				}),
 		)
