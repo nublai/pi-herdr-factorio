@@ -33,9 +33,10 @@ import {
 } from "../../../src/candidate/build.ts";
 import { feedbackPrompt } from "../../../src/candidate/review.ts";
 import { isGitSha } from "../../../src/config/schema.ts";
+import { parseWorkflow } from "../../../src/config/parse.ts";
 import { renderBuildSummary } from "../../../src/contract/render.ts";
 import { digestOf } from "../../../src/core/run.ts";
-import { isRepoSlug } from "../../../src/trust/platform.ts";
+import { EXE_DEV_PLATFORM, isRepoSlug } from "../../../src/trust/platform.ts";
 
 function fixture(t: { after(fn: () => void): void }) {
 	const root = mkdtempSync(join(tmpdir(), "factory-build-"));
@@ -977,7 +978,7 @@ for (const feedback of [false, true])
 
 		assert.ok(isRepoSlug(repo) && isGitSha(sha));
 
-		const prompt = buildPrompt({
+		const promptInput = {
 			feedback,
 			contract: {
 				version: 2,
@@ -1002,7 +1003,9 @@ for (const feedback of [false, true])
 			},
 			guidance: { general: "", stages: {} },
 			inlined: [],
-		});
+		} satisfies Parameters<typeof buildPrompt>[0];
+
+		const prompt = buildPrompt(promptInput);
 
 		assert.ok(
 			prompt.startsWith(
@@ -1039,11 +1042,48 @@ for (const feedback of [false, true])
 			/CI runs the candidate tree read-only at the repository root[^\n]*os\.tmpdir\(\)[^\n]*never inside the checkout/,
 		);
 
-		// Static-check entries name only a file, so repair reruns the checks.
-		for (const text of [prompt, feedbackPrompt("{}")])
-			assert.match(
+		for (const text of [prompt, feedbackPrompt("{}")]) {
+			assert.doesNotMatch(
 				text,
-				/lint, format or typecheck entry[^\n]*npm run lint, npm run format:check or npm run typecheck[^\n]*to see the details[^\n]*base copies of \.oxlintrc\.json, tsconfig\.json and biome\.json[^\n]*never change them to make a check pass/,
+				/check:layout|check:decisions|\.oxlintrc\.json|test\/src\/trust\/policy\.test\.ts|npm run lint|npm run format:check|npm run typecheck/,
+			);
+			assert.match(text, /trusted.*build guidance/i);
+		}
+
+		const target = "nublai/pi-herdr-factorio";
+		assert.ok(isRepoSlug(target));
+
+		const workflow = parseWorkflow({
+			text: readFileSync(".github/factory/WORKFLOW.md", "utf8"),
+			repo: target,
+			env: (name) => (name === "HOME" ? "/tmp" : undefined),
+			platform: EXE_DEV_PLATFORM,
+		});
+
+		assert.ok(workflow.kind === "valid", JSON.stringify(workflow));
+
+		const factorio = buildPrompt({
+			...promptInput,
+			guidance: workflow.guidance,
+		});
+
+		for (const instruction of [
+			"For layout or decisions feedback, run npm run check:layout or npm run check:decisions",
+			"Layout uses scripts/layout-baseline.json.",
+			"docs/decisions.tsv and scripts/decisions-checkpoint.json are coordinator-only and must not change.",
+			"Run npm run lint, npm run format:check or npm run typecheck",
+			"base copies of .oxlintrc.json, tsconfig.json and biome.json",
+			"never change them to make a check pass.",
+			"node --experimental-strip-types --test test/src/trust/policy.test.ts",
+		]) {
+			assert.ok(factorio.includes(instruction), instruction);
+			assert.ok(`${factorio}\n${feedbackPrompt("{}")}`.includes(instruction));
+		}
+
+		for (const path of ["skills/build/SKILL.md", "skills/acceptance/SKILL.md"])
+			assert.doesNotMatch(
+				readFileSync(path, "utf8"),
+				/check:layout|check:decisions|test\/src\/trust\/policy\.test\.ts/,
 			);
 	});
 

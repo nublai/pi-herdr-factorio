@@ -3375,7 +3375,15 @@ test("visible tests run an unlisted changed test from its base bytes as the gate
 	put(
 		base,
 		".github/factory/gates/gates.json",
-		readFileSync(".github/factory/gates/gates.json", "utf8"),
+		JSON.stringify({
+			version: 2,
+			sourceRoots: ["src"],
+			testGlobs: ["test/*.test.js"],
+			checks: ["typecheck", "lint", "format"].map((name) => ({
+				name,
+				argv: ["/g/tooling/node_modules/.bin/biome", "format", "src"],
+			})),
+		}),
 	);
 
 	const listed: readonly ReplacedTest[] = [
@@ -3548,6 +3556,154 @@ export default eslintCompatPlugin({
 
 	return { ...f, gateSha: f.commit() };
 }
+
+test("R4 materializes an empty replacement list without expanding the test inventory", async (t) => {
+	const f = repo(t);
+	const path = "test/value.test.ts";
+	f.git("mv", "test/src/example/value.test.ts", path);
+	const gateSha = f.commit();
+	f.put("src/value.ts", 'export const value = "candidate";\n');
+	const candidateSha = f.commit();
+	const dest = join(f.root, "materialized");
+
+	const result = await materializeCandidate({
+		repository: f.root,
+		gateSha,
+		candidateSha,
+		dest,
+		replacements: [],
+	});
+
+	assert.deepEqual(result, { ignoredChanges: [], newTests: [] });
+	assert.equal(
+		readFileSync(join(dest, "src/value.ts"), "utf8"),
+		'export const value = "candidate";\n',
+	);
+	assert.equal(
+		readFileSync(join(dest, path), "utf8"),
+		readFileSync(join(f.root, path), "utf8"),
+	);
+	await assert.rejects(
+		materializeCandidate({
+			repository: f.root,
+			gateSha,
+			candidateSha,
+			dest: join(f.root, "replacement-refused"),
+			replacements: [{ path, test: "value", reason: "Not in the inventory" }],
+		}),
+		/missing_tests/,
+	);
+});
+
+test("R4 accepts a named replacement in the configured test/test.ts and preserves its unnamed tests", async (t) => {
+	const f = agentsRepo(t);
+	const path = "test/test.ts";
+
+	const source = (value: number) =>
+		`import assert from "node:assert/strict";\nimport { test } from "node:test";\ntest("changed", () => assert.equal(${value}, ${value}));\ntest("unnamed", () => assert.equal(2, 2));\n`;
+
+	f.put(path, source(1));
+	const gateSha = f.commit();
+	const replacements = [{ path, test: "changed", reason: "Ticket changes it" }];
+
+	const specified = parseSpecifyOutput(
+		JSON.stringify({
+			kind: "contract",
+			summary: "Change the named test",
+			behavior: ["Use the new behavior"],
+			acceptance: [{ kind: "new_behavior", text: "New behavior is checked" }],
+			exclusions: [],
+			compatibility: [],
+			limits: [],
+			files: [path],
+			evidence: [],
+			replacesTests: replacements,
+		}),
+		new Set([path]),
+	);
+
+	assert.ok(specified.kind === "contract");
+	assert.deepEqual(specified.draft.replacesTests, replacements);
+	assert.equal(replacementScenarios(specified.draft)[0]?.id, "T1");
+	f.put(path, source(2));
+
+	const candidateSha = f.commit();
+	const dest = join(f.root, "materialized");
+	await materializeCandidate({
+		repository: f.root,
+		gateSha,
+		candidateSha,
+		dest,
+		replacements,
+	});
+	assert.equal(readFileSync(join(dest, path), "utf8"), source(2));
+	assert.ok(declaresTest(readFileSync(join(dest, path), "utf8"), "unnamed"));
+
+	const receipt = await checkCandidate({
+		...gateInput(f, candidateSha),
+		gateSha,
+		replacements,
+		replacementsDigest: replacementDigest(replacements),
+		runner: toolingRunner,
+	});
+
+	assert.equal(receipt.status, "passed", JSON.stringify(receipt));
+	assert.equal(receipt.candidateCounts[path], 2);
+	assert.equal(receipt.replacedTests[0]?.test, "changed");
+});
+
+for (const widen of [false, true])
+	test(`R4 refuses an out-of-inventory helper replacement, candidate widens policy=${widen}`, async (t) => {
+		const f = agentsRepo(t);
+		const path = "test/helper.test.ts";
+		const policy = { ...agentsPolicy(), testGlobs: ["test/test.ts"] };
+		f.put(GATE_POLICY, JSON.stringify(policy));
+		f.put(
+			path,
+			'import { test } from "node:test";\ntest("helper", () => {});\n',
+		);
+		const gateSha = f.commit();
+
+		if (widen)
+			f.put(
+				GATE_POLICY,
+				JSON.stringify({ ...policy, testGlobs: ["test/test.ts", path] }),
+			);
+		f.put(
+			path,
+			'import { test } from "node:test";\ntest("helper", () => { throw new Error("candidate"); });\n',
+		);
+		assert.doesNotThrow(() => manifestOf(f.root));
+
+		const candidateSha = f.commit();
+		const replacements = [{ path, test: "helper", reason: "Not a unit test" }];
+
+		await assert.rejects(
+			materializeCandidate({
+				repository: f.root,
+				gateSha,
+				candidateSha,
+				dest: join(f.root, "refused"),
+				replacements,
+			}),
+			/invalid_replacements/,
+		);
+
+		const gateTree = join(f.root, "base-tree");
+		const candidateTree = join(f.root, "candidate-tree");
+		await exportTree(f.root, gateSha, gateTree);
+		await exportTree(f.root, candidateSha, candidateTree);
+		assert.throws(
+			() =>
+				materializeFromDirectories({
+					gateTree,
+					candidateTree,
+					dest: join(f.root, "refused-directories"),
+					replacements,
+				}),
+			/invalid_replacements/,
+		);
+	});
 
 const TOOLS = resolve("node_modules");
 

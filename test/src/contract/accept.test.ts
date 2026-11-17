@@ -14,6 +14,7 @@ import { describe, it } from "node:test";
 import { runHeldoutBase } from "../../../host/gates/base.ts";
 import { assessBase } from "../../../src/candidate/diagnosis.ts";
 import { isGitSha } from "../../../src/config/schema.ts";
+import { parseWorkflow } from "../../../src/config/parse.ts";
 import {
 	ACCEPTANCE_ISOLATION,
 	acceptancePrompt,
@@ -36,7 +37,7 @@ import {
 import type { JsonObject } from "../../../src/core/json.ts";
 import { type FamilyInput, familyLabel } from "../../../src/core/models.ts";
 import { digestOf } from "../../../src/core/run.ts";
-import { isRepoSlug } from "../../../src/trust/platform.ts";
+import { EXE_DEV_PLATFORM, isRepoSlug } from "../../../src/trust/platform.ts";
 
 const repo = "giuseppecrj/pi-herdr-factorio";
 const sha = "a".repeat(40);
@@ -918,7 +919,8 @@ describe("held-out acceptance output", () => {
 		});
 
 		for (const text of [prompt, acceptanceSkill]) {
-			assert.match(text, /trusted gates already enforce/i);
+			assert.match(text, /trusted gates.*(?:run|enforce)/i);
+			assert.match(text, /gate policy/);
 			assert.match(text, /review is read-only and cannot run code/i);
 			assert.match(
 				text,
@@ -927,6 +929,64 @@ describe("held-out acceptance output", () => {
 			assert.match(text, /judge_restates_gate/);
 			assert.match(text, /judge_requires_execution/);
 		}
+	});
+
+	it("R4 renders accept guidance for Agents without Factorio-only gate claims", () => {
+		const target = "giuseppecrj/pi-herdr-agents";
+		assert.ok(isRepoSlug(target));
+
+		const prompt = acceptancePrompt({
+			contract: { ...contract, base: { repo: target, sha } },
+			files: ["pi-extension/index.ts", "test/test.ts"],
+			inlined: [],
+			guidance: {
+				general: "Pi Herdr Agents is a TypeScript/ESM repository.",
+				stages: { accept: "Test exported behavior with node:test." },
+			},
+		});
+
+		assert.match(prompt, /accept stage for giuseppecrj\/pi-herdr-agents/);
+		assert.match(prompt, /target repository's gate policy on main/);
+		assert.match(prompt, /Test exported behavior with node:test/);
+
+		for (const text of [prompt, acceptanceSkill])
+			assert.doesNotMatch(
+				text,
+				/check:layout|check:decisions|gate-manifest PR|\.oxlintrc\.json|layout-baseline|decisions-checkpoint/,
+			);
+	});
+
+	it("R4 keeps Factorio accept gate claims through trusted WORKFLOW guidance", () => {
+		const target = "nublai/pi-herdr-factorio";
+		assert.ok(isRepoSlug(target));
+
+		const workflow = parseWorkflow({
+			text: readFileSync(".github/factory/WORKFLOW.md", "utf8"),
+			repo: target,
+			env: (name) => (name === "HOME" ? "/tmp" : undefined),
+			platform: EXE_DEV_PLATFORM,
+		});
+
+		assert.ok(workflow.kind === "valid", JSON.stringify(workflow));
+
+		const prompt = acceptancePrompt({
+			contract: { ...contract, base: { repo: target, sha } },
+			files: [],
+			inlined: [],
+			guidance: workflow.guidance,
+		});
+
+		const instruction =
+			"The trusted gates enforce typecheck, lint, format, tests, check:layout and check:decisions.";
+
+		assert.ok(workflow.guidance.stages.accept?.includes(instruction));
+		assert.ok(prompt.includes(instruction));
+		assert.doesNotMatch(
+			prompt.split(
+				"Repository guidance, from WORKFLOW.md at this commit:",
+			)[0] ?? "",
+			/check:layout|check:decisions/,
+		);
 	});
 
 	it("gets only contract, trusted base map and named files, without issue or earlier sessions", () => {

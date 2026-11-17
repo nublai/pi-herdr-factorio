@@ -153,12 +153,16 @@ If the issue leaves a decision open that changes the behavior, ask that question
 
 Write acceptance tests from the contract alone, with `node:test` and `node:assert/strict`.
 Test behavior through exported functions or the CLI, never internal helpers.
+The trusted gates enforce typecheck, lint, format, tests, check:layout and check:decisions.
 
 ## build
 
 Write a failing test first, then the smallest change that passes it.
 Keep the diff inside the files the contract names. Do not add a dependency unless the contract asks for one.
 Follow `.oxlintrc.json`: no `typeof` narrowing, no `unknown` parameters or returns, no casts without a `SAFETY:` comment.
+For layout or decisions feedback, run npm run check:layout or npm run check:decisions to see the details. Layout uses scripts/layout-baseline.json. Fix the cause, not the guard; docs/decisions.tsv and scripts/decisions-checkpoint.json are coordinator-only and must not change.
+In a repair round, a lint, format or typecheck entry in .factory-feedback.json names only the file that failed. Run npm run lint, npm run format:check or npm run typecheck in /workspace, after npm ci --ignore-scripts, to see the details, then fix them. CI runs these checks with the base copies of .oxlintrc.json, tsconfig.json and biome.json and ignores any change to them, so restore any change your patch made to those files before you check, and never change them to make a check pass.
+Run only the focused test file you are working on, for example node --experimental-strip-types --test test/src/trust/policy.test.ts.
 
 ## validate
 

@@ -8796,36 +8796,36 @@ test("stored books keep their bytes and refusals through parse, transition and f
 
 const STORED_BOOK_DIGESTS = {
 	unprepared:
-		"a809a92c446cb50454e780189f427682192ef1547fdb253c47e14e0936b263cc",
+		"fbe737b180bd50ad9b9768cb0937f1927b71f0e86f304d8e8fcb4bef13b3c6b5",
 	pending_validate:
-		"0d7e8908c62a82ada3238391dd21c92fcf842829b72fe2d4061db49f9b040127",
+		"16472cfdb1e37214acc62b595612a34598fb28ceab06b37216854db83c3fb9d8",
 	captured_review:
-		"80b6418d780234ba25e250d75d68467c14d7d055e52773316b57157d2125f874",
+		"74600178660fccefaf5377739bf699017f2b90d4a91b610530a9c19b94da79d1",
 	unknown_usage:
-		"af0675dc41800d7bb134ca0d600427c0ad853f2ca6fb58c15b8b5a63220740a8",
-	certified: "3fd1f26494c465203b5534e34e8cff1a21b280ca35f7ccbde67218fd9f52fff3",
+		"869deefe189d6a30ec983cfc8b75b5419d5f31bb10489448fe8065a41d7d58f9",
+	certified: "7a4ee9865f3e846126195e43713c8ceae0ab4f22f738acdd889eda28e9ce9db1",
 	pending_open_pr:
-		"67dfaa4cb6128a4b55a5f90b6bb3add1b33fc7ff317580cae85e7c52f485595b",
-	waiting: "927249773fb59b96ac959b844f61fafb816badda5b708ba040c246f983269e98",
-	owner_due: "8b29988e483f2e51fbaeacfa92f5a70865bf53b4eff5cd39f4cc772059e4f706",
+		"6950d458ce424c2721c952c8d082883bc0ebec7947dcec5cbf6758c751e15f08",
+	waiting: "409ef7166bbdded1a86eae00fd569670e411eabac2dbd9f786f34f01f7a9c33e",
+	owner_due: "3f1c1dead1b9c8c7fef3de107bb4a0978ccb56fa388e8a55da678829f1bdbde2",
 	owner_deriving:
-		"86143be75ddcbd1c0779713ca5c6131b7301afd2902d3e935143d38cc6c21a36",
+		"1c1f074eb51fab5c95dbca4cf424a723e247e593763993651bbd15ad0e26c69f",
 	owner_recertify:
-		"37ba8de1edb53e44fbf2b3afa5edab5a5a19654d335914c60f9a9b4184d9d647",
+		"12369a4fe65f1d6e9cfb7dc47cb581fdbb60747d2fcae8eab25509829693e4f4",
 	late_unknown:
-		"aedbf57381f0c7f9aecb2ef9fb7cce63fca3bde916aaeec849307d9e69331445",
+		"b15d9c777c2e504e1c7e28ed5479c8b2da4647b9964c1f63d82d9ef00f86485b",
 	feedback_queued:
-		"2fd59b89a998f4ba2f04f516fff2df6ce9bb958150b3932cc50294711a3c10d8",
+		"7748e0714d2193293e3b47fb6b0021c1646f350416bfc3313ff2e4549e102a73",
 	feedback_rebuilding:
-		"74ccc0ed79234680567f61bac53695b68475d060c098c2a82097114104218f40",
+		"4d49aeadb7261f85146d169704c37589de5a7820568b3cafdb43a9c009b81b23",
 	merge_pending:
-		"b032585c5d6a11054c7dd1151f0921d7c626b2de179025285dfabe8bead374f1",
+		"c3d7074522d87d2068bb5d1e378eeb20c116fbf92e59b0f6fb2748c28a20e4b7",
 	legacy_no_feedback:
-		"6aee7e33330e8364631aa5eba6d8909d4914e919a9a301824a549f49e4430af9",
+		"24e987545afab417db71e8ea2ad2c43f69227f140f70cb73d68ee9e131d00462",
 	legacy_no_owner_head:
-		"2e3de9134d6caf1a7b557061d42418ed1636250fdbbe3dfce6350b8ab69da91e",
+		"bc24dd531548145533f58bf08537ea15f92e34e808a1555f8e76f3a84b4f2e47",
 	legacy_v1_certification_review:
-		"927249773fb59b96ac959b844f61fafb816badda5b708ba040c246f983269e98",
+		"409ef7166bbdded1a86eae00fd569670e411eabac2dbd9f786f34f01f7a9c33e",
 	owner_patch_missing: null,
 	wrong_pin_workflow: null,
 	wrong_intent_digest: null,
@@ -8838,8 +8838,8 @@ const STORED_BOOK_DIGESTS = {
 	v1_review_unmigratable: null,
 	negative_unknown_floor: null,
 	promoted_generation_missing: null,
-	review_v2: "955390bb8319a8ed55484783fb38c78800e99fc0d54307aeef6230db7a998c9d",
-	review_v1: "955390bb8319a8ed55484783fb38c78800e99fc0d54307aeef6230db7a998c9d",
+	review_v2: "2215433065723ddb9b8df10ac193d1f935cfe70fd7fcd92c1ed0896b6ffb99cf",
+	review_v1: "2215433065723ddb9b8df10ac193d1f935cfe70fd7fcd92c1ed0896b6ffb99cf",
 	review_v1_broken: null,
 	owner_patch:
 		"959a9c2b7b3c27804a37e17e43cf1d5a9fd10b40ed598c5d6907b90d7f8c1a78",
