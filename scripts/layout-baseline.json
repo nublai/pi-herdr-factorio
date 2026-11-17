@@ -3241,7 +3241,7 @@
 		{
 			"id": "gate-source-roots",
 			"kind": "paths",
-			"reader": "host/gates/materialize.ts",
+			"reader": "host/gates/manifest.ts",
 			"tokens": {
 				"export const SOURCE = [ \"src\", \"extension\", \"host\", \"skills\", \"scripts\", \".pi/skills\", \"docs/models\", ];": 1
 			},
@@ -5487,16 +5487,16 @@
 			"accepts": "/^test\\/(?:(?:src|host)\\/\\*\\*\\/\\*\\.test\\.ts|integration\\/\\*\\.test\\.ts)$/",
 			"predicates": [
 				{
-					"file": "host/gates/manifest.ts",
-					"expression": "new Set(testGlobs).size !== testGlobs.length"
+					"file": "src/candidate/review.ts",
+					"expression": "new Set(globs).size === globs.length"
 				},
 				{
 					"file": "host/gates/manifest.ts",
-					"expression": "const files = globSync(pattern, { cwd: tree });"
+					"expression": "const files = globSync(pattern, { cwd: tree, exclude: [\"test/acceptance/**\", \"test/fixtures/**\"], });"
 				},
 				{
 					"file": "host/gates/manifest.ts",
-					"expression": "return { checks, tests, testGlobs };"
+					"expression": "return { ...policy, tests };"
 				},
 				{
 					"file": "host/gates/gates.ts",

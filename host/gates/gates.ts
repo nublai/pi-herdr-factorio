@@ -40,7 +40,6 @@ import {
 	replacementDigest,
 	replacementsOf,
 	SHA,
-	SOURCE,
 } from "./materialize.ts";
 import {
 	command,
@@ -124,10 +123,27 @@ function sameCounts(
 	return replacements.every((r) => (candidate[r.path] ?? 0) >= 1);
 }
 
-export function receiptPasses(receipt: GateReceipt): boolean {
+function requiredChecks(
+	input: CandidateInput,
+	names: readonly string[],
+): string[] {
+	return [
+		...(input.install === false ? [] : ["install"]),
+		"baseline_tests",
+		...names,
+		"main_tests",
+		"candidate_tests",
+		...(input.heldoutDir || input.heldoutDigest ? ["heldout"] : []),
+	];
+}
+
+export function receiptPasses(
+	receipt: GateReceipt,
+	checkNames: readonly string[] = CHECK_NAMES,
+): boolean {
 	const required = [
 		"baseline_tests",
-		...CHECK_NAMES,
+		...checkNames,
 		"main_tests",
 		"candidate_tests",
 		...(receipt.heldoutDigest ? ["heldout"] : []),
@@ -151,6 +167,7 @@ async function scanCandidate(
 	tree: string,
 	replacements: readonly GateReplacement[],
 	heldout: readonly string[],
+	sourceRoots: readonly string[],
 ): Promise<Signal[]> {
 	const base = await entries(input.repository, input.gateSha);
 	const candidate = await entries(input.repository, input.candidateSha);
@@ -161,7 +178,7 @@ async function scanCandidate(
 		if (
 			!/\.[cm]?[jt]sx?$/.test(path) ||
 			!existsSync(join(tree, path)) ||
-			(!SOURCE.some((dir) => path.startsWith(`${dir}/`)) &&
+			(!sourceRoots.some((dir) => path.startsWith(`${dir}/`)) &&
 				!(
 					path.startsWith("test/") &&
 					(!base.has(path) ||
@@ -239,14 +256,7 @@ export async function checkCandidate(
 
 	const receipt: GateReceipt = {
 		version: 2,
-		requiredChecks: [
-			...(input.install === false ? [] : ["install"]),
-			"baseline_tests",
-			...CHECK_NAMES,
-			"main_tests",
-			"candidate_tests",
-			...(input.heldoutDir || input.heldoutDigest ? ["heldout"] : []),
-		],
+		requiredChecks: requiredChecks(input, CHECK_NAMES),
 		tamperSignals: [],
 		heldoutDigest: input.heldoutDigest ?? null,
 		heldoutCounts: {},
@@ -355,6 +365,14 @@ export async function checkCandidate(
 		await exportTree(input.repository, input.gateSha, baseline);
 		const manifest = manifestOf(baseline);
 		receipt.testGlobs = manifest.testGlobs;
+		receipt.requiredChecks.splice(
+			0,
+			receipt.requiredChecks.length,
+			...requiredChecks(
+				input,
+				manifest.checks.map((c) => c.name),
+			),
+		);
 
 		const material = await materializeCandidate({
 			...input,
@@ -379,6 +397,7 @@ export async function checkCandidate(
 			tree,
 			replacements,
 			heldoutFiles,
+			manifest.sourceRoots,
 		);
 
 		if (receipt.tamperSignals.length)
@@ -393,29 +412,32 @@ export async function checkCandidate(
 		cpSync(join(baseline, ".github/factory/gates"), gates, { recursive: true });
 		cpSync(baseline, join(gates, "tooling"), { recursive: true });
 
-		const lint =
-			objectOf(
-				parseJson(readFileSync(join(baseline, ".oxlintrc.json"), "utf8")),
-			) ?? {};
+		if (manifest.checks.some((c) => c.argv.includes("/g/lint.json"))) {
+			const lint =
+				objectOf(
+					parseJson(readFileSync(join(baseline, ".oxlintrc.json"), "utf8")),
+				) ?? {};
 
-		const plugins = arrayOf(fieldOf(lint, "jsPlugins")) ?? [];
-		writeFileSync(
-			join(gates, "lint.json"),
-			JSON.stringify({
-				...lint,
-				jsPlugins: plugins.map((p) => {
-					const obj = objectOf(p);
-					const spec = textOf(fieldOf(obj, "specifier")) ?? "";
+			const plugins = arrayOf(fieldOf(lint, "jsPlugins")) ?? [];
+			writeFileSync(
+				join(gates, "lint.json"),
+				JSON.stringify({
+					...lint,
+					jsPlugins: plugins.map((p) => {
+						const obj = objectOf(p);
+						const spec = textOf(fieldOf(obj, "specifier")) ?? "";
 
-					return {
-						...obj,
-						specifier: spec.startsWith("./")
-							? `/g/tooling/${spec.slice(2)}`
-							: spec,
-					};
+						return {
+							...obj,
+							specifier: spec.startsWith("./")
+								? `/g/tooling/${spec.slice(2)}`
+								: spec,
+						};
+					}),
 				}),
-			}),
-		);
+			);
+		}
+
 		const baseDeps = readDependencies(baseline);
 
 		for (const name of ["package.json", "package-lock.json"])
@@ -614,7 +636,12 @@ export async function checkCandidate(
 			if (control.result.exitCode !== 0) throw new Error("baseline_failed");
 		}
 
-		receipt.status = receiptPasses(receipt) ? "passed" : "failed";
+		receipt.status = receiptPasses(
+			receipt,
+			manifest.checks.map((c) => c.name),
+		)
+			? "passed"
+			: "failed";
 	} catch (error) {
 		receipt.reason = error instanceof Error ? error.message : "gate_error";
 		receipt.status =

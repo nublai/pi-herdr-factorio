@@ -941,7 +941,7 @@ export async function runBench(
 			outcome: gate.status,
 		});
 
-		if (gate.status !== "passed" || !receiptPasses(gate))
+		if (gate.status !== "passed" || !receiptPasses(gate, gate.requiredChecks))
 			throw new Error(gate.reason ?? "trusted_gates_failed");
 
 		const scenarios = [...suite.scenarios, ...replacementScenarios(contract)];

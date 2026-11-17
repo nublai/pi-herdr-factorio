@@ -11,15 +11,17 @@ import {
 	rmSync,
 	writeFileSync,
 } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, posix, resolve } from "node:path";
 import type { ReplacedTest } from "../../src/contract/contract.ts";
 import { hasControl } from "../../src/contract/parse.ts";
 import {
 	arrayOf,
 	fieldOf,
+	hasDuplicateKey,
 	objectOf,
 	parseJson,
 	textOf,
+	type JsonObject,
 } from "../../src/core/json.ts";
 import { digestOf, isDigest } from "../../src/core/run.ts";
 import {
@@ -28,6 +30,7 @@ import {
 	CONTROL_PLANE_PREFIX,
 	COORDINATOR_ONLY_FILES,
 } from "../../src/trust/protected-paths.ts";
+import { gatePolicyOf } from "./manifest.ts";
 import { CLEAN_ENV, command } from "./runner.ts";
 
 export const MATERIALIZER_FILES = [
@@ -54,25 +57,18 @@ export function materializerIdentity(tree: string): Buffer {
 	);
 }
 
-export const SOURCE = [
-	"src",
-	"extension",
-	"host",
-	"skills",
-	"scripts",
-	".pi/skills",
-	"docs/models",
-];
-
 export const SHA = /^[a-f0-9]{40}$/;
 
-function isDocumentation(path: string): boolean {
+function isDocumentation(
+	path: string,
+	sourceRoots: readonly string[],
+): boolean {
 	return (
 		path.endsWith(".md") &&
 		!path.startsWith(CONTROL_PLANE_PREFIX) &&
 		!path.startsWith(".pi/") &&
 		!path.startsWith(ACCEPTANCE_SUITE_PREFIX) &&
-		!SOURCE.some((dir) => path.startsWith(`${dir}/`))
+		!sourceRoots.some((dir) => path.startsWith(`${dir}/`))
 	);
 }
 
@@ -84,6 +80,16 @@ const CONFIG = new Set([
 	".eslintignore",
 	".prettierignore",
 ]);
+
+const TOOL_CONFIG =
+	/^(?:\.oxlintrc(?:\..+)?|oxlint\.config\..+|\.eslintrc(?:\..+)?|eslint\.config\..+|\.prettierrc(?:\..+)?|prettier\.config\..+|\.?biome\.jsonc?|[jt]sconfig.*\.json|\.env(?:\..+)?|\.node-version|\.nvmrc|\.npmrc|\.editorconfig|\.gitignore|\.ignore|\.eslintignore|\.prettierignore|package\.yaml)$/;
+
+const PACKAGE_TOOL_KEYS = [
+	"prettier",
+	"eslintConfig",
+	"eslintIgnore",
+	"oxlint",
+];
 
 export async function git(
 	repository: string,
@@ -244,6 +250,148 @@ export function replacementsOf(text: string): readonly GateReplacement[] {
 
 type Inventory = ReadonlyMap<string, { mode: string; blob: string }>;
 
+function typescriptTargets(tree: string, base: Inventory): ReadonlySet<string> {
+	const found = new Set<string>();
+
+	const queue = [...base.keys()].filter((path) =>
+		/^[jt]sconfig.*\.json$/.test(posix.basename(path)),
+	);
+
+	for (let path = queue.pop(); path !== undefined; path = queue.pop())
+		for (const [, ref] of readFileSync(join(tree, path), "utf8").matchAll(
+			/"(\.\.?\/[^"]*)"/g,
+		)) {
+			const target = posix.join(posix.dirname(path), ref ?? "");
+
+			for (const file of [target, `${target}.json`])
+				if (file.endsWith(".json") && base.has(file) && !found.has(file)) {
+					found.add(file);
+					queue.push(file);
+				}
+		}
+
+	return found;
+}
+
+function mainToolConfig(
+	tree: string,
+	base: Inventory,
+	sourceRoots: readonly string[],
+): ReadonlyMap<string, Buffer> {
+	const targets = typescriptTargets(tree, base);
+
+	return new Map(
+		[...base.keys()].flatMap((path): [string, Buffer][] => {
+			const name = posix.basename(path);
+
+			if (
+				!sourceRoots.some((dir) => path.startsWith(`${dir}/`)) ||
+				!(
+					TOOL_CONFIG.test(name) ||
+					name === "package.json" ||
+					targets.has(path)
+				)
+			)
+				return [];
+			const bytes = readFileSync(join(tree, path));
+			const value = objectOf(parseJson(bytes.toString("utf8")));
+
+			return name !== "package.json" ||
+				PACKAGE_TOOL_KEYS.some((key) => fieldOf(value, key) !== undefined)
+				? [[path, bytes]]
+				: [];
+		}),
+	);
+}
+
+function packageToolKeys(
+	text: string,
+	main: Buffer | undefined,
+): string | null {
+	const candidate = objectOf(parseJson(text));
+	const trusted = objectOf(parseJson(main?.toString("utf8") ?? "{}")) ?? {};
+
+	if (candidate === null) return null;
+
+	if (
+		!hasDuplicateKey(text) &&
+		PACKAGE_TOOL_KEYS.every(
+			(key) =>
+				JSON.stringify(fieldOf(candidate, key)) ===
+				JSON.stringify(fieldOf(trusted, key)),
+		)
+	)
+		return text;
+
+	const kept: JsonObject = Object.fromEntries([
+		...Object.entries(candidate).filter(
+			([key]) => !PACKAGE_TOOL_KEYS.includes(key),
+		),
+		...Object.entries(trusted).filter(([key]) =>
+			PACKAGE_TOOL_KEYS.includes(key),
+		),
+	]);
+
+	return `${JSON.stringify(kept, null, "\t")}\n`;
+}
+
+function pinToolConfig(input: {
+	readonly dest: string;
+	readonly base: Inventory;
+	readonly candidate: Inventory;
+	readonly sourceRoots: readonly string[];
+	readonly main: ReadonlyMap<string, Buffer>;
+}): readonly string[] {
+	const { base, candidate, dest, main, sourceRoots } = input;
+	const ignored: string[] = [];
+
+	const restore = (path: string) => {
+		const bytes = main.get(path);
+
+		if (bytes === undefined) rmSync(join(dest, path), { force: true });
+		else {
+			mkdirSync(dirname(join(dest, path)), { recursive: true });
+			writeFileSync(join(dest, path), bytes);
+		}
+	};
+
+	for (const [path, item] of candidate) {
+		const name = posix.basename(path);
+
+		if (
+			!sourceRoots.some((dir) => path.startsWith(`${dir}/`)) &&
+			!(
+				path.startsWith("test/") &&
+				(!base.has(path) || path.startsWith(ACCEPTANCE_SUITE_PREFIX))
+			)
+		)
+			continue;
+
+		if (name === "package.json") {
+			const text = readFileSync(join(dest, path), "utf8");
+			const pinned = packageToolKeys(text, main.get(path));
+
+			if (pinned === text) continue;
+
+			if (pinned === null) restore(path);
+			else writeFileSync(join(dest, path), pinned);
+			ignored.push(path);
+		} else if (TOOL_CONFIG.test(name) || main.has(path)) {
+			restore(path);
+
+			if (item.blob !== base.get(path)?.blob) ignored.push(path);
+		}
+	}
+
+	for (const path of main.keys())
+		if (!candidate.has(path)) {
+			restore(path);
+			ignored.push(path);
+		}
+
+	return ignored;
+}
+
 function checkReplacements(
 	base: Inventory,
 	candidate: Inventory,
@@ -265,15 +413,21 @@ function overlay(input: {
 	readonly candidate: Inventory;
 	readonly candidateDir: string;
 	readonly dest: string;
+	readonly sourceRoots: readonly string[];
+	readonly pinToolConfig: boolean;
 	readonly replacements: readonly GateReplacement[];
 	readonly heldoutDir?: string;
 	readonly heldoutDigest?: string;
 }) {
-	const { base, candidate, replacements } = input;
+	const { base, candidate, replacements, sourceRoots } = input;
 	const source = input.candidateDir;
 	const ignoredChanges: string[] = [];
 	const newTests: string[] = [];
 	const heldout = heldoutOf(source, input.heldoutDir, input.heldoutDigest);
+
+	const main = input.pinToolConfig
+		? mainToolConfig(input.dest, base, sourceRoots)
+		: null;
 
 	for (const path of COORDINATOR_ONLY_FILES)
 		if (
@@ -295,7 +449,7 @@ function overlay(input: {
 		force: true,
 	});
 
-	for (const dir of SOURCE) {
+	for (const dir of sourceRoots) {
 		rmSync(join(input.dest, dir), { recursive: true, force: true });
 
 		if (existsSync(join(source, dir)))
@@ -305,11 +459,11 @@ function overlay(input: {
 	}
 
 	for (const path of base.keys())
-		if (isDocumentation(path) && !candidate.has(path))
+		if (isDocumentation(path, sourceRoots) && !candidate.has(path))
 			rmSync(join(input.dest, path), { force: true });
 
 	for (const [path, item] of candidate) {
-		if (isDocumentation(path)) {
+		if (isDocumentation(path, sourceRoots)) {
 			if (item.blob !== base.get(path)?.blob) {
 				mkdirSync(dirname(join(input.dest, path)), { recursive: true });
 				cpSync(join(source, path), join(input.dest, path));
@@ -318,7 +472,7 @@ function overlay(input: {
 			continue;
 		}
 
-		const fromSource = SOURCE.some((dir) => path.startsWith(`${dir}/`));
+		const fromSource = sourceRoots.some((dir) => path.startsWith(`${dir}/`));
 		const replacement = replacements.some((r) => r.path === path);
 
 		const additional =
@@ -344,6 +498,7 @@ function overlay(input: {
 		}
 
 		if (
+			main === null &&
 			(fromSource || additional) &&
 			CONFIG.has(path.split("/").at(-1) ?? "")
 		) {
@@ -364,6 +519,17 @@ function overlay(input: {
 		if (path.split("/").at(-1) === ".npmrc" && !candidate.has(path))
 			throw new Error("npmrc_changed");
 
+	if (main !== null)
+		ignoredChanges.push(
+			...pinToolConfig({
+				dest: input.dest,
+				base,
+				candidate,
+				sourceRoots,
+				main,
+			}),
+		);
+
 	return { ignoredChanges: ignoredChanges.sort(), newTests: newTests.sort() };
 }
 
@@ -380,6 +546,7 @@ export async function materializeCandidate(input: {
 	const candidate = await entries(input.repository, input.candidateSha);
 	const replacements = checkReplacements(base, candidate, input.replacements);
 	await exportTree(input.repository, input.gateSha, input.dest);
+	const policy = gatePolicyOf(input.dest);
 	const temp = mkdtempSync(join(dirname(input.dest), "candidate-"));
 
 	try {
@@ -390,6 +557,8 @@ export async function materializeCandidate(input: {
 			base,
 			candidate,
 			candidateDir: join(temp, "tree"),
+			sourceRoots: policy.sourceRoots,
+			pinToolConfig: policy.version === 2,
 			replacements,
 		});
 	} finally {
@@ -440,6 +609,7 @@ export function materializeFromDirectories(input: {
 	const base = inventory(input.gateTree);
 	const candidate = inventory(input.candidateTree);
 	const replacements = checkReplacements(base, candidate, input.replacements);
+	const policy = gatePolicyOf(input.gateTree);
 	cpSync(input.gateTree, input.dest, { recursive: true, errorOnExist: true });
 
 	return overlay({
@@ -447,6 +617,8 @@ export function materializeFromDirectories(input: {
 		base,
 		candidate,
 		candidateDir: input.candidateTree,
+		sourceRoots: policy.sourceRoots,
+		pinToolConfig: policy.version === 2,
 		replacements,
 	});
 }

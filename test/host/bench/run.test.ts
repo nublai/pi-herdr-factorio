@@ -1396,6 +1396,21 @@ describe("bench run offline CLI", (suite) => {
 		);
 		assert.equal(await manifestDigest(f.assets), f.variant.pins.assetsDigest);
 	});
+	it("accepts a passed receipt from a repository's version 2 gate policy without Factorio's checks", {
+		timeout: 60000,
+	}, async (t) => {
+		const f = await harness(t, false, 1, { repositoryGatePolicy: true });
+		const result = await f.run();
+		assert.equal(result.code, 0, result.stderr);
+		const trial = result.value();
+		assert.equal(trial.outcome.kind, "passed", JSON.stringify(trial.outcome));
+		assert.equal(
+			trial.stages.find(
+				(stage: { name: string }) => stage.name === "validation",
+			)?.outcome,
+			"passed",
+		);
+	});
 	it("records a real held-out failure and never launches review over failed gates", {
 		timeout: 30000,
 	}, async (t) => {
