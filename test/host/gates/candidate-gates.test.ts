@@ -194,6 +194,12 @@ function repo(t: { after(fn: () => void): void }) {
 	git("init", "-q");
 	git("config", "user.name", "Gate test");
 	git("config", "user.email", "gate@example.invalid");
+	git(
+		"remote",
+		"add",
+		"origin",
+		"https://github.com/nublai/pi-herdr-factorio.git",
+	);
 
 	const put = (path: string, text: string) => {
 		mkdirSync(dirname(join(root, path)), { recursive: true });
@@ -339,6 +345,12 @@ async function pinnedProduct(
 
 function externalTarget(t: { after(fn: () => void): void }, revision: string) {
 	const f = repo(t);
+	f.git(
+		"remote",
+		"set-url",
+		"origin",
+		"https://github.com/giuseppecrj/pi-herdr-agents.git",
+	);
 	f.git("rm", "-rq", "host");
 
 	const policy = JSON.parse(
@@ -606,9 +618,13 @@ test("837b pinned qualification equals unchanged Factorio v1 base results", asyn
 		cpSync(join(product.root, path), join(tree, path));
 	}
 
+	const repo = "nublai/pi-herdr-factorio";
+	assert.ok(isRepoSlug(repo));
+
 	const legacy = assessBase(
 		await product.runHeldoutBase({
 			...input,
+			binding: { ...input.binding, repo },
 			workDir: join(f.stateDir, "legacy"),
 		}),
 	);
@@ -741,16 +757,14 @@ for (const mode of [
 			mode !== "installed-product lag",
 		);
 
-		if (mode === "accepted N1 gate assets") {
-			for (const name of ["freeze.mjs", "reporter.mjs", "scan-rules.json"]) {
-				const path = `.github/factory/gates/${name}`;
-				f.put(path, readFileSync(join(product.root, path), "utf8") + "\n");
-				assert.ok(
-					!readFileSync(join(f.root, path)).equals(
-						readFileSync(join(product.root, path)),
-					),
-				);
-			}
+		for (const name of ["freeze.mjs", "reporter.mjs", "scan-rules.json"]) {
+			const path = `.github/factory/gates/${name}`;
+			f.put(path, readFileSync(join(product.root, path), "utf8") + "\n");
+			assert.ok(
+				!readFileSync(join(f.root, path)).equals(
+					readFileSync(join(product.root, path)),
+				),
+			);
 		}
 
 		f.git("add", "host", ".github");
@@ -1094,6 +1108,293 @@ test("837b diagnosis fresh base refuses a pinned target with a changed reporter 
 	assert.equal(calls, 0);
 });
 
+test("837d gates infer self-hosting only from the trusted checkout's GitHub origin", async (t) => {
+	const f = repo(t);
+
+	for (const [index, origin] of [
+		"https://github.com/nublai/pi-herdr-factorio.git",
+		"https://github.com/nublai/pi-herdr-factorio",
+		"git@github.com:nublai/pi-herdr-factorio.git",
+		"ssh://git@github.com/nublai/pi-herdr-factorio.git",
+		"https://github.com/giuseppecrj/pi-herdr-agents.git",
+		"https://github.com/other/pi-herdr-factorio.git",
+		"https://github.com/nublai/pi-herdr-factorio-fork.git",
+		"https://github.com.invalid/nublai/pi-herdr-factorio.git",
+		null,
+	].entries()) {
+		if (origin === null) f.git("remote", "remove", "origin");
+		else f.git("remote", "set-url", "origin", origin);
+		let calls = 0;
+
+		const receipt = await checkCandidate({
+			...gateInput(f, f.gateSha),
+			output: join(f.root, `origin-${index}`),
+			runner: {
+				kind: miniRunner.kind,
+				run(input) {
+					calls++;
+
+					return miniRunner.run(input);
+				},
+			},
+		});
+
+		if (index < 4) {
+			assert.equal(receipt.status, "passed", origin ?? "missing");
+			assert.ok(calls > 0);
+		} else {
+			assert.equal(
+				receipt.reason,
+				"unsupported_materializer",
+				origin ?? "missing",
+			);
+			assert.equal(calls, 0);
+		}
+	}
+});
+
+for (const policyCase of [
+	"six empty files and changed reporter",
+	"six copied files without a pin",
+] as const) {
+	for (const surface of ["base", "gates", "replay"] as const) {
+		test(`837d non-Factorio ${surface} refuses ${policyCase} before any runner call`, async (t) => {
+			const product = await pinnedProduct(t);
+			const f = await externalBase(t, product, false);
+
+			const policy = JSON.parse(
+				readFileSync(join(f.root, GATE_POLICY), "utf8"),
+			);
+
+			f.put(
+				GATE_POLICY,
+				JSON.stringify({ ...policy, toolingRevision: undefined }),
+			);
+
+			for (const path of MATERIALIZER_FILES)
+				f.put(
+					path,
+					policyCase === "six copied files without a pin"
+						? readFileSync(join(product.root, path), "utf8")
+						: "",
+				);
+
+			if (policyCase === "six empty files and changed reporter")
+				f.put(
+					".github/factory/gates/reporter.mjs",
+					readFileSync(".github/factory/gates/reporter.mjs", "utf8") + "\n",
+				);
+			const sha = gitSha(f.commit());
+			let calls = 0;
+
+			const runner: GateRunner = {
+				kind: localRunner.kind,
+				run(input) {
+					calls++;
+
+					return localRunner.run(input);
+				},
+			};
+
+			if (surface === "base") {
+				const tree = join(f.root, "base-export");
+				await exportTree(f.root, sha, tree);
+
+				const evidence = await product.runHeldoutBase({
+					tree,
+					workDir: join(f.stateDir, "refused"),
+					cacheDir: join(f.stateDir, "cache"),
+					binding: { ...f.binding, baseSha: sha, gateSha: sha },
+					contract: f.contract,
+					suite: f.suite,
+					canary: f.canary,
+					startedAt: Date.now(),
+					deadline: Date.now() + 30_000,
+					runner,
+				});
+
+				assert.deepEqual(evidence.source, {
+					kind: "unavailable",
+					reason: "tree_refused",
+				});
+			} else if (surface === "gates") {
+				const receipt = await product.checkCandidate({
+					repository: f.root,
+					gateSha: sha,
+					candidateSha: sha,
+					nonce: "unpinned-external",
+					output: join(f.root, "out"),
+					runner,
+					install: false,
+				});
+
+				assert.equal(receipt.reason, "unsupported_materializer");
+				assert.equal(receipt.checks.length, 0);
+			} else {
+				const facts = await diagnoseExternal(
+					product,
+					{ ...f, gateSha: sha, candidateSha: sha },
+					runner,
+				);
+
+				assert.equal(
+					facts.replay?.kind === "unavailable" ? facts.replay.reason : null,
+					"unsupported_materializer",
+				);
+			}
+
+			assert.equal(calls, 0);
+		});
+	}
+}
+
+for (const step of ["tamper scan", "dependency install"] as const) {
+	test(`837d pin refusal precedes ${step}`, async (t) => {
+		const product = await pinnedProduct(t);
+		const f = await externalBase(t, product, true);
+		const tree = join(f.root, "base-export");
+		await exportTree(f.root, f.binding.baseSha, tree);
+		let suite = f.suite;
+
+		if (step === "tamper scan") {
+			suite = {
+				...suite,
+				files: suite.files.map((file) => ({
+					...file,
+					content: file.content + "\nprocess.exitCode = 0;\n",
+				})),
+			};
+		} else {
+			writeFileSync(
+				join(tree, "package.json"),
+				JSON.stringify({
+					name: "mini",
+					version: "1.0.0",
+					dependencies: { yaml: "2.9.0" },
+				}),
+			);
+			writeFileSync(
+				join(tree, "package-lock.json"),
+				JSON.stringify({
+					lockfileVersion: 3,
+					packages: {
+						"": {
+							name: "mini",
+							version: "1.0.0",
+							dependencies: { yaml: "2.9.0" },
+						},
+						"node_modules/yaml": {
+							version: "2.9.0",
+							resolved: "https://registry.npmjs.org/yaml/-/yaml-2.9.0.tgz",
+							integrity:
+								"sha512-2AvhNX3mb8zd6Zy7INTtSpl1F15HW6Wnqj0srWlkKLcpYl/gMIMJiyuGq2KeI2YFxUPjdlB+3Lc10seMLtL4cA==",
+						},
+					},
+				}),
+			);
+		}
+
+		let calls = 0;
+
+		const evidence = await product.runHeldoutBase({
+			tree,
+			workDir: join(f.stateDir, "ordered"),
+			cacheDir: join(f.stateDir, "cache"),
+			binding: f.binding,
+			contract: f.contract,
+			suite,
+			canary: f.canary,
+			startedAt: Date.now(),
+			deadline: Date.now() + 30_000,
+			runner: {
+				kind: mustNotRun.kind,
+				run(input) {
+					calls++;
+
+					return mustNotRun.run(input);
+				},
+			},
+		});
+
+		assert.equal(calls, 0);
+		assert.equal("tamper" in evidence, false);
+		assert.deepEqual(evidence.source, {
+			kind: "unavailable",
+			reason: "tree_refused",
+		});
+	});
+}
+
+test("837d diagnosis checks pinned main, not the candidate's unpinned six-file tree", async (t) => {
+	const product = await pinnedProduct(t);
+	const f = await externalBase(t, product, true);
+	f.put(GATE_POLICY, readFileSync(GATE_POLICY, "utf8"));
+
+	for (const path of MATERIALIZER_FILES)
+		f.put(path, readFileSync(join(product.root, path), "utf8"));
+	const candidateSha = gitSha(f.commit());
+	const repo = "nublai/pi-herdr-factorio";
+	assert.ok(isRepoSlug(repo));
+	let calls = 0;
+
+	const owner = product.controllerDiagnosis({
+		stateDir: f.stateDir,
+		fetch: async (_repo, sha) =>
+			execFileSync("git", [
+				"-C",
+				f.root,
+				"archive",
+				"--format=tar.gz",
+				"--prefix=target/",
+				sha,
+			]),
+		runner: {
+			kind: mustNotRun.kind,
+			run(input) {
+				calls++;
+
+				return mustNotRun.run(input);
+			},
+		},
+	});
+
+	const facts = await new Promise<DiagnosisFacts>((finish, reject) => {
+		void owner
+			.check({
+				runId: f.contract.runId,
+				dir: f.stateDir,
+				bindingDigest: digestOf("candidate-dropped-pin"),
+				repo,
+				gateSha: f.binding.gateSha,
+				candidateSha,
+				round: 0,
+				allowanceMs: 30_000,
+				needs: { replay: true, dependencies: false },
+				heldoutDir: f.heldoutDir,
+				heldoutDigest: f.heldoutDigest,
+				replacements: [],
+				base: {
+					kind: "fresh",
+					binding: { ...f.binding, repo },
+					contract: { ...f.contract, base: { ...f.contract.base, repo } },
+					suite: f.suite,
+					canary: f.canary,
+				},
+				finish,
+				interrupted: () => assert.fail("unexpected interruption"),
+			})
+			.catch(reject);
+	});
+
+	await owner.stop(f.contract.runId);
+	assert.equal(facts.baseRefusal, "base_tree_unsupported");
+	assert.deepEqual(facts.base?.evidence.source, {
+		kind: "unavailable",
+		reason: "tree_refused",
+	});
+	assert.equal(calls, 0);
+});
+
 for (const [member, text] of [
 	[
 		"reporter.mjs",
@@ -1274,7 +1575,11 @@ test("R3 F3 includes a new transitive gate import in the pinned identity", async
 			pathToFileURL(join(product.root, "host/gates/materialize.ts")).href
 		);
 
-	const identity = materialize.gateMaterializerIdentity(f.root);
+	const identity = materialize.gateMaterializerIdentity(
+		f.root,
+		"giuseppecrj/pi-herdr-agents",
+	);
+
 	assert.ok(identity.toString().includes('"host/gates/pin-helper.ts"'));
 	assert.ok(
 		identity.equals(materialize.productMaterializerIdentity(product.root)),
@@ -1361,12 +1666,12 @@ test("R3 F6 pin checks ignore ambient global git configuration", async (t) => {
 	const f = externalTarget(t, product.revision);
 	assert.ok(
 		materialize
-			.gateMaterializerIdentity(f.root)
+			.gateMaterializerIdentity(f.root, "giuseppecrj/pi-herdr-agents")
 			.equals(materialize.productMaterializerIdentity(product.root)),
 	);
 });
 
-test("R3 G1 missing gates.json follows the unpinned identity path and gives the same clear materialization error as gates", async (t) => {
+test("R3 G1 missing gates.json is refused by gates and by external-target replay", async (t) => {
 	const product = await pinnedProduct(t);
 	const f = externalTarget(t, product.revision);
 
@@ -1384,7 +1689,7 @@ test("R3 G1 missing gates.json follows the unpinned identity path and gives the 
 
 	assert.ok(
 		materialize
-			.gateMaterializerIdentity(gateTree)
+			.gateMaterializerIdentity(gateTree, "nublai/pi-herdr-factorio")
 			.equals(materialize.materializerIdentity(product.root)),
 	);
 	assert.throws(
@@ -1423,7 +1728,7 @@ test("R3 G1 missing gates.json follows the unpinned identity path and gives the 
 	);
 
 	assert.ok(facts.replay?.kind === "unavailable");
-	assert.equal(facts.replay.reason, "unsupported_tree");
+	assert.equal(facts.replay.reason, "unsupported_materializer");
 });
 
 test("R3 external target without Factorio source passes the gates CLI and both diagnostic replays", async (t) => {
@@ -1597,7 +1902,11 @@ test("R3 tooling pins are exact commit SHAs, and candidate edits cannot remove o
 			JSON.stringify({ ...policy, toolingRevision: pin }),
 		);
 		assert.throws(
-			() => materialize.gateMaterializerIdentity(gateTree),
+			() =>
+				materialize.gateMaterializerIdentity(
+					gateTree,
+					"giuseppecrj/pi-herdr-agents",
+				),
 			/unsupported_materializer/,
 			JSON.stringify(pin),
 		);
@@ -1666,6 +1975,12 @@ test("R3 a pinned Agents-shaped version 2 target passes real static tools, gates
 	if (!sandboxAvailable(t)) return;
 	const product = await pinnedProduct(t);
 	const f = agentsRepo(t);
+	f.git(
+		"remote",
+		"set-url",
+		"origin",
+		"https://github.com/giuseppecrj/pi-herdr-agents.git",
+	);
 	f.git("rm", "-rq", "host");
 	f.put(
 		GATE_POLICY,
@@ -1714,7 +2029,11 @@ test("R3 a pinned Agents-shaped version 2 target passes real static tools, gates
 });
 
 test("R3 unpinned Factorio self-hosting retains the exact six-file identity and gate policy", () => {
-	assert.ok(gateMaterializerIdentity(".").equals(materializerIdentity(".")));
+	assert.ok(
+		gateMaterializerIdentity(".", "nublai/pi-herdr-factorio").equals(
+			materializerIdentity("."),
+		),
+	);
 	assert.equal(JSON.parse(materializerIdentity(".").toString()).length, 6);
 	assert.ok(
 		!productMaterializerIdentity(".").equals(materializerIdentity(".")),
@@ -3905,7 +4224,7 @@ test("draft and held-out base checks keep both repetitions serial", async (t) =>
 	const f = repo(t);
 	const tree = join(f.root, "base");
 	await exportTree(f.root, f.gateSha, tree);
-	const slug = "owner/repo";
+	const slug = "nublai/pi-herdr-factorio";
 	assert.ok(isRepoSlug(slug));
 
 	const contract: Contract = {
@@ -5334,12 +5653,18 @@ for (const [label, argv] of [
 	});
 
 for (const name of ["freeze.mjs", "reporter.mjs", "scan-rules.json"])
-	test(`837a N1 compares unpinned self-hosted ${name}`, async (t) => {
+	test(`837a N1 / 837d refuses unpinned non-Factorio ${name}`, async (t) => {
 		const f = repo(t);
+		f.git(
+			"remote",
+			"set-url",
+			"origin",
+			"https://github.com/giuseppecrj/pi-herdr-agents.git",
+		);
 		f.put(`.github/factory/gates/${name}`, "changed\n");
 		const gateSha = f.commit();
 		assert.throws(
-			() => gateMaterializerIdentity(f.root),
+			() => gateMaterializerIdentity(f.root, "giuseppecrj/pi-herdr-agents"),
 			/unsupported_materializer/,
 		);
 		await assert.rejects(

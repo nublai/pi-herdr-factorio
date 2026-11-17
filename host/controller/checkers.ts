@@ -684,9 +684,13 @@ function completedDiagnosis(root: string): DiagnosisFacts | null {
 	}
 }
 
-function sameMaterializer(gate: string, source?: Uint8Array): boolean {
+function sameMaterializer(
+	gate: string,
+	repo: RepoSlug,
+	source?: Uint8Array,
+): boolean {
 	try {
-		const identity = gateMaterializerIdentity(gate);
+		const identity = gateMaterializerIdentity(gate, repo);
 
 		if (source !== undefined) return Buffer.from(source).equals(identity);
 		const product = fileURLToPath(new URL("../..", import.meta.url));
@@ -884,7 +888,7 @@ export function controllerDiagnosis(config: {
 
 				if (
 					request.needs.replay &&
-					!sameMaterializer(gate, config.materializerSource)
+					!sameMaterializer(gate, request.repo, config.materializerSource)
 				)
 					facts = {
 						...facts,

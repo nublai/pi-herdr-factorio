@@ -440,7 +440,7 @@ async function runBase(
 		if (input.refused === undefined && input.tooling !== "running-product") {
 			try {
 				gatePolicyOf(input.tree);
-				gateMaterializerIdentity(input.tree);
+				gateMaterializerIdentity(input.tree, input.binding.repo);
 			} catch {
 				source = { kind: "unavailable", reason: "tree_refused" };
 

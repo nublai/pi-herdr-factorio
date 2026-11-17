@@ -185,29 +185,16 @@ function pinnedMaterializerIdentity(tree: string): Buffer | null {
 	}
 }
 
-function checkTargetGateAssets(tree: string): void {
-	try {
-		for (const name of TARGET_GATE_FILES) {
-			const path = `.github/factory/gates/${name}`;
-
-			if (
-				!lstatSync(join(tree, path)).isFile() ||
-				!readFileSync(join(tree, path)).equals(
-					readFileSync(join(PRODUCT_ROOT, path)),
-				)
-			)
-				throw new Error("unsupported_materializer");
-		}
-	} catch {
-		throw new Error("unsupported_materializer");
-	}
-}
-
-export function gateMaterializerIdentity(tree: string): Buffer {
+export function gateMaterializerIdentity(
+	tree: string,
+	targetRepository: string | null,
+): Buffer {
 	const pinned = pinnedMaterializerIdentity(tree);
 
 	if (pinned !== null) return pinned;
-	checkTargetGateAssets(tree);
+
+	if (targetRepository !== "nublai/pi-herdr-factorio")
+		throw new Error("unsupported_materializer");
 
 	return materializerIdentity(tree);
 }
@@ -257,6 +244,26 @@ export async function git(
 	if (result.exitCode !== 0) throw new Error("git_failed");
 
 	return result.stdout;
+}
+
+async function targetRepository(repository: string): Promise<string | null> {
+	try {
+		const origin = await git(repository, [
+			"config",
+			"--local",
+			"--get",
+			"remote.origin.url",
+		]);
+
+		const match =
+			/^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?\/?$/.exec(
+				origin.trim(),
+			);
+
+		return match?.[1]?.toLowerCase() ?? null;
+	} catch {
+		return null;
+	}
 }
 
 export function safePath(path: string): boolean {
@@ -688,9 +695,10 @@ export async function materializeCandidate(input: {
 		try {
 			if (
 				pinnedMaterializerIdentity(input.dest) === null &&
-				!gateMaterializerIdentity(input.dest).equals(
-					materializerIdentity(PRODUCT_ROOT),
-				)
+				!gateMaterializerIdentity(
+					input.dest,
+					await targetRepository(input.repository),
+				).equals(materializerIdentity(PRODUCT_ROOT))
 			)
 				throw new Error("unsupported_materializer");
 		} catch {

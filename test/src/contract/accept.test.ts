@@ -1542,8 +1542,12 @@ describe("held-out checks resolve the repository root through the real base chec
 			}),
 		);
 
+		const repo = "nublai/pi-herdr-factorio";
+		assert.ok(isRepoSlug(repo));
+
 		const preserved: Contract = {
 			...contract,
+			base: { ...contract.base, repo },
 			acceptance: [{ id: "A1", kind: "preservation", text: "Keep marker" }],
 		};
 
