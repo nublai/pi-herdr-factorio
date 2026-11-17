@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { isDigest } from "../../src/core/run.ts";
+import { compareTrials } from "../../src/bench/compare.ts";
 import type { PlatformProfile } from "../../src/trust/platform.ts";
 import { exportBundle, verifyBundle } from "../bench/export.ts";
 import type { BenchRuntime } from "../bench/run.ts";
@@ -9,6 +10,8 @@ import { type CliIo, EXIT } from "./platform.ts";
 const USAGE = `Usage:
   bench export --state-dir <dir> --run <id> --out <dir> [--repository <checkout>]
   bench verify <bundle>
+  bench compare <trial-dirs...>
+  bench spend <trial-dirs...>
   bench run --bundle <dir> --variant <file> --state-dir <scratch> --token-cap <n> [--assets-dir <dir>]`;
 
 function parseBenchArgs(argv: readonly string[]) {
@@ -82,13 +85,37 @@ export async function runBenchCli(
 			),
 		);
 
-	if (!isExport && !isVerify && !isRun) {
+	const isReport =
+		(command === "compare" || command === "spend") &&
+		positionals.length > 1 &&
+		Object.keys(values).length === 0;
+
+	if (!isExport && !isVerify && !isRun && !isReport) {
 		io.stderr(`${USAGE}\n`);
 
 		return EXIT.usage;
 	}
 
 	try {
+		if (isReport) {
+			const { benchSpend, readBenchTrials } = await import(
+				"../bench/report.ts"
+			);
+
+			const paths = positionals.slice(1);
+
+			const compared = command === "compare" ? readBenchTrials(paths) : null;
+
+			const report =
+				compared !== null
+					? compareTrials(compared.trials, compared.incompleteTrials)
+					: await benchSpend(paths);
+
+			io.stdout(`${JSON.stringify(report, null, 2)}\n`);
+
+			return EXIT.ok;
+		}
+
 		if (
 			isRun &&
 			values.bundle !== undefined &&

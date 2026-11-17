@@ -4,10 +4,19 @@ import {
 	requestSettlements,
 	settlementReply,
 } from "../core/journal.ts";
-import { objectOf, parseJson, textOf } from "../core/json.ts";
-import type { Digest } from "../core/run.ts";
+import {
+	arrayOf,
+	hasDuplicateKey,
+	objectOf,
+	parseJson,
+	textOf,
+	type JsonValue,
+} from "../core/json.ts";
+import { parseFamily } from "../core/models.ts";
+import { digestOf, type Digest } from "../core/run.ts";
+import { count, digest, literal, oneOf, record } from "../ledger/schema.ts";
 import { estimateCost, PINNED_TARIFF } from "../core/tariff.ts";
-import type { BenchVariant } from "./variant.ts";
+import { parseBenchVariant, type BenchVariant } from "./variant.ts";
 
 export type TrialOutcome =
 	| { readonly kind: "passed" }
@@ -120,3 +129,294 @@ export type BenchTrial = {
 	readonly judges: readonly SeatReceipt[];
 	readonly accounting: ReturnType<typeof trialAccounting>;
 };
+
+const text = (value: JsonValue | undefined): string => {
+	const result = textOf(value);
+
+	if (result === null || result.length === 0)
+		throw new Error("invalid_trial_text");
+
+	return result;
+};
+
+const nullableText = (value: JsonValue | undefined) =>
+	value === null ? null : text(value);
+
+const nullableCount = (value: JsonValue | undefined) =>
+	value === null ? null : count(value);
+
+const boolean = (value: JsonValue | undefined) => {
+	if (value !== true && value !== false)
+		throw new Error("invalid_trial_boolean");
+
+	return value;
+};
+
+const list =
+	<T>(codec: (value: JsonValue | undefined) => T) =>
+	(value: JsonValue | undefined): T[] => {
+		const values = arrayOf(value);
+
+		if (values === null) throw new Error("invalid_trial_array");
+
+		return values.map(codec);
+	};
+
+const uniqueTexts = (value: JsonValue | undefined) => {
+	const values = list(text)(value);
+
+	if (new Set(values).size !== values.length)
+		throw new Error("duplicate_trial_source");
+
+	return values;
+};
+
+const timestamp = (value: JsonValue | undefined) => {
+	const result = text(value);
+	const date = new Date(result);
+
+	if (!Number.isFinite(date.getTime()) || date.toISOString() !== result)
+		throw new Error("invalid_trial_timestamp");
+
+	return result;
+};
+
+const estimateCodec = record({
+	kind: literal("api_equivalent_estimate"),
+	usdMicros: nullableCount,
+});
+
+const costCodec = record({
+	estimate: estimateCodec,
+	billedSpend: literal("unavailable"),
+	cache: literal("not_reported"),
+	tariffDigest: digest,
+	tokens: record({ input: count, output: count, total: count }),
+	coverage: record({
+		kind: oneOf("exact", "lower_bound", "uncertain", "unavailable"),
+		requests: count,
+		priced: count,
+		uncertain: count,
+		missing: count,
+		unpriced: count,
+		missingJournals: count,
+		missingReceipts: count,
+	}),
+	unpricedModels: uniqueTexts,
+	byModel: list(
+		record({
+			model: text,
+			requests: count,
+			priced: count,
+			inputTokens: count,
+			outputTokens: count,
+			estimate: estimateCodec,
+		}),
+	),
+});
+
+const outcomeCodec = (value: JsonValue | undefined): TrialOutcome => {
+	if (objectOf(value)?.kind === "passed")
+		return record({ kind: literal("passed") })(value);
+
+	return record({
+		kind: oneOf("failed", "budget_exhausted"),
+		stage: text,
+		reason: text,
+	})(value);
+};
+
+const literalTrue = (value: JsonValue | undefined): true => {
+	if (value !== true) throw new Error("invalid_trial_true");
+
+	return true;
+};
+
+const seatCodec = (value: JsonValue | undefined) => {
+	const input = objectOf(value);
+
+	if (input === null) throw new Error("invalid_trial_judge");
+
+	const { family, primary, refusal, unconfigured, budgetStopped, ...required } =
+		input;
+
+	const seat = record({
+		seat: text,
+		findings: list(
+			record({
+				id: text,
+				severity: oneOf("blocking", "advisory"),
+				category: oneOf("bug", "security", "contract", "simplify"),
+				path: text,
+				startLine: count,
+				endLine: count,
+				claim: text,
+				evidence: text,
+			}),
+		),
+		judgments: list(
+			record({
+				scenario: text,
+				outcome: oneOf(
+					"pass",
+					"fail",
+					"unverifiable",
+					"inconclusive",
+					"timeout",
+				),
+				reason: text,
+			}),
+		),
+		requested: text,
+		observed: nullableText,
+		label: text,
+		fallback: boolean,
+		tokens: count,
+	})(required);
+
+	const parsedFamily = family === undefined ? undefined : parseFamily(family);
+
+	if (
+		parsedFamily === null ||
+		(unconfigured !== undefined && unconfigured !== true) ||
+		(budgetStopped !== undefined && budgetStopped !== true)
+	)
+		throw new Error("invalid_trial_judge");
+
+	return {
+		...seat,
+		...(parsedFamily === undefined ? undefined : { family: parsedFamily }),
+		...(primary === undefined ? undefined : { primary: text(primary) }),
+		...(refusal === undefined ? undefined : { refusal: nullableText(refusal) }),
+		...(unconfigured === true
+			? { unconfigured: literalTrue(unconfigured) }
+			: undefined),
+		...(budgetStopped === true
+			? { budgetStopped: literalTrue(budgetStopped) }
+			: undefined),
+	};
+};
+
+const trialCodec = record({
+	version: literal(1),
+	kind: literal("factory_benchmark_trial"),
+	id: digest,
+	bundleDigest: digest,
+	originalRunId: digest,
+	variant: (value) => parseBenchVariant(JSON.stringify(value)),
+	variantDigest: digest,
+	issue: (value) => {
+		const result = count(value);
+
+		if (result === 0) throw new Error("invalid_trial_issue");
+
+		return result;
+	},
+	runtime: record({
+		factoryRevision: text,
+		assetsDigest: digest,
+		node: text,
+		platform: text,
+		gateRunner: text,
+		thinking: literal("runtime_default:not_historically_recorded"),
+	}),
+	tokenCap: (value) => {
+		const result = count(value);
+
+		if (result === 0) throw new Error("invalid_trial_cap");
+
+		return result;
+	},
+	startedAt: timestamp,
+	endedAt: timestamp,
+	wallMs: count,
+	outcome: outcomeCodec,
+	stages: list(record({ name: text, wallMs: count, outcome: text })),
+	judges: list(seatCodec),
+	accounting: record({
+		chargedTokens: count,
+		cost: costCodec,
+		sources: uniqueTexts,
+	}),
+});
+
+export function parseBenchTrial(raw: string): BenchTrial {
+	if (hasDuplicateKey(raw)) throw new Error("duplicate_trial_key");
+	const trial = trialCodec(parseJson(raw));
+	const { cost, chargedTokens } = trial.accounting;
+
+	if (trial.variantDigest !== digestOf(JSON.stringify(trial.variant)))
+		throw new Error("trial_variant_digest_mismatch");
+
+	if (
+		trial.bundleDigest !== trial.variant.pins.bundleDigest ||
+		trial.runtime.factoryRevision !== trial.variant.pins.factoryRevision ||
+		cost.tariffDigest !== trial.variant.pins.tariffDigest ||
+		(trial.variant.change.kind !== "skill" &&
+			trial.runtime.assetsDigest !== trial.variant.pins.assetsDigest)
+	)
+		throw new Error("trial_pin_mismatch");
+
+	if (Date.parse(trial.endedAt) - Date.parse(trial.startedAt) !== trial.wallMs)
+		throw new Error("trial_time_mismatch");
+
+	if (
+		cost.tokens.total !== cost.tokens.input + cost.tokens.output ||
+		chargedTokens < cost.tokens.total
+	)
+		throw new Error("trial_tokens_mismatch");
+
+	const sum = (values: readonly number[]) =>
+		values.reduce((total, value) => total + value, 0);
+
+	const coverage = cost.coverage;
+
+	const expectedCoverage =
+		coverage.uncertain > 0
+			? "uncertain"
+			: coverage.priced === 0 && coverage.requests > 0
+				? "unavailable"
+				: coverage.missing +
+							coverage.unpriced +
+							coverage.missingJournals +
+							coverage.missingReceipts >
+							0 || chargedTokens !== cost.tokens.total
+					? "lower_bound"
+					: "exact";
+
+	if (
+		coverage.kind !== expectedCoverage ||
+		(coverage.kind === "unavailable" && cost.estimate.usdMicros !== null) ||
+		coverage.priced + coverage.uncertain + coverage.unpriced >
+			coverage.requests ||
+		coverage.priced +
+			coverage.uncertain +
+			coverage.unpriced +
+			coverage.missing <
+			coverage.requests ||
+		(coverage.priced > 0 && cost.estimate.usdMicros === null) ||
+		new Set(cost.byModel.map((model) => model.model)).size !==
+			cost.byModel.length ||
+		sum(cost.byModel.map((model) => model.inputTokens)) !== cost.tokens.input ||
+		sum(cost.byModel.map((model) => model.outputTokens)) !==
+			cost.tokens.output ||
+		sum(cost.byModel.map((model) => model.requests)) !== coverage.requests ||
+		sum(cost.byModel.map((model) => model.priced)) !== coverage.priced ||
+		(cost.estimate.usdMicros !== null &&
+			sum(cost.byModel.map((model) => model.estimate.usdMicros ?? 0)) !==
+				cost.estimate.usdMicros) ||
+		(coverage.kind === "exact" &&
+			(cost.estimate.usdMicros === null ||
+				coverage.priced !== coverage.requests ||
+				coverage.uncertain +
+					coverage.missing +
+					coverage.unpriced +
+					coverage.missingJournals +
+					coverage.missingReceipts >
+					0 ||
+				chargedTokens !== cost.tokens.total))
+	)
+		throw new Error("trial_cost_mismatch");
+
+	return trial;
+}

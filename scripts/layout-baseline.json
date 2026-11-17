@@ -23,6 +23,36 @@
 			"export": "reviewSeats"
 		},
 		"files": {
+			"src/bench/compare.ts": {
+				"owner": "src/bench",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "M6"
+			},
+			"host/bench/report.ts": {
+				"owner": "host/bench",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "M6"
+			},
+			"test/src/bench/compare.test.ts": {
+				"owner": "src/bench",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "M6"
+			},
+			"test/host/bench/compare.test.ts": {
+				"owner": "host/bench",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "M6"
+			},
+			"test/host/bench/trial-fixtures.ts": {
+				"owner": "host/bench",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "M6"
+			},
 			"src/bench/variant.ts": {
 				"owner": "src/bench",
 				"seats": ["code-review", "security-review", "simplify"],
@@ -2981,6 +3011,13 @@
 		}
 	},
 	"readers": [
+		{
+			"id": "test-reads-bench-compare-cli",
+			"kind": "paths",
+			"reader": "test/host/bench/compare.test.ts",
+			"tokens": { "new URL(\"../../../host/cli/index.ts\", import.meta.url)": 1 },
+			"targets": [{ "path": "host/cli/index.ts", "type": "file" }]
+		},
 		{
 			"id": "bench-source-root",
 			"kind": "paths",

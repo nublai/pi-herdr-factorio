@@ -785,6 +785,20 @@ describe("bench run offline CLI", () => {
 		assert.equal(resumed.code, 0, resumed.stderr);
 		assert.ok(resumed.stdout === result.stdout);
 		assert.equal(f.calls.length, before);
+		const malformed = `${JSON.stringify({ ...trial, version: 99 })}\n`;
+		writeFileSync(join(f.root, "trial/trial.json"), malformed);
+		writeFileSync(
+			join(f.root, "trial/trial.sha256"),
+			`${digestOf(malformed)}\n`,
+		);
+		const refused = await f.run();
+		assert.equal(
+			refused.code,
+			1,
+			"a matching digest does not validate the trial schema",
+		);
+		assert.match(refused.stderr, /invalid_literal/);
+		assert.equal(f.calls.length, before);
 	});
 	it("applies a single model or digest-pinned skill variant without changing installed assets", {
 		timeout: 60000,

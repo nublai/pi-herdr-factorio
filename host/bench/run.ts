@@ -18,6 +18,7 @@ import { bundleJson } from "../../src/bench/bundle.ts";
 import { parseBenchVariant } from "../../src/bench/variant.ts";
 import {
 	trialAccounting,
+	parseBenchTrial,
 	type BenchTrial,
 	type TrialJournal,
 	type TrialOutcome,
@@ -408,6 +409,14 @@ export async function runBench(
 
 		if (regularText(join(state, "trial.sha256"), 100) !== `${digestOf(text)}\n`)
 			throw new Error("trial_record_digest_mismatch");
+		const trial = parseBenchTrial(text);
+
+		if (
+			trial.bundleDigest !== bundleDigest ||
+			trial.variantDigest !== variantDigest ||
+			trial.tokenCap !== input.tokenCap
+		)
+			throw new Error("trial_state_binding_mismatch");
 
 		return text;
 	}
