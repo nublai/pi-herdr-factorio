@@ -17,8 +17,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check:
-    name: check
+  checks:
+    name: Checks
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -58,6 +58,17 @@ jobs:
 
       - name: Check diff whitespace
         run: git diff --check
+
+  check:
+    name: check
+    needs: checks
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - env:
+          CHECKS_RESULT: ${{ needs.checks.result }}
+        run: test "$CHECKS_RESULT" = success
 
   compatibility:
     name: >-

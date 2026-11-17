@@ -4,7 +4,7 @@ Giuseppe creates `nubl-factory` from `boldsoftware/exeuntu`. The Shep bridge is 
 
 The default commands install this repository's controller on `nubl-factory`. For a different target, follow [Set up a factory for another repository on a new VM](#set-up-a-factory-for-another-repository-on-a-new-vm).
 
-**No dispatch on a second repository until [#837](https://github.com/nublai/pi-herdr-factorio/issues/837) is closed.** Parser acceptance and a held installation do not close that gate.
+**No dispatch on any repository until [#837](https://github.com/nublai/pi-herdr-factorio/issues/837) is closed and [#842](https://github.com/nublai/pi-herdr-factorio/issues/842) is fixed.** #842 requires the trusted gate baseline to finish under 360 seconds in the pinned image, without raising the limit. This repository's own suite has never been timed for that baseline. Parser acceptance and a held installation do not close either gate.
 
 This installs a **held** controller, not a cutover. `pi-factorio` was retired and deleted on 2026-11-13 (#734), with its state archived. Production is now `nubl-factory`, held between pilot rounds; `~/factory-state/install-exe-dev.commit` on the VM records the installed commit. Routine access is read-only; upgrades, bridge installation, enabling dispatch and fixture runs each need Giuseppe's explicit go. A hold blocks new dispatch, not observation of existing runs.
 
@@ -36,11 +36,21 @@ The selected revision must include the repository rename in the platform allowli
 
 `--vm name` changes only the VM name in preflight fix instructions (default `nubl-factory`), not the host being installed.
 
+## Check only
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nublai/pi-herdr-factorio/<commit>/host/install/install-exe-dev.sh | bash -s -- --check --vm nubl-factory
+```
+
+`--check` needs no commit argument. It only reads local prerequisites and performs a repository GET and an OpenAI models-list GET, never a model inference. Its namespace and bubblewrap smoke tests run `true` with the host filesystem read-only. It never clones, provisions, creates state, enables linger, installs a unit or restarts a service. Exit 0 means preflight passed; exit 1 prints a named refusal and a fix. Remote error bodies are suppressed.
+
+Preflight requires x86_64 Linux, both exe.dev integration names resolving to the link-local edge, the normal VM user, passwordless broad sudo (`sudo -n true`), bubblewrap >= 0.9.0, working unprivileged namespaces and bubblewrap, systemd/logind, attached GitHub and model routes, and at least 4 GiB plus 100,000 free inodes on each filesystem containing the home, `/var/lib` and `/tmp`. Missing commands name their apt package. Preflight changes no configuration; sudo and network probes may generate ordinary system audit logs.
+
 ## Set up a factory for another repository on a new VM
 
 Use one controller per target repository on a separate VM. Keep `nubl-factory` held and untouched. These steps describe `giuseppecrj/pi-herdr-agents`; replace that slug consistently for another target.
 
-1. **Giuseppe:** authorize the new VM and held install. Create a fresh x86_64 `boldsoftware/exeuntu` VM, not a copy of a production controller, with `ssh exe.dev new --name=<vm> --comment=repo2-factory --no-email --json`. An authorized agent follows the installed `exe-dev-test-vm` skill for tester tagging and tailnet setup, never interactive Tailscale login.
+1. **Giuseppe:** authorize the new VM and held install. Recommended: the authorized agent creates a fresh x86_64 `boldsoftware/exeuntu` VM with `ssh exe.dev new --name=<vm> --comment=repo2-factory --no-email --json`. The agent's key automatically tags VMs it creates `tester`. The agent then joins it to the tailnet through the installed `exe-dev-test-vm` skill, never interactive Tailscale login. Alternatively, Giuseppe creates the VM and tags it `tester` himself before agent access. The agent cannot tag a VM Giuseppe created. Never copy a production controller.
 2. **Giuseppe, on his computer:** authorize the exe.dev GitHub App for the target and attach the repository integration. The exact command is `ssh exe.dev integrations add github --name <vm>-repo --repository <owner/name> --attach vm:<vm>`. For Agents:
 
    ```bash
@@ -48,9 +58,9 @@ Use one controller per target repository on a separate VM. Keep `nubl-factory` h
    ssh exe.dev integrations list
    ```
 
-   Confirm `llm` is attached through `auto:all`. Keep the bot identity and repository scope. Integration propagation can take a minute or two; rerun preflight after a refusal, not a model inference. The agent's tester key cannot add integrations.
-3. **Root:** apply the [Agents onboarding file set and checklist](examples/onboarding/pi-herdr-agents/README.md) to target main under its grant. Set the same reviewed full product SHA in `gates.json`, trusted CI, and the installer. Copy all three gate assets from that revision. Validate the workflow, policy, inventory, and required changes to `test/release-workflow.test.ts`. Giuseppe must confirm the target's second-judge model and spend before Root adds it. The example leaves it unconfigured and fails closed for judge-only scenarios.
-4. **Authorized installer operator, as `exedev@<vm>.exe.xyz`:** download the product installer, run `--check` first, then install. `ad6f07f99fa2bf7f6d365b564f55947bad364d06` is the merged R1–R4 schema baseline used by the examples, not a dispatch-qualified revision. Choose Giuseppe's approved full product SHA, including the #837 fixes before dispatch. Do not use the target main SHA as `C`.
+   If the correctly scoped integration already exists, use `ssh exe.dev integrations attach <name> vm:<vm>` instead of adding it again. Confirm `llm` is attached through `auto:all`. Keep the bot identity and repository scope. Integration propagation can take a minute or two; rerun preflight after a refusal, not a model inference. The agent's tester key cannot add integrations.
+3. **Root:** apply the [Agents onboarding file set and checklist](examples/onboarding/pi-herdr-agents/README.md) to target main under its grant. Set the same reviewed full product SHA in `gates.json`, trusted CI, and the installer. Copy all three gate assets from that revision. Validate the workflow, policy, inventory, and required changes to `test/release-workflow.test.ts`. Root may update the target's README badge and `RELEASING.md` CI references in the same PR. Keep the existing `Checks` job and the example's dependent `check` job so ruleset 27348552 remains satisfied during onboarding. Root opens the PR; Giuseppe merges it after exact-head `Checks` and `check` pass, or Root merges under Giuseppe's explicit grant. Do not change required contexts yet. Giuseppe must confirm the target's second-judge model and spend before Root adds it. The example leaves it unconfigured and fails closed for judge-only scenarios.
+4. **Authorized installer operator, as `exedev@<vm>.exe.xyz`:** download the product installer, run `--check` first, then install. `ad6f07f99fa2bf7f6d365b564f55947bad364d06` is the merged R1–R4 schema baseline used by the examples, not a dispatch-qualified revision. Choose Giuseppe's approved full product SHA, including the #837 and #842 fixes before dispatch. Do not use the target main SHA as `C`.
 
    ```bash
    C=<reviewed-full-40-character-product-sha>
@@ -68,6 +78,7 @@ Use one controller per target repository on a separate VM. Keep `nubl-factory` h
    GH_HOST=github.int.exe.xyz node /home/exedev/pi-herdr-factorio/host/cli/index.ts workflow-check --json --repo giuseppecrj/pi-herdr-agents
    GH_HOST=github.int.exe.xyz node /home/exedev/pi-herdr-factorio/host/cli/index.ts status --json --state-dir /home/exedev/factory-state --repo giuseppecrj/pi-herdr-agents
    GH_HOST=github.int.exe.xyz node /home/exedev/pi-herdr-factorio/host/cli/index.ts owner-feed --json --state-dir /home/exedev/factory-state --repo giuseppecrj/pi-herdr-agents
+   systemctl show factory.service -p ActiveEnterTimestamp -p InvocationID
    invocation=$(systemctl show factory.service -p InvocationID --value)
    sudo journalctl -u factory.service "_SYSTEMD_INVOCATION_ID=$invocation" --no-pager -o cat
    git -C /home/exedev/pi-herdr-factorio rev-parse HEAD
@@ -76,9 +87,9 @@ Use one controller per target repository on a separate VM. Keep `nubl-factory` h
    systemctl cat factory.service
    ```
 
-   Require a valid remote target workflow on main, checkout and receipt SHA equal to `C`, and receipt repository equal to the target. Require `controller_ready` in this invocation, a running controller, and `status.json` and `controller.lastTick.at` newer than the restart. The CLI and startup platform digests must match with `repositories: ["giuseppecrj/pi-herdr-agents"]` and no historical aliases. Dispatch must be false with `locally_disabled`. Require a successful controller sandbox preflight (`controller.lastTick.executionEnabled: true` and no `sandbox_unavailable`). Top-level status `executionEnabled` is always false and is not that proof. OwnerFeed must report the selected target without missing-state errors. The shared doctor reads Factorio, so do not use it as Agents repository proof.
-6. **Root and Giuseppe:** complete main-backed bootstrap evidence and settings in the [onboarding checklist](examples/onboarding/pi-herdr-agents/README.md). Root supplies exact-head ordinary CI and pinned-image unit qualification under separate grants. Before any bootstrap dispatch, verify #837 is closed and the pins include its fixes; only then collect trusted dispatch/report evidence under its separate grant. Giuseppe applies and reads back the two rulesets and Actions permissions after the bootstrap checks exist. Lifecycle tickets need candidate-bound Linux integration evidence separately; a host/unit pass cannot replace it.
-7. **Giuseppe:** verify #837 is closed and the installed/pinned product contains its fixes. Create `factory:enabled`, authorize the first bounded fixture and its spend, and explicitly approve lifting this new VM's local hold. Name the fixture `[<PR>-...]`, authorize its ready-label event separately, and keep full stage allowances. No label or successful install grants dispatch. Capture exact-head gate/report, review, and human-handoff evidence, then restore the hold at the agreed stopping point. Close the fixture under its grant and confirm CLOSED. No step authorizes a `nubl-factory` upgrade or hold-lift.
+   Require a valid remote target workflow on main, checkout and receipt SHA equal to `C`, and receipt repository equal to the target. Require `controller_ready` in this invocation, a running controller, and `status.json` and `controller.lastTick.at` newer than `ActiveEnterTimestamp`. Compare `.platform.digest` against `.controller.lastTick.platform.digest`; they must match with `repositories: ["giuseppecrj/pi-herdr-agents"]` and no historical aliases. Dispatch must be false with `locally_disabled`. Require a successful controller sandbox preflight (`controller.lastTick.executionEnabled: true` and no `sandbox_unavailable`). Top-level status `executionEnabled` is always false and is not that proof. OwnerFeed must report the selected target without missing-state errors. The shared doctor reads Factorio, so do not use it as Agents repository proof.
+6. **Root and Giuseppe:** complete main-backed bootstrap evidence and settings in the [onboarding checklist](examples/onboarding/pi-herdr-agents/README.md). Root supplies exact-head ordinary CI and pinned-image unit qualification under separate grants. Before any bootstrap dispatch, verify #837 is closed, #842 is fixed, and the pins include both fixes. Require timed baseline evidence under 360 seconds in the pinned image without raising the limit; this repository's own baseline has never been timed. Only then collect trusted dispatch/report evidence under its separate grant. After the bootstrap checks exist, Giuseppe updates existing ruleset 27348552 from `Checks` to strict `check` and `factory-gates`, both from App 15368, and removes its always-admin bypass. The onboarding workflow already emits both `Checks` and `check`, so no job rename or unprotected interval is needed. Giuseppe applies the separate approval ruleset and Actions permissions and reads all settings back. Root then creates the five non-enabling labels under its grant. Lifecycle tickets need candidate-bound Linux integration evidence separately; a host/unit pass cannot replace it.
+7. **Giuseppe:** verify #837 is closed, #842 is fixed, and the installed/pinned product contains both fixes. Require the timed baseline evidence before dispatch on any repository. Create `factory:enabled`, authorize the first bounded fixture and its spend, and explicitly approve lifting this new VM's local hold. Name the fixture `[<PR>-...]`, authorize its ready-label event separately, and keep full stage allowances. No label or successful install grants dispatch. Capture exact-head gate/report, review, and human-handoff evidence, then restore the hold at the agreed stopping point. Close the fixture under its grant and confirm CLOSED. No step authorizes a `nubl-factory` upgrade or hold-lift.
 
 ### Repository selection and reruns
 
@@ -96,19 +107,9 @@ curl -fsSL "$URL" | bash -s -- --check --repo nublai/pi-herdr-factorio-layout-fi
 curl -fsSL "$URL" | bash -s -- --repo nublai/pi-herdr-factorio-layout-fixture --vm "$VM" "$C"
 ```
 
-Require a singleton for the fixture, product origin `https://github.com/nublai/pi-herdr-factorio.git`, and receipt `<C> nublai/pi-herdr-factorio-layout-fixture`. Keep the hold and attach no production repository integration. Fresh and upgrade proof use separate disposable VMs. An installation fixture is not dispatch or production deployment proof. #837 still blocks second-repo dispatch.
+Require a singleton for the fixture, product origin `https://github.com/nublai/pi-herdr-factorio.git`, and receipt `<C> nublai/pi-herdr-factorio-layout-fixture`. Keep the hold and attach no production repository integration. Fresh and upgrade proof use separate disposable VMs. An installation fixture is not dispatch or production deployment proof. #837 and #842 still block dispatch on any repository.
 
 Historical pre-R1 layout fixtures used derived product commits and a different bootstrap. Those receipts remain historical, not a current install procedure. An existing old-layout fixture without the R1 singleton refuses a target switch; stop and obtain a separate reviewed migration grant rather than deleting its state or platform file.
-
-### Check only
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/nublai/pi-herdr-factorio/<commit>/host/install/install-exe-dev.sh | bash -s -- --check --vm nubl-factory
-```
-
-`--check` needs no commit argument. It only reads local prerequisites and performs a repository GET and an OpenAI models-list GET, never a model inference. Its namespace and bubblewrap smoke tests run `true` with the host filesystem read-only. It never clones, provisions, creates state, enables linger, installs a unit or restarts a service. Exit 0 means preflight passed; exit 1 prints a named refusal and a fix. Remote error bodies are suppressed.
-
-Preflight requires x86_64 Linux, both exe.dev integration names resolving to the link-local edge, the normal VM user, passwordless broad sudo (`sudo -n true`), bubblewrap >= 0.9.0, working unprivileged namespaces and bubblewrap, systemd/logind, attached GitHub and model routes, and at least 4 GiB plus 100,000 free inodes on each filesystem containing the home, `/var/lib` and `/tmp`. Missing commands name their apt package. Preflight changes no configuration; sudo and network probes may generate ordinary system audit logs.
 
 ## What installation does
 
