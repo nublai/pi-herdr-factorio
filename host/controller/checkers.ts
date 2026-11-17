@@ -54,6 +54,7 @@ import {
 	materializeFromDirectories,
 	materializerIdentity,
 	gateMaterializerIdentity,
+	productMaterializerIdentity,
 } from "../gates/materialize.ts";
 import { type GateRunner } from "../gates/runner.ts";
 import { scopeOwner, scopeUnit, stopScopeArgv } from "../isolation/scope.ts";
@@ -680,9 +681,17 @@ function completedDiagnosis(root: string): DiagnosisFacts | null {
 	}
 }
 
-function sameMaterializer(gate: string, source: Uint8Array): boolean {
+function sameMaterializer(gate: string, source?: Uint8Array): boolean {
 	try {
-		return Buffer.from(source).equals(gateMaterializerIdentity(gate));
+		const identity = gateMaterializerIdentity(gate);
+
+		if (source !== undefined) return Buffer.from(source).equals(identity);
+		const product = fileURLToPath(new URL("../..", import.meta.url));
+
+		return (
+			identity.equals(materializerIdentity(product)) ||
+			identity.equals(productMaterializerIdentity(product))
+		);
 	} catch {
 		return false;
 	}
@@ -704,10 +713,6 @@ export function controllerDiagnosis(config: {
 	readonly stopScope?: (unit: string) => Promise<void>;
 }) {
 	const stopScope = config.stopScope ?? stopDiagnosisScope;
-
-	const materializerSource =
-		config.materializerSource ??
-		materializerIdentity(fileURLToPath(new URL("../..", import.meta.url)));
 
 	const jobs = new Map<
 		string,
@@ -874,7 +879,10 @@ export function controllerDiagnosis(config: {
 					};
 				}
 
-				if (request.needs.replay && !sameMaterializer(gate, materializerSource))
+				if (
+					request.needs.replay &&
+					!sameMaterializer(gate, config.materializerSource)
+				)
 					facts = {
 						...facts,
 						replay: {

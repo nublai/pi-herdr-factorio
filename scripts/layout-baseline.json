@@ -3342,8 +3342,10 @@
 			"kind": "paths",
 			"reader": "host/controller/checkers.ts",
 			"tokens": {
-				"Buffer.from(source).equals(gateMaterializerIdentity(gate))": 1,
-				"materializerIdentity(fileURLToPath(new URL(\"../..\", import.meta.url)))": 1
+				"gateMaterializerIdentity(gate)": 1,
+				"fileURLToPath(new URL(\"../..\", import.meta.url))": 1,
+				"identity.equals(materializerIdentity(product))": 1,
+				"identity.equals(productMaterializerIdentity(product))": 1
 			},
 			"targets": [
 				{

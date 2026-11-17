@@ -31,6 +31,7 @@ import {
 	MATERIALIZER_FILES,
 	materializerIdentity,
 	gateMaterializerIdentity,
+	productMaterializerIdentity,
 } from "../../../host/gates/materialize.ts";
 import { runDraftBase, runHeldoutBase } from "../../../host/gates/base.ts";
 import {
@@ -174,17 +175,29 @@ const miniRunner: GateRunner = {
 	},
 };
 
-async function pinnedProduct(t: { after(fn: () => void): void }) {
+async function pinnedProduct(
+	t: { after(fn: () => void): void },
+	prepare?: (root: string) => void,
+) {
 	const root = mkdtempSync(join(tmpdir(), "factory-product-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 
-	for (const path of ["host", "src", ".github/factory/gates", "package.json"])
+	for (const path of [
+		"host",
+		"src",
+		".github/factory/gates",
+		"package.json",
+		"package-lock.json",
+	])
 		cpSync(resolve(path), join(root, path), { recursive: true });
+
+	prepare?.(root);
 
 	const git = (...args: string[]) =>
 		execFileSync("git", ["-C", root, ...args], { encoding: "utf8" }).trim();
 
 	git("init", "-q");
+	writeFileSync(join(root, ".git/info/exclude"), "node_modules\n");
 	git("add", ".");
 	git(
 		"-c",
@@ -292,6 +305,257 @@ async function diagnoseExternal(
 
 	return result;
 }
+
+async function externalRefused(
+	product: Awaited<ReturnType<typeof pinnedProduct>>,
+	f: ReturnType<typeof externalTarget>,
+) {
+	const receipt = await product.checkCandidate({
+		repository: f.root,
+		gateSha: f.gateSha,
+		candidateSha: f.candidateSha,
+		nonce: "refused-pin",
+		output: join(f.root, "refused-output"),
+		heldoutDir: f.heldoutDir,
+		heldoutDigest: f.heldoutDigest,
+		runner: {
+			kind: "must-not-run",
+			run: async () => assert.fail("unverified tooling ran"),
+		},
+	});
+
+	assert.equal(receipt.reason, "unsupported_materializer");
+	assert.equal(receipt.checks.length, 0);
+	const facts = await diagnoseExternal(product, f);
+	assert.ok(facts.replay?.kind === "unavailable");
+	assert.equal(facts.replay.reason, "unsupported_materializer");
+}
+
+for (const [member, text] of [
+	[
+		"reporter.mjs",
+		'export default async function* () { yield \'{"counts":{},"bad":false}\\n\'; }\n',
+	],
+	["freeze.mjs", ""],
+	[
+		"scan-rules.json",
+		'{"version":1,"suppression":"never-match","processMembers":[],"processEvents":[],"loaderCalls":[],"mutators":[]}',
+	],
+]) {
+	test(`R3 B1 refuses changed target ${member} before gates and replay`, async (t) => {
+		const product = await pinnedProduct(t);
+		const f = externalTarget(t, product.revision);
+		f.put(`.github/factory/gates/${member}`, text ?? "");
+		const gateSha = gitSha(f.commit());
+		await externalRefused(product, { ...f, gateSha, candidateSha: gateSha });
+	});
+}
+
+test("R3 F2 refuses an older pin with identical materializer files when installed HEAD is newer", async (t) => {
+	const product = await pinnedProduct(t);
+	product.git(
+		"-c",
+		"user.name=Gate test",
+		"-c",
+		"user.email=gate@example.invalid",
+		"commit",
+		"--allow-empty",
+		"-qm",
+		"newer product",
+	);
+	assert.equal(
+		product.git("diff", product.revision, "HEAD", "--", ...MATERIALIZER_FILES),
+		"",
+	);
+	assert.equal(product.git("status", "--porcelain"), "");
+	await externalRefused(product, externalTarget(t, product.revision));
+});
+
+for (const member of [
+	"src/candidate/review.ts",
+	".github/factory/gates/scan.ts",
+	"src/core/json.ts",
+	"src/trust/protected-paths.ts",
+]) {
+	test(`R3 F3 verifies imported product member ${member} even when git status is clean`, async (t) => {
+		const product = await pinnedProduct(t);
+		product.git("update-index", "--skip-worktree", member);
+		writeFileSync(
+			join(product.root, member),
+			readFileSync(join(product.root, member), "utf8") + "\n",
+		);
+		assert.equal(product.git("status", "--porcelain"), "");
+		await externalRefused(product, externalTarget(t, product.revision));
+	});
+}
+
+test("R3 F3 includes a new transitive gate import in the pinned identity", async (t) => {
+	const product = await pinnedProduct(t, (root) => {
+		const path = join(root, "host/gates/manifest.ts");
+		writeFileSync(
+			path,
+			'import "./pin-helper.ts";\n' + readFileSync(path, "utf8"),
+		);
+		writeFileSync(
+			join(root, "host/gates/pin-helper.ts"),
+			"export const trusted = true;\n",
+		);
+	});
+
+	const f = externalTarget(t, product.revision);
+
+	const materialize: typeof import("../../../host/gates/materialize.ts") =
+		await import(
+			pathToFileURL(join(product.root, "host/gates/materialize.ts")).href
+		);
+
+	const identity = materialize.gateMaterializerIdentity(f.root);
+	assert.ok(identity.toString().includes('"host/gates/pin-helper.ts"'));
+	assert.ok(
+		identity.equals(materialize.productMaterializerIdentity(product.root)),
+	);
+	product.git("update-index", "--skip-worktree", "host/gates/pin-helper.ts");
+	writeFileSync(
+		join(product.root, "host/gates/pin-helper.ts"),
+		"export const trusted = false;\n",
+	);
+	assert.equal(product.git("status", "--porcelain"), "");
+	await externalRefused(product, f);
+});
+
+for (const member of ["package.json", "untracked.txt"]) {
+	test(`R3 F3 refuses a dirty product worktree (${member})`, async (t) => {
+		const product = await pinnedProduct(t);
+		const path = join(product.root, member);
+		writeFileSync(
+			path,
+			(existsSync(path) ? readFileSync(path, "utf8") : "") + "\n",
+		);
+		await externalRefused(product, externalTarget(t, product.revision));
+	});
+}
+
+test("R3 F4 version 2 refuses unknown top-level keys including a misspelled pin; version 1 stays unchanged", async (t) => {
+	const f = agentsRepo(t);
+
+	for (const key of ["toolingRevison", "unknown"]) {
+		f.put(
+			GATE_POLICY,
+			JSON.stringify({ ...agentsPolicy(), [key]: "a".repeat(40) }),
+		);
+		assert.throws(() => manifestOf(f.root), /invalid_gate_manifest/);
+		const gateSha = f.commit();
+
+		const receipt = await checkCandidate({
+			repository: f.root,
+			gateSha,
+			candidateSha: gateSha,
+			nonce: "typo-pin",
+			output: join(f.root, "refused-output"),
+			runner: {
+				kind: "must-not-run",
+				run: async () => assert.fail("invalid policy ran"),
+			},
+		});
+
+		assert.equal(receipt.reason, "invalid_gate_manifest");
+		assert.equal(receipt.checks.length, 0);
+	}
+
+	const legacy = repo(t);
+
+	const policy = JSON.parse(
+		readFileSync(join(legacy.root, GATE_POLICY), "utf8"),
+	);
+
+	legacy.put(GATE_POLICY, JSON.stringify({ ...policy, unknown: true }));
+	assert.equal(manifestOf(legacy.root).version, 1);
+});
+
+test("R3 F6 pin checks ignore ambient global git configuration", async (t) => {
+	const home = mkdtempSync(join(tmpdir(), "factory-git-home-"));
+	t.after(() => rmSync(home, { recursive: true, force: true }));
+	writeFileSync(join(home, ".gitconfig"), "[invalid config\n");
+
+	const product = await pinnedProduct(t, (root) => {
+		const path = join(root, "host/gates/runner.ts");
+		writeFileSync(
+			path,
+			readFileSync(path, "utf8").replace(
+				'HOME: "/tmp",',
+				`HOME: ${JSON.stringify(home)},`,
+			),
+		);
+	});
+
+	const materialize: typeof import("../../../host/gates/materialize.ts") =
+		await import(
+			pathToFileURL(join(product.root, "host/gates/materialize.ts")).href
+		);
+
+	const f = externalTarget(t, product.revision);
+	assert.ok(
+		materialize
+			.gateMaterializerIdentity(f.root)
+			.equals(materialize.productMaterializerIdentity(product.root)),
+	);
+});
+
+test("R3 G1 missing gates.json follows the unpinned identity path and gives the same clear materialization error as gates", async (t) => {
+	const product = await pinnedProduct(t);
+	const f = externalTarget(t, product.revision);
+
+	for (const member of MATERIALIZER_FILES)
+		f.put(member, readFileSync(join(product.root, member), "utf8"));
+	rmSync(join(f.root, GATE_POLICY));
+	const gateSha = gitSha(f.commit());
+	const gateTree = join(f.root, "gate-export");
+	await exportTree(f.root, gateSha, gateTree);
+
+	const materialize: typeof import("../../../host/gates/materialize.ts") =
+		await import(
+			pathToFileURL(join(product.root, "host/gates/materialize.ts")).href
+		);
+
+	assert.ok(
+		materialize
+			.gateMaterializerIdentity(gateTree)
+			.equals(materialize.materializerIdentity(product.root)),
+	);
+	assert.throws(
+		() =>
+			materialize.materializeFromDirectories({
+				gateTree,
+				candidateTree: gateTree,
+				dest: join(f.root, "refused-tree"),
+				replacements: [],
+			}),
+		/^Error: invalid_gate_manifest$/,
+	);
+
+	const receipt = await product.checkCandidate({
+		repository: f.root,
+		gateSha,
+		candidateSha: gateSha,
+		nonce: "missing-policy",
+		output: join(f.root, "refused-output"),
+		runner: {
+			kind: "must-not-run",
+			run: async () => assert.fail("missing policy ran"),
+		},
+	});
+
+	assert.equal(receipt.reason, "invalid_gate_manifest");
+
+	const facts = await diagnoseExternal(product, {
+		...f,
+		gateSha,
+		candidateSha: gateSha,
+	});
+
+	assert.ok(facts.replay?.kind === "unavailable");
+	assert.equal(facts.replay.reason, "unsupported_tree");
+});
 
 test("R3 external target without Factorio source passes the gates CLI and both diagnostic replays", async (t) => {
 	const product = await pinnedProduct(t);
@@ -469,6 +733,8 @@ test("R3 tooling pins are exact commit SHAs, and candidate edits cannot remove o
 	}
 
 	rmSync(gateTree, { recursive: true, force: true });
+	const output = mkdtempSync(join(tmpdir(), "factory-pin-output-"));
+	t.after(() => rmSync(output, { recursive: true, force: true }));
 
 	for (const pin of [undefined, "b".repeat(40)]) {
 		f.put(policyPath, JSON.stringify({ ...policy, toolingRevision: pin }));
@@ -479,7 +745,7 @@ test("R3 tooling pins are exact commit SHAs, and candidate edits cannot remove o
 			gateSha: f.gateSha,
 			candidateSha,
 			nonce: "candidate-pin",
-			output: join(product.root, "out-pin"),
+			output,
 			runner: miniRunner,
 			install: false,
 			heldoutDir: f.heldoutDir,
@@ -543,7 +809,7 @@ test("R3 a pinned Agents-shaped version 2 target passes real static tools, gates
 		gateSha,
 		candidateSha,
 		nonce: "agents-pin",
-		output: join(product.root, "out-agents"),
+		output: join(f.root, "out-agents"),
 		runner: toolingRunner,
 		install: false,
 		heldoutDir,
@@ -568,6 +834,10 @@ test("R3 a pinned Agents-shaped version 2 target passes real static tools, gates
 
 test("R3 unpinned Factorio self-hosting retains the exact six-file identity and gate policy", () => {
 	assert.ok(gateMaterializerIdentity(".").equals(materializerIdentity(".")));
+	assert.equal(JSON.parse(materializerIdentity(".").toString()).length, 6);
+	assert.ok(
+		!productMaterializerIdentity(".").equals(materializerIdentity(".")),
+	);
 	const manifest = manifestOf(".");
 	assert.deepEqual(
 		manifest.checks.map((c) => c.name),
