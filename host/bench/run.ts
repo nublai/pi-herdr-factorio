@@ -452,6 +452,7 @@ export async function runBench(
 					contractDigest: null,
 					acceptanceDigest: null,
 					baseReceiptDigest: null,
+					baseRetryReason: null,
 					acceptEffort: workflow.config.stages.accept.reasoningEffort,
 					models: [],
 				};
@@ -628,7 +629,9 @@ export async function runBench(
 			throw new Error(
 				result.kind === "budget_exhausted"
 					? "budget_exhausted"
-					: `model_${result.kind}`,
+					: result.kind === "failed"
+						? `model_failed_${result.exit}`
+						: `model_${result.kind}`,
 			);
 
 		if (

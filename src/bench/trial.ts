@@ -1,4 +1,8 @@
 import { isGitSha, isModelId } from "../config/schema.ts";
+import {
+	parseBaseReason,
+	retryableBaseReason,
+} from "../candidate/diagnosis.ts";
 import type { SeatReceipt } from "../candidate/review.ts";
 import {
 	journalCharge,
@@ -343,6 +347,15 @@ const respecCodec = record({
 	contractDigest: (value) => (value === null ? null : digest(value)),
 	acceptanceDigest: (value) => (value === null ? null : digest(value)),
 	baseReceiptDigest: (value) => (value === null ? null : digest(value)),
+	baseRetryReason: (value) => {
+		if (value === null) return null;
+		const reason = parseBaseReason(text(value));
+
+		if (reason === null || !retryableBaseReason(reason))
+			throw new Error("invalid_respec_base_retry");
+
+		return reason;
+	},
 	acceptEffort: oneOf("low", "medium", "high"),
 	models: list(
 		record({
@@ -412,7 +425,16 @@ export function parseBenchTrial(raw: string): BenchTrial {
 	if (value === null) throw new Error("invalid_trial");
 	const { respec: rawRespec, ...body } = value;
 	const parsed = trialCodec(body);
-	const respec = rawRespec === undefined ? undefined : respecCodec(rawRespec);
+	const respecValue = objectOf(rawRespec);
+
+	const respec =
+		rawRespec === undefined
+			? undefined
+			: respecCodec(
+					respecValue !== null && !Object.hasOwn(respecValue, "baseRetryReason")
+						? { ...respecValue, baseRetryReason: null }
+						: rawRespec,
+				);
 
 	const trial: BenchTrial =
 		respec === undefined ? parsed : { ...parsed, respec };

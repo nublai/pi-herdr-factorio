@@ -30,6 +30,7 @@ describe("BenchComparison", () => {
 			contractDigest: digestOf("contract-a"),
 			acceptanceDigest: digestOf("suite-a"),
 			baseReceiptDigest: digestOf("base-a"),
+			baseRetryReason: null,
 			acceptEffort: "medium",
 			models: [],
 		} satisfies BenchRespec;
@@ -366,7 +367,7 @@ describe("BenchComparison", () => {
 		["accept-base", "preservation_failed", "base"],
 		["accept-base", "base_load_error", "base"],
 		["accept-base", "base_nondeterministic", "base"],
-		["specify", "specify_failed", "attempts"],
+		["specify", "specify_failed", "infrastructure"],
 		["specify", "specify_bad_field", "attempts"],
 		["specify", "specify_unknown_path", "attempts"],
 		["specify", "specify_too_large_to_post", "attempts"],
@@ -375,8 +376,8 @@ describe("BenchComparison", () => {
 		["accept", "accept_manifest", "attempts"],
 		["accept", "accept_judge_requires_execution", "attempts"],
 		["accept", "accept_heldout_reads_preserved_test", "attempts"],
-		["accept", "accept_failed", "attempts"],
-		["build", "model_failed", "attempts"],
+		["accept", "accept_failed", "infrastructure"],
+		["build", "model_failed", "infrastructure"],
 		["accept", "accept_refused", "provider"],
 		["specify", "specify_refused", "provider"],
 		["accept-base", "base_runner_error", "infrastructure"],
@@ -401,6 +402,39 @@ describe("BenchComparison", () => {
 				["base", "attempts"].includes(expected) ? 0 : 1,
 			);
 		});
+
+	for (const prefix of ["specify", "accept", "model"])
+		for (const [exit, expected] of [
+			["malformed", "attempts"],
+			["crashed", "infrastructure"],
+			["aborted", "infrastructure"],
+			["error", "infrastructure"],
+		] as const)
+			it(`classifies ${prefix}_failed_${exit} as ${expected}`, () => {
+				const result = compareTrials([
+					{
+						...syntheticTrial(),
+						outcome: {
+							kind: "failed",
+							stage: prefix === "model" ? "build" : prefix,
+							reason: `${prefix}_failed_${exit}`,
+						},
+					},
+				]);
+
+				assert.equal(
+					result.tasks[0]?.variants[0]?.trials[0]?.failureClass,
+					expected,
+				);
+				assert.equal(
+					result.variants[0]?.summary.passRate.candidateFailures,
+					expected === "attempts" ? 1 : 0,
+				);
+				assert.equal(
+					result.variants[0]?.summary.passRate.harnessFailures,
+					expected === "attempts" ? 0 : 1,
+				);
+			});
 
 	it("H4 keeps candidate, harness, budget and incomplete outcomes separate using factory classes", () => {
 		const failures = [

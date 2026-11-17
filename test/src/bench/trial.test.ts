@@ -63,12 +63,30 @@ describe("BenchTrial parser", () => {
 			null,
 		);
 
+		assert.equal(
+			parseBenchTrial(JSON.stringify({ ...trial, respec })).respec
+				?.baseRetryReason,
+			null,
+		);
+		assert.equal(
+			parseBenchTrial(
+				JSON.stringify({
+					...trial,
+					respec: { ...respec, baseRetryReason: "preservation_failed" },
+				}),
+			).respec?.baseRetryReason,
+			"preservation_failed",
+		);
+
 		for (const value of [
 			trial,
 			{ ...old, respec },
 			{ ...trial, respec: { ...respec, extra: true } },
 			{ ...trial, respec: { ...respec, contractDigest: "wrong" } },
 			{ ...trial, respec: { ...respec, baseReceiptDigest: "wrong" } },
+			{ ...trial, respec: { ...respec, baseRetryReason: "wrong" } },
+			{ ...trial, respec: { ...respec, baseRetryReason: "base_runner_error" } },
+			{ ...trial, respec: { ...respec, baseRetryReason: 1 } },
 			{ ...trial, respec, outcome: { kind: "passed" } },
 		])
 			assert.throws(() => parseBenchTrial(JSON.stringify(value)));

@@ -176,9 +176,11 @@ from the offline archive adapter, with production's complete file list, includin
 separate sanitized trees.
 
 Accept uses `runStage`, the frozen workflow's model, fallback, budget and accept
-reasoning effort, and `controllerDraftChecker`. Its archive adapter serves only
-the frozen repository and SHA from a locally generated gzip archive. It has no
-GitHub fallback. Judge-only gate/execution demands and new-behavior checks that
+reasoning effort, and `controllerDraftChecker`. Bench respec does not yet retry
+failed or malformed specify or accept stages. That production-parity work is
+tracked in [#851](https://github.com/nublai/pi-herdr-factorio/issues/851).
+Its archive adapter serves only the frozen repository and SHA from a locally
+generated gzip archive. It has no GitHub fallback. Judge-only gate/execution demands and new-behavior checks that
 read preserved test source retain production's refusals.
 
 Draft feedback is not qualification. The final suite receives a fresh canary and
@@ -208,9 +210,11 @@ the final qualification. Each attempt also retains its receipt and digest under
 `respec/accept-base-1/acceptance/`; the current suite stays in `respec/acceptance/`.
 Trial `respec` metadata records frozen base/archive and
 snapshot bindings, generated digests, effective accept effort and per-session
-requested/observed model evidence. Early failures may have null artifacts;
-successful records require complete proof and authoring-stage evidence. Old
-records without this field still parse.
+requested/observed model evidence. `baseRetryReason` records the first base
+refusal that granted an accept feedback retry, or null if none was granted.
+Older respec records without this field parse with null. Early failures may have
+null artifacts; successful records require complete proof and authoring-stage
+evidence. Records without `respec` metadata still parse.
 
 Before authorized model trials, the coordinator must qualify the bench host's
 local-bwrap accept-base lane as well as the Docker preflight below. Require a
@@ -381,9 +385,15 @@ The JSON contains `variants` and `tasks`. Reports include:
   policy failures are `candidate`; blocking or unverifiable review judgments
   are `review`. Specify questions are `input`, a specification needs-info outcome
   counted with candidate failures, never a harness failure. Author-fixable base
-  refusals use `base`. Failed model stages and malformed specify or accept output
-  use production's `attempts` class. Both count with candidate failures, not
-  harness failures. Missing or malformed evidence is `missing_evidence`, caps
+  refusals use `base`. Malformed model, specify or accept output uses `attempts`.
+  Both count with candidate failures, not harness failures. Stage reasons retain
+  the exit kind, such as `specify_failed_malformed` or `accept_failed_crashed`.
+  The `crashed`, `aborted` and `error` exits are `infrastructure`. An `error`
+  indicates an execution or provider transport failure, matching production's
+  infrastructure diagnosis rather than an authored-output failure. Legacy
+  `model_failed`, `specify_failed` and `accept_failed` reasons lack the exit kind
+  and stay `infrastructure` rather than count against the spec.
+  Missing or malformed evidence is `missing_evidence`, caps
   are `budget`, provider refusals are `provider`, and execution failures such
   as a base runner error or timeout remain `infrastructure`. Install and baseline failures are harness failures, not
   candidate failures. Each trial also reports its class and original reason.

@@ -121,6 +121,7 @@ describe("offline respec authoring", () => {
 						contractDigest: null,
 						acceptanceDigest: null,
 						baseReceiptDigest: null,
+						baseRetryReason: null,
 						acceptEffort: "medium",
 						models: [],
 					},

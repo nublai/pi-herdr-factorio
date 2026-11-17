@@ -245,7 +245,9 @@ export async function respecBench(input: {
 			throw new Error(
 				result.kind === "budget_exhausted"
 					? "budget_exhausted"
-					: `specify_${result.kind}`,
+					: result.kind === "failed"
+						? `specify_failed_${result.exit}`
+						: `specify_${result.kind}`,
 			);
 	});
 
@@ -380,7 +382,9 @@ export async function respecBench(input: {
 				throw new Error(
 					result.kind === "budget_exhausted"
 						? "budget_exhausted"
-						: `accept_${result.kind}`,
+						: result.kind === "failed"
+							? `accept_failed_${result.exit}`
+							: `accept_${result.kind}`,
 				);
 
 			const parsed = writeAcceptance(
@@ -500,6 +504,7 @@ export async function respecBench(input: {
 					join(privateDir, "acceptance"),
 					join(privateDir, "accept-base-1/acceptance"),
 				);
+				metadata.baseRetryReason = error.failure.reason;
 				spent = charge.total;
 				feedback = baseRetryFeedback(error.receipt, error.failure);
 				previousSuite = accepted;

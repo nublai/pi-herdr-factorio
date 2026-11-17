@@ -41,13 +41,14 @@ export async function benchFixture(
 		ambiguous?: boolean;
 		repositoryGatePolicy?: boolean;
 		historicalMaterializer?: boolean;
+		maxAttempts?: number;
 	} = {},
 ) {
 	const repository = join(root, "source");
 	mkdirSync(repository, { mode: 0o700 });
 	const repo = "nublai/pi-herdr-factorio";
 	assert.ok(isRepoSlug(repo));
-	const workflow = `---\nrepository: ${repo}\nstages:\n  review:\n    seats:\n      second-judge:\n        model: anthropic/claude-sonnet-5-5\n---\n## build\nBuild the task.\nVisible test command: \`node --test test/src/value.test.ts\`\n`;
+	const workflow = `---\nrepository: ${repo}\n${options.maxAttempts === undefined ? "" : `retry:\n  max_attempts: ${options.maxAttempts}\n`}stages:\n  review:\n    seats:\n      second-judge:\n        model: anthropic/claude-sonnet-5-5\n---\n## build\nBuild the task.\nVisible test command: \`node --test test/src/value.test.ts\`\n`;
 	put(repository, ".github/factory/WORKFLOW.md", workflow);
 	put(
 		repository,

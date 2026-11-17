@@ -179,7 +179,7 @@ function failureClass(trial: BenchTrial): FailureClassName | null {
 	if (baseReason !== null && retryableBaseReason(baseReason)) return "base";
 
 	if (
-		/^(?:model|specify|accept)_failed$/.test(outcome.reason) ||
+		/^(?:model|specify|accept)_failed_malformed$/.test(outcome.reason) ||
 		Object.keys(AUTHOR_OUTPUT_REASONS).some(
 			(reason) =>
 				outcome.reason === `specify_${reason}` ||
