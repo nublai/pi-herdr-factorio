@@ -1,8 +1,10 @@
 # Install Factorio on exe.dev
 
-Giuseppe creates `nubl-factory` from `boldsoftware/exeuntu` and installs the Shep bridge first. Run Factorio's installer as `exedev` (uid 1000, home `/home/exedev`, passwordless sudo), not as root. This is the default `exe-dev` platform. For the default target the installer refuses an existing `/etc/factory/platform.json` and never writes one.
+Giuseppe creates `nubl-factory` from `boldsoftware/exeuntu`. The Shep bridge is optional for factory bring-up. Run Factorio's installer as `exedev` (uid 1000, home `/home/exedev`, passwordless sudo), not as root. This is the default `exe-dev` platform. For the default target the installer refuses an existing `/etc/factory/platform.json` and never writes one.
 
-This runbook installs the factory for this repository on `nubl-factory`. Running the factory on another repository is not supported end to end yet: the trusted gates, stage prompts and trusted CI still assume this repository. The installer side exists. See [another target repository](#another-target-repository).
+The default commands install this repository's controller on `nubl-factory`. For a different target, follow [Set up a factory for another repository on a new VM](#set-up-a-factory-for-another-repository-on-a-new-vm).
+
+**No dispatch on any repository until [#837](https://github.com/nublai/pi-herdr-factorio/issues/837) is closed and [#842](https://github.com/nublai/pi-herdr-factorio/issues/842) is fixed.** #842 requires the trusted gate baseline to finish under 360 seconds in the pinned image, without raising the limit. This repository's own suite has never been timed for that baseline. Parser acceptance and a held installation do not close either gate.
 
 This installs a **held** controller, not a cutover. `pi-factorio` was retired and deleted on 2026-11-13 (#734), with its state archived. Production is now `nubl-factory`, held between pilot rounds; `~/factory-state/install-exe-dev.commit` on the VM records the installed commit. Routine access is read-only; upgrades, bridge installation, enabling dispatch and fixture runs each need Giuseppe's explicit go. A hold blocks new dispatch, not observation of existing runs.
 
@@ -34,44 +36,7 @@ The selected revision must include the repository rename in the platform allowli
 
 `--vm name` changes only the VM name in preflight fix instructions (default `nubl-factory`), not the host being installed.
 
-### Another target repository
-
-The product always comes from `nublai/pi-herdr-factorio` at the pinned SHA `C`. `--repo owner/name` selects only the target repository the controller serves. Keep the script URL above and append `--repo owner/name`. Use a new VM with the GitHub integration attached to the target, not to this repository. For the default target the installer clones through the GitHub integration as before. For another target it clones the public product anonymously from `https://github.com/nublai/pi-herdr-factorio.git`, so the target's integration needs no access to the product.
-
-Before stopping any service or provisioning, the pinned installer writes `/etc/factory/platform.json`, root-owned and mode 0644, containing exactly `{"version":1,"platform":"exe-dev","repositories":["owner/name"],"historicalRepositories":{}}`. A rerun accepts only that exact file for the same target. The installer refuses, before any change, a malformed, symlinked, non-root or differently permissioned file, one naming another platform or repository, an existing checkout or unit with no selection file, and a receipt for another repository. A run with no `--repo` or with `--repo nublai/pi-herdr-factorio` on such a VM refuses too. `--check` validates the same file but never writes it. The target still needs its own trusted workflow on `main`.
-
-### Disposable layout fixture
-
-This example is separate from the production command above. Use it only under the fixture and disposable-VM grants. It applies to fixture revisions derived from a product SHA whose installer still clones the selected repository. An installer that pins the product source, as described under [another target repository](#another-target-repository), cannot install a fixture commit that is absent from `nublai/pi-herdr-factorio`. The coordinator prepares a fixture commit derived from the exact product SHA, changing only the platform default repository list and the repository field in the fixture's trusted workflow. Record both SHAs and that two-field diff. `--repo` alone cannot make a product revision accept another repository.
-
-The fixture repository `nublai/pi-herdr-factorio-layout-fixture` is private, so `raw.githubusercontent.com` answers 404 for it. Fetch the pinned installer through the disposable VM's own GitHub integration instead, the same `github.int.exe.xyz` API route the installer's preflight uses. Attach an integration scoped to the fixture repository first, as the preflight's `github_integration` refusal describes. The installer never receives a credential.
-
-Before touching the VM, compute the installer's expected hash from the pinned fixture commit in a fixture checkout, and record it with both SHAs:
-
-```bash
-C=<full-fixture-sha>
-git -C <fixture-checkout> show "$C:host/install/install-exe-dev.sh" | sha256sum
-```
-
-SSH to `exedev@<disposable-name>.exe.xyz`. Fetch the installer from the fixture repository at `$C`, check it against that hash, then use the fixture repository for the selected repository too:
-
-```bash
-C=<full-fixture-sha>
-E=<sha256-from-the-pinned-commit>
-F=/tmp/install-exe-dev-$C.sh
-curl --noproxy '*' -fsS -H 'Accept: application/vnd.github.raw' "https://github.int.exe.xyz/api/v3/repos/nublai/pi-herdr-factorio-layout-fixture/contents/host/install/install-exe-dev.sh?ref=$C" -o "$F"
-echo "$E  $F" | sha256sum -c -
-bash "$F" --check --repo nublai/pi-herdr-factorio-layout-fixture --vm <disposable-name> "$C"
-bash "$F" --repo nublai/pi-herdr-factorio-layout-fixture --vm <disposable-name> "$C"
-```
-
-`GH_HOST=github.int.exe.xyz gh api -H 'Accept: application/vnd.github.raw' "repos/nublai/pi-herdr-factorio-layout-fixture/contents/host/install/install-exe-dev.sh?ref=$C" > "$F"` is equivalent on the VM. Stop if `sha256sum -c` fails. An old-layout fixture revision keeps its installer at `server/install-exe-dev.sh`, so use that path in both the hash and the fetch when installing the old layout on the upgrade VM.
-
-Use a clean new-layout VM for fresh installation and a separate old-layout VM for upgrade. Keep the hold. Do not attach the production repository integration to either VM. Fixture installation is not production deployment proof.
-
-Old pinned download URLs still select their original installer. An old bootstrap given a new-layout SHA creates or retains the hold, then fails when the verified checkout lacks its old installer path, before any service stop. Download the new pinned `host/install/install-exe-dev.sh` bootstrap to upgrade; do not add an old-path shim. The failed old bootstrap leaves its staging clone behind, because its final `exec` skips the exit cleanup. Remove it with `rm -rf ~/.pi-herdr-factorio.install.*` before the upgrade.
-
-### Check only
+## Check only
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/nublai/pi-herdr-factorio/<commit>/host/install/install-exe-dev.sh | bash -s -- --check --vm nubl-factory
@@ -80,6 +45,71 @@ curl -fsSL https://raw.githubusercontent.com/nublai/pi-herdr-factorio/<commit>/h
 `--check` needs no commit argument. It only reads local prerequisites and performs a repository GET and an OpenAI models-list GET, never a model inference. Its namespace and bubblewrap smoke tests run `true` with the host filesystem read-only. It never clones, provisions, creates state, enables linger, installs a unit or restarts a service. Exit 0 means preflight passed; exit 1 prints a named refusal and a fix. Remote error bodies are suppressed.
 
 Preflight requires x86_64 Linux, both exe.dev integration names resolving to the link-local edge, the normal VM user, passwordless broad sudo (`sudo -n true`), bubblewrap >= 0.9.0, working unprivileged namespaces and bubblewrap, systemd/logind, attached GitHub and model routes, and at least 4 GiB plus 100,000 free inodes on each filesystem containing the home, `/var/lib` and `/tmp`. Missing commands name their apt package. Preflight changes no configuration; sudo and network probes may generate ordinary system audit logs.
+
+## Set up a factory for another repository on a new VM
+
+Use one controller per target repository on a separate VM. Keep `nubl-factory` held and untouched. These steps describe `giuseppecrj/pi-herdr-agents`; replace that slug consistently for another target.
+
+1. **Giuseppe:** authorize the new VM and held install. Recommended: the authorized agent creates a fresh x86_64 `boldsoftware/exeuntu` VM with `ssh exe.dev new --name=<vm> --comment=repo2-factory --no-email --json`. The agent's key automatically tags VMs it creates `tester`. The agent then joins it to the tailnet through the installed `exe-dev-test-vm` skill, never interactive Tailscale login. Alternatively, Giuseppe creates the VM and tags it `tester` himself before agent access. The agent cannot tag a VM Giuseppe created. Never copy a production controller.
+2. **Giuseppe, on his computer:** authorize the exe.dev GitHub App for the target and attach the repository integration. The exact command is `ssh exe.dev integrations add github --name <vm>-repo --repository <owner/name> --attach vm:<vm>`. For Agents:
+
+   ```bash
+   ssh exe.dev integrations add github --name <vm>-repo --repository giuseppecrj/pi-herdr-agents --attach vm:<vm>
+   ssh exe.dev integrations list
+   ```
+
+   If the correctly scoped integration already exists, use `ssh exe.dev integrations attach <name> vm:<vm>` instead of adding it again. Confirm `llm` is attached through `auto:all`. Keep the bot identity and repository scope. Integration propagation can take a minute or two; rerun preflight after a refusal, not a model inference. The agent's tester key cannot add integrations.
+3. **Root:** apply the [Agents onboarding file set and checklist](examples/onboarding/pi-herdr-agents/README.md) to target main under its grant. Set the same reviewed full product SHA in `gates.json`, trusted CI, and the installer. Copy all three gate assets from that revision. Validate the workflow, policy, inventory, and required changes to `test/release-workflow.test.ts`. Root may update the target's README badge and `RELEASING.md` CI references in the same PR. Keep the existing `Checks` job and the example's dependent `check` job so ruleset 27348552 remains satisfied during onboarding. Root opens the PR; Giuseppe merges it after exact-head `Checks` and `check` pass, or Root merges under Giuseppe's explicit grant. Do not change required contexts yet. Giuseppe must confirm the target's second-judge model and spend before Root adds it. The example leaves it unconfigured and fails closed for judge-only scenarios.
+4. **Authorized installer operator, as `exedev@<vm>.exe.xyz`:** download the product installer, run `--check` first, then install. `ad6f07f99fa2bf7f6d365b564f55947bad364d06` is the merged R1–R4 schema baseline used by the examples, not a dispatch-qualified revision. Choose Giuseppe's approved full product SHA, including the #837 and #842 fixes before dispatch. Do not use the target main SHA as `C`.
+
+   ```bash
+   C=<reviewed-full-40-character-product-sha>
+   VM=<new-vm-name>
+   URL="https://raw.githubusercontent.com/nublai/pi-herdr-factorio/$C/host/install/install-exe-dev.sh"
+   curl -fsSL "$URL" | bash -s -- --check --repo giuseppecrj/pi-herdr-agents --vm "$VM" "$C"
+   curl -fsSL "$URL" | bash -s -- --repo giuseppecrj/pi-herdr-agents --vm "$VM" "$C"
+   ```
+
+   Require `preflight=ok`, then `installed=<C> held=yes`. A preflight failure stops the sequence. `--vm` changes fix instructions, not the machine. For another target, the product clones anonymously from `https://github.com/nublai/pi-herdr-factorio.git`; the target integration needs no product access. For Factorio's default target, the integration clone is unchanged.
+5. **Installer operator:** prove the held installation with target-specific reads on the VM. Save the receipt, checkout SHA, rendered unit, platform file, restart boundary, and current invocation journal.
+
+   ```bash
+   export PATH="$HOME/.local/bin:$HOME/.local/share/mise/shims:$PATH"
+   GH_HOST=github.int.exe.xyz node /home/exedev/pi-herdr-factorio/host/cli/index.ts workflow-check --json --repo giuseppecrj/pi-herdr-agents
+   GH_HOST=github.int.exe.xyz node /home/exedev/pi-herdr-factorio/host/cli/index.ts status --json --state-dir /home/exedev/factory-state --repo giuseppecrj/pi-herdr-agents
+   GH_HOST=github.int.exe.xyz node /home/exedev/pi-herdr-factorio/host/cli/index.ts owner-feed --json --state-dir /home/exedev/factory-state --repo giuseppecrj/pi-herdr-agents
+   systemctl show factory.service -p ActiveEnterTimestamp -p InvocationID
+   invocation=$(systemctl show factory.service -p InvocationID --value)
+   sudo journalctl -u factory.service "_SYSTEMD_INVOCATION_ID=$invocation" --no-pager -o cat
+   git -C /home/exedev/pi-herdr-factorio rev-parse HEAD
+   cat /home/exedev/factory-state/install-exe-dev.commit
+   cat /etc/factory/platform.json
+   systemctl cat factory.service
+   ```
+
+   Require a valid remote target workflow on main, checkout and receipt SHA equal to `C`, and receipt repository equal to the target. Require `controller_ready` in this invocation, a running controller, and `status.json` and `controller.lastTick.at` newer than `ActiveEnterTimestamp`. Compare `.platform.digest` against `.controller.lastTick.platform.digest`; they must match with `repositories: ["giuseppecrj/pi-herdr-agents"]` and no historical aliases. Dispatch must be false with `locally_disabled`. Require a successful controller sandbox preflight (`controller.lastTick.executionEnabled: true` and no `sandbox_unavailable`). Top-level status `executionEnabled` is always false and is not that proof. OwnerFeed must report the selected target without missing-state errors. The shared doctor reads Factorio, so do not use it as Agents repository proof.
+6. **Root and Giuseppe:** complete main-backed bootstrap evidence and settings in the [onboarding checklist](examples/onboarding/pi-herdr-agents/README.md). Root supplies exact-head ordinary CI and pinned-image unit qualification under separate grants. Before any bootstrap dispatch, verify #837 is closed, #842 is fixed, and the pins include both fixes. Require timed baseline evidence under 360 seconds in the pinned image without raising the limit; this repository's own baseline has never been timed. Only then collect trusted dispatch/report evidence under its separate grant. After the bootstrap checks exist, Giuseppe updates existing ruleset 27348552 from `Checks` to strict `check` and `factory-gates`, both from App 15368, and removes its always-admin bypass. The onboarding workflow already emits both `Checks` and `check`, so no job rename or unprotected interval is needed. Giuseppe applies the separate approval ruleset and Actions permissions and reads all settings back. Root then creates the five non-enabling labels under its grant. Lifecycle tickets need candidate-bound Linux integration evidence separately; a host/unit pass cannot replace it.
+7. **Giuseppe:** verify #837 is closed, #842 is fixed, and the installed/pinned product contains both fixes. Require the timed baseline evidence before dispatch on any repository. Create `factory:enabled`, authorize the first bounded fixture and its spend, and explicitly approve lifting this new VM's local hold. Name the fixture `[<PR>-...]`, authorize its ready-label event separately, and keep full stage allowances. No label or successful install grants dispatch. Capture exact-head gate/report, review, and human-handoff evidence, then restore the hold at the agreed stopping point. Close the fixture under its grant and confirm CLOSED. No step authorizes a `nubl-factory` upgrade or hold-lift.
+
+### Repository selection and reruns
+
+Before stopping any service or provisioning, the pinned installer writes `/etc/factory/platform.json`, root-owned and mode 0644, containing exactly `{"version":1,"platform":"exe-dev","repositories":["owner/name"],"historicalRepositories":{}}`. A rerun accepts only that exact file for the same target. The installer refuses, before any change, a malformed, symlinked, non-root or differently permissioned file, one naming another platform or repository, an existing checkout or unit with no selection file, and a receipt for another repository. A run with no `--repo` or with `--repo nublai/pi-herdr-factorio` on such a VM refuses too. `--check` validates the same file but never writes it. The target still needs its own trusted workflow on `main`.
+
+### Disposable fixture with the R1 installer
+
+Use a separately authorized disposable VM and target such as `nublai/pi-herdr-factorio-layout-fixture`. Its private visibility does not change the bootstrap URL: download from the public **product** at `C`, not the fixture. The fixture main supplies a matching `.github/factory/WORKFLOW.md` and gate policy/assets. Record its independent main SHA. Do not change product platform defaults or derive a product commit that exists only in the fixture repository.
+
+```bash
+C=<full-product-sha-published-in-nublai/pi-herdr-factorio>
+VM=<disposable-name>
+URL="https://raw.githubusercontent.com/nublai/pi-herdr-factorio/$C/host/install/install-exe-dev.sh"
+curl -fsSL "$URL" | bash -s -- --check --repo nublai/pi-herdr-factorio-layout-fixture --vm "$VM" "$C"
+curl -fsSL "$URL" | bash -s -- --repo nublai/pi-herdr-factorio-layout-fixture --vm "$VM" "$C"
+```
+
+Require a singleton for the fixture, product origin `https://github.com/nublai/pi-herdr-factorio.git`, and receipt `<C> nublai/pi-herdr-factorio-layout-fixture`. Keep the hold and attach no production repository integration. Fresh and upgrade proof use separate disposable VMs. An installation fixture is not dispatch or production deployment proof. #837 and #842 still block dispatch on any repository.
+
+Historical pre-R1 layout fixtures used derived product commits and a different bootstrap. Those receipts remain historical, not a current install procedure. An existing old-layout fixture without the R1 singleton refuses a target switch; stop and obtain a separate reviewed migration grant rather than deleting its state or platform file.
 
 ## What installation does
 
@@ -137,4 +167,4 @@ The bridge runs as the **same `exedev` user**, reading the private state directl
 /home/exedev/.local/share/mise/shims/node /home/exedev/pi-herdr-factorio/host/cli/index.ts owner-feed --json --state-dir /home/exedev/factory-state --repo nublai/pi-herdr-factorio
 ```
 
-No viewer ingress, extra port, token or privileged helper is needed. Install the bridge before Factorio, and point it at that command after the checkout exists. Shep owns its feed polling and push delivery; see [OwnerFeed contract](owner-feed.md). The installer does not configure or restart the bridge.
+No viewer ingress, extra port, token or privileged helper is needed. The bridge is optional for bring-up. If Giuseppe authorizes it, the Shep owner installs it and points it at that command after the checkout exists. For Agents, use `--repo giuseppecrj/pi-herdr-agents` with the same state path and user. Shep owns its feed polling and push delivery; see [OwnerFeed contract](owner-feed.md). The installer does not configure or restart the bridge.

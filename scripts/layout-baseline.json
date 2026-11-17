@@ -23,6 +23,72 @@
 			"export": "reviewSeats"
 		},
 		"files": {
+			"test/host/gates/onboarding.test.ts": {
+				"owner": "host/gates",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "R5"
+			},
+			"docs/operations/examples/onboarding/pi-herdr-agents/README.md": {
+				"owner": "host/install",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "R5"
+			},
+			"docs/operations/examples/onboarding/pi-herdr-agents/validation.md": {
+				"owner": "host/gates",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "R5"
+			},
+			"docs/operations/examples/onboarding/pi-herdr-agents/release-workflow-test.md": {
+				"owner": "host/gates",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "R5"
+			},
+			"docs/operations/examples/onboarding/pi-herdr-agents/.github/factory/WORKFLOW.md": {
+				"owner": "src/config",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "R5"
+			},
+			"docs/operations/examples/onboarding/pi-herdr-agents/.github/factory/gates/gates.json": {
+				"owner": "host/gates",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "R5"
+			},
+			"docs/operations/examples/onboarding/pi-herdr-agents/.github/factory/gates/freeze.mjs": {
+				"owner": "host/gates",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "R5"
+			},
+			"docs/operations/examples/onboarding/pi-herdr-agents/.github/factory/gates/reporter.mjs": {
+				"owner": "host/gates",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "R5"
+			},
+			"docs/operations/examples/onboarding/pi-herdr-agents/.github/factory/gates/scan-rules.json": {
+				"owner": "host/gates",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "R5"
+			},
+			"docs/operations/examples/onboarding/pi-herdr-agents/.github/workflows/check.yml": {
+				"owner": "host/gates",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "R5"
+			},
+			"docs/operations/examples/onboarding/pi-herdr-agents/.github/workflows/ci.yml": {
+				"owner": "host/gates",
+				"seats": ["code-review", "security-review", "simplify"],
+				"from": [],
+				"since": "R5"
+			},
 			"docs/operations/examples/target-ci.yml": {
 				"owner": "host/gates",
 				"seats": ["code-review", "security-review", "simplify"],
@@ -3745,6 +3811,29 @@
 					"path": "host/bundle/assets",
 					"type": "dir"
 				}
+			]
+		},
+		{
+			"id": "test-reads-onboarding",
+			"kind": "paths",
+			"reader": "test/host/gates/onboarding.test.ts",
+			"tokens": {
+				"new URL(\"../../../\", import.meta.url)": 1,
+				"\"docs/operations/examples/onboarding/pi-herdr-agents\"": 1,
+				"\"docs/operations/examples/target-ci.yml\"": 1
+			},
+			"targets": [
+				{"path": ".github/factory/gates/gates.json", "type": "file"},
+				{"path": ".github/factory/gates/freeze.mjs", "type": "file"},
+				{"path": ".github/factory/gates/reporter.mjs", "type": "file"},
+				{"path": ".github/factory/gates/scan-rules.json", "type": "file"},
+				{"path": "docs/operations/examples/onboarding/pi-herdr-agents/.github/factory/WORKFLOW.md", "type": "file"},
+				{"path": "docs/operations/examples/onboarding/pi-herdr-agents/.github/factory/gates/gates.json", "type": "file"},
+				{"path": "docs/operations/examples/onboarding/pi-herdr-agents/.github/factory/gates/freeze.mjs", "type": "file"},
+				{"path": "docs/operations/examples/onboarding/pi-herdr-agents/.github/factory/gates/reporter.mjs", "type": "file"},
+				{"path": "docs/operations/examples/onboarding/pi-herdr-agents/.github/factory/gates/scan-rules.json", "type": "file"},
+				{"path": "docs/operations/examples/onboarding/pi-herdr-agents/.github/workflows/ci.yml", "type": "file"},
+				{"path": "docs/operations/examples/target-ci.yml", "type": "file"}
 			]
 		},
 		{

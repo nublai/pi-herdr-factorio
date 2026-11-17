@@ -55,7 +55,7 @@ Every entry point uses the same resolver, `resolvePlatform`, with the environmen
 | `controllerAppSlug` | `exe-dev-github-integration` | `nubl-agent`, or the file's identity |
 | `botEmail` | `267204973+exe-dev-github-integration[bot]@users.noreply.github.com` | `353429311+nubl-agent[bot]@users.noreply.github.com`, or the file's identity |
 | `ghHost` | `github.int.exe.xyz` | `factorio.int.<domain>`, or the file's one-label `ghHost` |
-| `repositories` | `nublai/pi-herdr-factorio` | the same, or the file's list |
+| `repositories` | `nublai/pi-herdr-factorio`, or the file's list | the same, or the file's list |
 | `anthropicStages` | `accept`, `code-review`, `second-judge` | `accept`, `code-review` |
 
 ## Historical repository alias
@@ -97,8 +97,8 @@ Run the full inventory with `rg -n 'exe\.xyz|exe-dev-github-integration|169\.254
 
 - `src/trust/platform.ts` holds the built-in exe-dev network, identity and repository defaults. Its `exe-dev-integration` placeholder is deliberately retained for host Pi, not used as a GitHub token.
 - `host/gateway/echo-fixture.ts` holds a redirect target for a test, not a platform value.
-- `host/install/factory.service:18` deliberately keeps the repository in `ExecStart`. The unit also retains its `/home/exedev` paths and `User=exedev` (`Group=exedev` too); those deployment values are not profile-selected. It no longer hard-codes an exe-dev host.
+- `host/install/factory.service:18` keeps the default repository in `ExecStart`; the installer renders the selected `--repo` into the installed unit. The unit also retains its `/home/exedev` paths and `User=exedev` (`Group=exedev` too); those deployment values are not profile-selected. It no longer hard-codes an exe-dev host.
 
 ## Not covered here
 
-Installing the optional root-owned selection file remains an operator action, except that the exe.dev installer writes an `exe-dev` singleton for a non-default `--repo` ([install](install-exe-dev.md#another-target-repository)). Provisioning renders the unit environment but does not install or start the unit. Fresh-VM and cgroup checks remain MV3 live work. Foreign-marker reporting is MV4. Widening `exmach`'s Anthropic positions and its limits table is MV7.
+Installing the optional root-owned selection file remains an operator action, except that the exe.dev installer writes an `exe-dev` singleton for a non-default `--repo` ([new-repository install](install-exe-dev.md#set-up-a-factory-for-another-repository-on-a-new-vm)). Provisioning renders the unit environment but does not install or start the unit. Fresh-VM and cgroup checks remain MV3 live work. Foreign-marker reporting is MV4. Widening `exmach`'s Anthropic positions and its limits table is MV7.
