@@ -125,7 +125,9 @@ describe("offline respec authoring", () => {
 						acceptEffort: "medium",
 						models: [],
 					},
+					tokenCap: 540000,
 					remaining: () => 540000,
+					sleep: async () => {},
 					host: () => {
 						throw new Error("must not launch a model");
 					},

@@ -450,13 +450,9 @@ export function parseBenchTrial(raw: string): BenchTrial {
 				respec.models.length ||
 			respec.models.some(
 				(model) =>
-					![
-						"specify/draft",
-						"specify/review",
-						"specify/revision",
-						"accept",
-						"accept-retry",
-					].includes(model.session) ||
+					!/^(?:specify(?:-[1-9]\d*)?\/(?:draft|review|revision)|accept(?:-retry|-[1-9]\d*)?)$/.test(
+						model.session,
+					) ||
 					(model.fallback !== null && !isModelId(model.fallback)),
 			))
 	)
@@ -473,8 +469,12 @@ export function parseBenchTrial(raw: string): BenchTrial {
 					(stage) => stage.name === name && stage.outcome === "passed",
 				),
 			) ||
-			!["specify/draft", "specify/review", "accept"].every((name) =>
-				respec.models.some((model) => model.session === name),
+			![
+				/^specify(?:-[1-9]\d*)?\/draft$/,
+				/^specify(?:-[1-9]\d*)?\/review$/,
+				/^accept(?:-retry|-[1-9]\d*)?$/,
+			].every((name) =>
+				respec.models.some((model) => name.test(model.session)),
 			))
 	)
 		throw new Error("trial_respec_proof_missing");

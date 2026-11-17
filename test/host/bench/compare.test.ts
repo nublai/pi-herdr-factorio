@@ -174,6 +174,8 @@ describe("bench compare and spend CLI", () => {
 		["response-blocked", "infrastructure"],
 		["redirect-refused", "infrastructure"],
 		["upstream-address-refused", "infrastructure"],
+		["rate-limited", "infrastructure"],
+		["route-closed", "infrastructure"],
 		["body-not-allowed", "attempts"],
 	] as const)
 		it(`uses the failed specify leaf's gateway ${diagnostic} evidence, not a generic error assumption`, (t) => {
@@ -205,6 +207,77 @@ describe("bench compare and spend CLI", () => {
 				`specify_failed_error:${diagnostic}`,
 			);
 		});
+
+	for (const stage of ["specify", "accept"] as const)
+		for (const [status, reason, recovered, diagnostic] of [
+			[429, null, false, "provider-http-error"],
+			[500, null, false, "provider-http-error"],
+			[503, null, false, "provider-http-error"],
+			[429, "rate-limited", false, "rate-limited"],
+			[503, "route-closed", false, "route-closed"],
+			[503, null, true, null],
+			[400, null, false, null],
+		] as const)
+			it(`classifies ${stage}'s last attempt by its last model HTTP ${status}/${reason}, recovered=${recovered}`, (t) => {
+				const f = fixture(t);
+
+				const attempts =
+					stage === "specify"
+						? ["specify/draft", "specify-2/draft", "specify-3/draft"]
+						: ["accept", "accept-retry", "accept-3"];
+
+				const dir = f.put("http", {
+					...syntheticTrial(),
+					accounting: { ...syntheticTrial().accounting, sources: attempts },
+					outcome: {
+						kind: "failed",
+						stage,
+						reason: `${stage}_failed_error`,
+					},
+				});
+
+				for (const attempt of attempts) {
+					const runtime = join(dir, "runtime", attempt);
+					const last = attempt === attempts.at(-1);
+					mkdirSync(runtime, { recursive: true });
+					writeFileSync(
+						join(runtime, "receipt.json"),
+						JSON.stringify({ outcome: { kind: "failed", exit: "error" } }),
+						{ mode: 0o600 },
+					);
+					writeFileSync(
+						join(runtime, "egress.jsonl"),
+						(last
+							? [
+									{ route: "model-openai", status, reason },
+									...(recovered
+										? [{ route: "model-openai", status: 200, reason: null }]
+										: []),
+									{ route: "npm", status: 503, reason: "upstream-error" },
+								]
+							: [{ route: "model-openai", status: 200, reason: null }]
+						)
+							.map((entry) => JSON.stringify(entry))
+							.join("\n"),
+						{ mode: 0o600 },
+					);
+				}
+
+				const result = f.run("compare", dir);
+				assert.equal(result.status, 0, result.stderr);
+				const value = JSON.parse(result.stdout);
+
+				assert.equal(
+					value.variants[0].summary.failureClasses[
+						diagnostic === null ? "attempts" : "infrastructure"
+					],
+					1,
+				);
+				assert.equal(
+					value.tasks[0].variants[0].trials[0].outcome.reason,
+					`${stage}_failed_error${diagnostic === null ? "" : `:${diagnostic}`}`,
+				);
+			});
 
 	it("uses the retried accept receipt and ignores a recovered transport error", (t) => {
 		const f = fixture(t);

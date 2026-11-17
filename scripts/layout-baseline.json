@@ -1897,6 +1897,18 @@
 				],
 				"since": "L10"
 			},
+			"src/controller/retry.ts": {
+				"owner": "src/controller",
+				"seats": [
+					"code-review",
+					"security-review",
+					"simplify"
+				],
+				"from": [
+					"src/controller/orchestrator.ts"
+				],
+				"since": "851"
+			},
 			"src/controller/claims.ts": {
 				"owner": "src/controller",
 				"seats": [

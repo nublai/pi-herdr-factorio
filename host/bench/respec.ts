@@ -46,6 +46,12 @@ import {
 } from "../../src/contract/prompt.ts";
 import { renderSummary } from "../../src/contract/render.ts";
 import type { StageLaunchInput } from "../../src/controller/launch.ts";
+import { backoffMs } from "../../src/controller/orchestrator.ts";
+import {
+	acceptRetryUnavailable,
+	retryableStageOutcome,
+	stageRetryDecision,
+} from "../../src/controller/retry.ts";
 import { fieldOf, objectOf, parseJson, textOf } from "../../src/core/json.ts";
 import { digestOf, type Digest } from "../../src/core/run.ts";
 import { parseRecord, snapshotDigest } from "../../src/trust/admission.ts";
@@ -62,6 +68,7 @@ import {
 	boundedText,
 	executionCharge,
 	publishFile,
+	readStageReceipt,
 } from "../sandbox/receipts.ts";
 import { runStage, type StageHost } from "../sandbox/run-stage.ts";
 import { runSpecify } from "../sandbox/specify.ts";
@@ -90,6 +97,8 @@ function keep(path: string, text: string): void {
 		throw new Error("respec_artifact_publish_failed");
 }
 
+class FailedAttempt extends Error {}
+
 class RefusedBase extends Error {
 	readonly receipt: BaseReceipt;
 	readonly failure: BaseRefusal;
@@ -113,6 +122,8 @@ export async function respecBench(input: {
 	readonly guidance: Guidance;
 	readonly metadata: { -readonly [K in keyof BenchRespec]: BenchRespec[K] };
 	readonly remaining: () => number;
+	readonly tokenCap: number;
+	readonly sleep: (ms: number) => Promise<void>;
 	readonly host: (
 		name: string,
 		stage: "specify" | "accept",
@@ -122,6 +133,35 @@ export async function respecBench(input: {
 	readonly stage: <T>(name: string, run: () => Promise<T>) => Promise<T>;
 }) {
 	const { task, metadata } = input;
+
+	const remainingRunTokens = () =>
+		Math.max(
+			0,
+			Math.min(
+				input.remaining(),
+				input.config.usage.maxTokensPerRun -
+					(input.tokenCap - input.remaining()),
+			),
+		);
+
+	const retry = async (error: FailedAttempt, attempt: number) => {
+		const decision = stageRetryDecision({
+			usage: input.tokenCap - input.remaining(),
+			charge: 0,
+			attempt,
+			maxTokensPerRun: Math.min(
+				input.tokenCap,
+				input.config.usage.maxTokensPerRun,
+			),
+			maxAttempts: input.config.retry.maxAttempts,
+		});
+
+		if (decision.kind === "budget_exhausted")
+			throw new Error("budget_exhausted");
+
+		if (decision.kind === "attempts") throw error;
+		await input.sleep(backoffMs(attempt, input.config.retry.maxBackoffMs));
+	};
 
 	const frozen = parseJson(
 		regularText(join(input.bundle, "original/admission.json"), 1024 * 1024),
@@ -229,67 +269,88 @@ export async function respecBench(input: {
 			budget: specify.budget,
 			maxTokens: null,
 		},
-		remainingRunTokens: input.remaining(),
+		remainingRunTokens: remainingRunTokens(),
 		signal: new AbortController().signal,
 		progress: () => {},
 	};
 
-	await input.stage("specify", async () => {
-		const result = await runSpecify(
-			request,
-			join(input.state, "runtime/specify"),
-			(dir, tools) =>
-				input.host(`specify/${dir.split("/").at(-1)}`, "specify", tools),
-		);
+	const specifyAttempt = async (attempt: number) => {
+		const name = attempt === 1 ? "specify" : `specify-${attempt}`;
+		const stageDir = join(input.state, "runtime", name);
 
-		if (result.kind !== "passed")
-			throw new Error(
-				result.kind === "budget_exhausted"
-					? "budget_exhausted"
-					: result.kind === "failed"
-						? stageFailureReason(
-								"specify",
-								join(input.state, "runtime/specify"),
-								result.exit,
-							)
-						: `specify_${result.kind}`,
+		return input.stage("specify", async () => {
+			const result = await runSpecify(
+				{ ...request, attempt, remainingRunTokens: remainingRunTokens() },
+				stageDir,
+				(dir, tools) =>
+					input.host(
+						`${name}/${dir.split("/").at(-1)}`,
+						"specify",
+						tools,
+						attempt,
+					),
 			);
-	});
 
-	const parsed = parseSpecifyOutput(
-		regularText(join(input.state, "runtime/specify/output.txt"), 256 * 1024),
-		set,
-	);
+			if (retryableStageOutcome(result.kind))
+				throw new FailedAttempt(stageFailureReason("specify", stageDir));
 
-	if (parsed.kind !== "contract")
-		throw new Error(
-			parsed.kind === "questions"
-				? "specify_questions"
-				: `specify_${parsed.reason}`,
-		);
+			if (result.kind !== "passed")
+				throw new Error(
+					result.kind === "budget_exhausted"
+						? "budget_exhausted"
+						: `specify_${result.kind}`,
+				);
 
-	const contract: Contract = {
-		version: CONTRACT_VERSION,
-		runId: input.id,
-		issue: task.issue,
-		base: { repo: task.repo, sha: task.base.sha },
-		snapshot: {
-			digest: task.snapshotDigest,
-			source: admission.snapshotSource,
-			eventId: admission.eventId,
-			eventAt: admission.eventAt,
-		},
-		link: null,
-		...parsed.draft,
+			const parsed = parseSpecifyOutput(
+				regularText(join(stageDir, "output.txt"), 256 * 1024),
+				set,
+			);
+
+			if (parsed.kind === "questions") throw new Error("specify_questions");
+
+			if (parsed.kind !== "contract")
+				throw new FailedAttempt(`specify_${parsed.reason}`);
+
+			const contract: Contract = {
+				version: CONTRACT_VERSION,
+				runId: input.id,
+				issue: task.issue,
+				base: { repo: task.repo, sha: task.base.sha },
+				snapshot: {
+					digest: task.snapshotDigest,
+					source: admission.snapshotSource,
+					eventId: admission.eventId,
+					eventAt: admission.eventAt,
+				},
+				link: null,
+				...parsed.draft,
+			};
+
+			const bytes = contractBytes(contract);
+			const digest = contractDigestOf(bytes);
+
+			if (
+				renderSummary({ runId: input.id, contract: parsed.draft, digest }) ===
+				null
+			)
+				throw new FailedAttempt("specify_too_large_to_post");
+
+			return { contract, bytes, digest };
+		});
 	};
 
-	const bytes = contractBytes(contract);
-	const digest = contractDigestOf(bytes);
+	const specified = async () => {
+		for (let attempt = 1; ; attempt++) {
+			try {
+				return await specifyAttempt(attempt);
+			} catch (error) {
+				if (!(error instanceof FailedAttempt)) throw error;
+				await retry(error, attempt);
+			}
+		}
+	};
 
-	if (
-		renderSummary({ runId: input.id, contract: parsed.draft, digest }) === null
-	)
-		throw new Error("specify_too_large_to_post");
+	const { contract, bytes, digest } = await specified();
 	metadata.contractDigest = digest;
 	keep(join(privateDir, "contract.json"), bytes);
 	keep(
@@ -302,106 +363,145 @@ export async function respecBench(input: {
 		}),
 	);
 	const accept = input.config.stages.accept;
-	const acceptStarted = Date.now();
-	const deadline = acceptStarted + accept.budget.wallMs;
+	let acceptWallMs = 0;
+	let baseWallMs = 0;
 	let spent = 0;
 	let feedback: RetryFeedback | undefined;
 	let previousSuite: AcceptanceSuite | undefined;
 
 	for (let attempt = 1; ; attempt++) {
-		const name = attempt === 1 ? "accept" : "accept-retry";
+		const name =
+			attempt === 1
+				? "accept"
+				: attempt === 2
+					? "accept-retry"
+					: `accept-${attempt}`;
+
 		const stageDir = join(input.state, "runtime", name);
 
-		const accepted = await input.stage("accept", async () => {
-			const excerpts = await sourceExcerpts({
-				files: contract.files,
-				evidence: contract.evidence,
-				checkout: {
-					files,
-					read: (path, cap) => boundedText(join(input.workspace, path), cap),
-				},
-				identity: `${task.repo}@${task.base.sha}`,
-				repair: false,
-				accept: true,
-			});
+		const wallMs =
+			feedback === undefined
+				? accept.budget.wallMs
+				: accept.budget.wallMs - acceptWallMs - baseWallMs;
 
-			const prompt = await withSkills(
-				input.assets,
-				`${acceptancePrompt({
-					contract,
-					files,
-					inlined: excerpts,
-					guidance: input.guidance,
-					feedback,
-					previousSuite,
-				})}\n`,
-				ACCEPTANCE_SKILLS,
-			);
+		if (
+			feedback !== undefined &&
+			(spent >= ACCEPTANCE_MAX_TOKENS || wallMs <= 0)
+		)
+			throw new Error("budget_exhausted");
 
-			if (prompt === null) throw new Error("accept_skills_unavailable");
-			mkdirSync(stageDir, { recursive: true, mode: 0o700 });
-
-			const result = await runStage(
-				{
-					runId: input.id,
-					stage: "accept",
-					attempt,
-					prompt,
-					source: sourceFacts(excerpts),
-					settings: {
-						model: accept.model,
-						fallback: accept.fallbackModel,
-						budget: {
-							...accept.budget,
-							wallMs: Math.max(0, deadline - Date.now()),
-						},
-						maxTokens: Math.min(
-							ACCEPTANCE_MAX_TOKENS - spent,
-							input.remaining(),
-						),
+		const acceptAttempt = () =>
+			input.stage("accept", async () => {
+				const excerpts = await sourceExcerpts({
+					files: contract.files,
+					evidence: contract.evidence,
+					checkout: {
+						files,
+						read: (path, cap) => boundedText(join(input.workspace, path), cap),
 					},
-					remainingRunTokens: input.remaining(),
-					signal: new AbortController().signal,
-					progress: () => {},
-					draftCheck: controllerDraftChecker({
-						tooling: "running-product",
-						stateDir: input.state,
-						stageDir,
-						attempt,
-						input: {
-							contract,
-							digest,
-							files: set,
-							repo: task.repo,
-							issue: task.issue,
-							baseSha: task.base.sha,
-						},
-						fetch,
-						runner: localRunner,
-					}),
-				},
-				input.host(name, "accept", ACCEPTANCE_TOOLS, attempt),
-			);
+					identity: `${task.repo}@${task.base.sha}`,
+					repair: false,
+					accept: true,
+				});
 
-			if (result.kind !== "passed")
-				throw new Error(
-					result.kind === "budget_exhausted"
-						? "budget_exhausted"
-						: result.kind === "failed"
-							? stageFailureReason("accept", stageDir, result.exit)
-							: `accept_${result.kind}`,
+				const prompt = await withSkills(
+					input.assets,
+					`${acceptancePrompt({
+						contract,
+						files,
+						inlined: excerpts,
+						guidance: input.guidance,
+						feedback,
+						previousSuite,
+					})}\n`,
+					ACCEPTANCE_SKILLS,
 				);
 
-			const parsed = writeAcceptance(
-				regularText(join(stageDir, "output.txt"), 256 * 1024),
-				contract,
-				set,
-			);
+				if (prompt === null) throw new Error("accept_skills_unavailable");
+				mkdirSync(stageDir, { recursive: true, mode: 0o700 });
 
-			if (parsed.kind !== "suite") throw new Error(`accept_${parsed.reason}`);
+				const result = await runStage(
+					{
+						runId: input.id,
+						stage: "accept",
+						attempt,
+						prompt,
+						source: sourceFacts(excerpts),
+						settings: {
+							model: accept.model,
+							fallback: accept.fallbackModel,
+							budget: { ...accept.budget, wallMs },
+							maxTokens: Math.min(
+								ACCEPTANCE_MAX_TOKENS - (feedback === undefined ? 0 : spent),
+								remainingRunTokens(),
+							),
+						},
+						remainingRunTokens: remainingRunTokens(),
+						signal: new AbortController().signal,
+						progress: () => {},
+						draftCheck: controllerDraftChecker({
+							tooling: "running-product",
+							stateDir: input.state,
+							stageDir,
+							attempt,
+							input: {
+								contract,
+								digest,
+								files: set,
+								repo: task.repo,
+								issue: task.issue,
+								baseSha: task.base.sha,
+							},
+							fetch,
+							runner: localRunner,
+						}),
+					},
+					input.host(name, "accept", ACCEPTANCE_TOOLS, attempt),
+				);
 
-			return parsed.suite;
-		});
+				if (retryableStageOutcome(result.kind))
+					throw new FailedAttempt(stageFailureReason("accept", stageDir));
+
+				if (result.kind !== "passed")
+					throw new Error(
+						result.kind === "budget_exhausted"
+							? "budget_exhausted"
+							: `accept_${result.kind}`,
+					);
+
+				const parsed = writeAcceptance(
+					regularText(join(stageDir, "output.txt"), 256 * 1024),
+					contract,
+					set,
+				);
+
+				if (parsed.kind !== "suite")
+					throw new FailedAttempt(`accept_${parsed.reason}`);
+
+				return parsed.suite;
+			});
+
+		let accepted: AcceptanceSuite;
+		let attemptCharge = 0;
+
+		const charge = async () => {
+			attemptCharge = (await executionCharge(stageDir))?.total ?? 0;
+			spent += attemptCharge;
+			acceptWallMs +=
+				(await readStageReceipt(join(stageDir, "receipt.json")))?.wallMs ?? 0;
+		};
+
+		try {
+			accepted = await acceptAttempt();
+		} catch (error) {
+			await charge();
+
+			if (!(error instanceof FailedAttempt)) throw error;
+			await retry(error, attempt);
+			continue;
+		}
+
+		await charge();
 
 		const canary = `factory-holdout-${randomBytes(32).toString("hex")}`;
 		const acceptanceDigest = acceptanceDigestOf(accepted, canary);
@@ -414,10 +514,15 @@ export async function respecBench(input: {
 			keep(target, content);
 		}
 
+		const baseStarted = Date.now();
+
 		try {
 			await input.stage("accept-base", async () => {
 				const startedAt = Date.now();
-				const boundedDeadline = Math.min(deadline, startedAt + 180_000);
+
+				const boundedDeadline =
+					startedAt +
+					Math.min(180_000, accept.budget.wallMs - acceptWallMs - baseWallMs);
 
 				if (boundedDeadline <= startedAt) throw new Error("base_timeout");
 				const signal = AbortSignal.timeout(boundedDeadline - startedAt);
@@ -494,23 +599,30 @@ export async function respecBench(input: {
 			});
 		} catch (error) {
 			if (!(error instanceof RefusedBase)) throw error;
+			const refusedWallMs = Date.now() - baseStarted;
 			const charge = await executionCharge(stageDir);
 
+			if (charge !== null) spent += Math.max(0, charge.total - attemptCharge);
+
 			if (
-				attempt === 1 &&
-				attempt < input.config.retry.maxAttempts &&
+				feedback === undefined &&
 				retryableBaseReason(error.failure.reason) &&
-				charge !== null &&
-				charge.total < ACCEPTANCE_MAX_TOKENS &&
-				input.remaining() > 0 &&
-				Date.now() < deadline
+				acceptRetryUnavailable({
+					attempt,
+					maxAttempts: input.config.retry.maxAttempts,
+					spent: charge === null ? null : spent,
+					maxTokens: ACCEPTANCE_MAX_TOKENS,
+					remainingRunTokens: remainingRunTokens(),
+					baseWallMs: refusedWallMs,
+					remainingWallMs: accept.budget.wallMs - acceptWallMs - refusedWallMs,
+				}) === null
 			) {
+				baseWallMs = refusedWallMs;
 				renameSync(
 					join(privateDir, "acceptance"),
-					join(privateDir, "accept-base-1/acceptance"),
+					join(privateDir, `accept-base-${attempt}/acceptance`),
 				);
 				metadata.baseRetryReason = error.failure.reason;
-				spent = charge.total;
 				feedback = baseRetryFeedback(error.receipt, error.failure);
 				previousSuite = accepted;
 				continue;
