@@ -26,6 +26,10 @@ import {
 } from "node:test";
 import { runBenchCli } from "../../../host/cli/bench.ts";
 import { dockerRunner, localRunner } from "../../../host/gates/runner.ts";
+import {
+	MATERIALIZER_FILES,
+	materializerIdentity,
+} from "../../../host/gates/materialize.ts";
 import { compareTrials } from "../../../src/bench/compare.ts";
 import { parseBenchTrial } from "../../../src/bench/trial.ts";
 import {
@@ -1278,6 +1282,60 @@ describe("bench run offline CLI", (suite) => {
 			assert.equal(await manifestDigest(f.assets), originalDigest);
 		}
 	});
+	it("R3 runs current trusted gates against a historical bundle base with different materializer files", {
+		timeout: 30000,
+	}, async (t) => {
+		const f = await harness(t, false, 1, { historicalMaterializer: true });
+		assert.ok(
+			!materializerIdentity(f.repository).equals(
+				materializerIdentity(process.cwd()),
+			),
+		);
+
+		for (const path of MATERIALIZER_FILES)
+			put(f.repository, path, readFileSync(path));
+		f.git("add", "host");
+		f.git("commit", "-qm", "current bench product");
+		const revision = f.git("rev-parse", "HEAD");
+		assert.notEqual(revision, f.sha);
+		writeFileSync(
+			f.variantFile,
+			JSON.stringify({
+				...f.variant,
+				pins: { ...f.variant.pins, factoryRevision: revision },
+			}),
+		);
+
+		const result = await f.run();
+		assert.equal(result.code, 0, result.stderr);
+		const trial = parseBenchTrial(result.stdout);
+		assert.equal(trial.outcome.kind, "passed", JSON.stringify(trial.outcome));
+		assert.equal(trial.runtime.factoryRevision, revision);
+
+		const receipt = JSON.parse(
+			readFileSync(join(f.root, "trial/gates/receipt.json"), "utf8"),
+		);
+
+		assert.equal(receipt.status, "passed");
+		assert.notEqual(receipt.gateSha, revision);
+		assert.equal(receipt.reason, null);
+
+		for (const path of MATERIALIZER_FILES)
+			assert.equal(
+				execFileSync(
+					"git",
+					[
+						"-C",
+						join(f.root, "trial/repository"),
+						"show",
+						`${receipt.gateSha}:${path}`,
+					],
+					{ encoding: "utf8" },
+				),
+				"export const materializer = 'historical';\n",
+			);
+	});
+
 	it("reuses the real runner, visible tests, trusted gates, held-out checks and both judges with a fake gateway", {
 		timeout: 60000,
 	}, async (t) => {

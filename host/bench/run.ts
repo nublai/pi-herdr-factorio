@@ -922,6 +922,7 @@ export async function runBench(
 		const oracleDigest = oracleDigestText;
 
 		const gateInput: CandidateInput = {
+			tooling: "running-product",
 			repository,
 			gateSha,
 			candidateSha,

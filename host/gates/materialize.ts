@@ -668,6 +668,7 @@ export async function materializeCandidate(input: {
 	readonly gateSha: string;
 	readonly candidateSha: string;
 	readonly dest: string;
+	readonly tooling?: "running-product";
 	readonly replacements: readonly GateReplacement[];
 	readonly heldoutDir?: string;
 	readonly heldoutDigest?: string;
@@ -678,16 +679,18 @@ export async function materializeCandidate(input: {
 	await exportTree(input.repository, input.gateSha, input.dest);
 	const policy = gatePolicyOf(input.dest);
 
-	try {
-		if (
-			pinnedMaterializerIdentity(input.dest) === null &&
-			!materializerIdentity(input.dest).equals(
-				materializerIdentity(PRODUCT_ROOT),
+	if (input.tooling !== "running-product") {
+		try {
+			if (
+				pinnedMaterializerIdentity(input.dest) === null &&
+				!materializerIdentity(input.dest).equals(
+					materializerIdentity(PRODUCT_ROOT),
+				)
 			)
-		)
+				throw new Error("unsupported_materializer");
+		} catch {
 			throw new Error("unsupported_materializer");
-	} catch {
-		throw new Error("unsupported_materializer");
+		}
 	}
 
 	const temp = mkdtempSync(join(dirname(input.dest), "candidate-"));

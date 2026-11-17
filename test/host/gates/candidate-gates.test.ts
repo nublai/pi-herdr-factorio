@@ -429,6 +429,66 @@ for (const key of [undefined, "toolingRevison"]) {
 	});
 }
 
+test("R3 CI gates CLI refuses an external target without a pin and exposes no running-product override", async (t) => {
+	const product = await pinnedProduct(t);
+	const f = externalTarget(t, product.revision);
+	const policy = JSON.parse(readFileSync(join(f.root, GATE_POLICY), "utf8"));
+	delete policy.toolingRevision;
+	f.put(GATE_POLICY, JSON.stringify(policy));
+	f.put(
+		".github/factory/gates/reporter.mjs",
+		"throw new Error('unverified reporter ran');\n",
+	);
+	const gateSha = gitSha(f.commit());
+	const output = join(f.root, "unpinned-cli-output");
+
+	const argv = [
+		join(product.root, "host/cli/index.ts"),
+		"gates",
+		"--repository",
+		f.root,
+		"--gate-sha",
+		gateSha,
+		"--candidate-sha",
+		gateSha,
+		"--nonce",
+		"unpinned-ci",
+		"--output",
+		output,
+		"--runner",
+		"local",
+	];
+
+	const result = spawnSync(process.execPath, argv, {
+		encoding: "utf8",
+		timeout: 30_000,
+	});
+
+	assert.equal(result.status, 1, result.stderr || result.stdout);
+
+	const receipt = JSON.parse(
+		readFileSync(join(output, "receipt.json"), "utf8"),
+	);
+
+	assert.equal(receipt.status, "incomplete");
+	assert.equal(receipt.reason, "unsupported_materializer");
+	assert.equal(receipt.checks.length, 0);
+
+	for (const option of ["--tooling", "--tooling-source"]) {
+		const bypassOutput = join(f.root, option.slice(2));
+
+		const bypass = spawnSync(
+			process.execPath,
+			[...argv, "--output", bypassOutput, option, "running-product"],
+			{ encoding: "utf8", timeout: 30_000 },
+		);
+
+		assert.equal(bypass.status, 2, bypass.stderr || bypass.stdout);
+		assert.match(bypass.stderr, /Unknown option/);
+		assert.equal(existsSync(join(bypassOutput, "receipt.json")), false);
+	}
+});
+
 for (const pin of [undefined, "b".repeat(40)]) {
 	test(`R3 PROBE2 gate and replay retain main's pin when the candidate ${pin === undefined ? "deletes" : "replaces"} it`, async (t) => {
 		const product = await pinnedProduct(t);

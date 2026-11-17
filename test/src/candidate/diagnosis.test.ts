@@ -66,6 +66,7 @@ import {
 	materializeFromDirectories,
 	replacementDigest,
 	MATERIALIZER_FILES,
+	materializerIdentity,
 } from "../../../host/gates/materialize.ts";
 import { localRunner } from "../../../host/gates/runner.ts";
 import {
@@ -295,6 +296,8 @@ function repository(
 		);
 	put(".github/factory/gates/biome.json", "{}");
 	put(".oxlintrc.json", "{}");
+
+	for (const path of MATERIALIZER_FILES) put(path, readFileSync(path, "utf8"));
 
 	for (const [path, text] of Object.entries({ ...SOURCE_FILES, ...files }))
 		put(path, text);
@@ -1877,15 +1880,17 @@ function tarballOf(repository: string, sha: string): Buffer {
 	);
 }
 
-const GATE_SOURCE = "export const materializer = 1;\n";
-
 const SLOW_VALUE =
 	"const end = Date.now() + 1500; while (Date.now() < end) {}\nexport function value() { return 3; }\nexport const name = 'factory';\n";
 
 async function jobWorld(
 	t: { after(fn: () => void): void },
 	id: string,
-	options: { slow?: boolean; drift?: string | null } = {},
+	options: {
+		slow?: boolean;
+		drift?: string | null;
+		differentGateMaterializer?: boolean;
+	} = {},
 ) {
 	const raw = manifest.entries.find((e) => e.id === id);
 	assert.ok(raw !== undefined);
@@ -1909,9 +1914,6 @@ async function jobWorld(
 	).map((s) => ({ ...s, criteria: s.criteria.map((c) => ids.get(c) ?? c) }));
 
 	const f = repository(t, {
-		...Object.fromEntries(
-			MATERIALIZER_FILES.map((path) => [path, GATE_SOURCE]),
-		),
 		...Object.fromEntries(
 			Object.entries(entry.base ?? {}).map(([path, file]) => [
 				path,
@@ -2024,13 +2026,14 @@ async function jobWorld(
 	const candidateSha = f.commit();
 	const fetches: string[] = [];
 	let hold: Promise<void> | null = null;
+	let replayGateSha = ciGate;
 
 	const fetch: TarballFetch = async (_repo, sha) => {
 		fetches.push(sha);
 
 		if (hold !== null) await hold;
 
-		return tarballOf(f.repo, sha);
+		return tarballOf(f.repo, sha === ciGate ? replayGateSha : sha);
 	};
 
 	const binding = {
@@ -2175,6 +2178,15 @@ async function jobWorld(
 	}
 
 	assert.equal(receipt.status, "failed", JSON.stringify(receipt));
+
+	if (options.differentGateMaterializer) {
+		execFileSync("git", ["-C", f.repo, "checkout", "--detach", ciGate], {
+			stdio: "ignore",
+		});
+		f.put("host/gates/gates.ts", "export const materializer = 'different';\n");
+		replayGateSha = f.commit();
+	}
+
 	const start = Date.parse("2026-11-03T00:00:00Z");
 	const branch = candidateBranch(entry.issue, runId, 0);
 	let ref: string | null = candidateSha;
@@ -2248,11 +2260,7 @@ async function jobWorld(
 
 	const owner = (
 		materialize = entry.materializer === "legacy-pre-577",
-		source: Uint8Array | null = Buffer.from(
-			JSON.stringify(
-				MATERIALIZER_FILES.map((path) => [path, digestOf(GATE_SOURCE)]),
-			),
-		),
+		source: Uint8Array | null = materializerIdentity(process.cwd()),
 		diagnosisFetch: TarballFetch = fetch,
 	) =>
 		controllerDiagnosis({
@@ -2438,7 +2446,7 @@ for (const member of MATERIALIZER_FILES)
 				JSON.stringify(
 					MATERIALIZER_FILES.map((path) => [
 						path,
-						digestOf(path === member ? "changed\n" : GATE_SOURCE),
+						digestOf(path === member ? "changed\n" : readFileSync(path)),
 					]),
 				),
 			);
@@ -2460,7 +2468,9 @@ for (const source of ["differs", "default"] as const)
 	scoped(
 		`a gate whose materializer source ${source === "differs" ? "differs from" : "is not"} this controller's is unsupported_materializer with no repair (S2)`,
 		async (t) => {
-			const w = await jobWorld(t, "synthetic-wrong-value");
+			const w = await jobWorld(t, "synthetic-wrong-value", {
+				differentGateMaterializer: source === "default",
+			});
 
 			const read = finishedAssessment(
 				await w.settle(

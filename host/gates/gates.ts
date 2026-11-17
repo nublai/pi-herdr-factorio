@@ -103,6 +103,7 @@ export type CandidateInput = {
 	readonly nonce: string;
 	readonly output: string;
 	readonly runner: GateRunner;
+	readonly tooling?: "running-product";
 	readonly install?: boolean;
 	readonly replacements?: readonly GateReplacement[];
 	readonly replacementsDigest?: string;
