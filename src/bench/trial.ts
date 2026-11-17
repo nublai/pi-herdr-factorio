@@ -1,3 +1,4 @@
+import { isGitSha, isModelId } from "../config/schema.ts";
 import type { SeatReceipt } from "../candidate/review.ts";
 import {
 	journalCharge,
@@ -50,6 +51,14 @@ export function trialAccounting(journals: readonly TrialJournal[]) {
 	for (const journal of journals) {
 		if (seen.has(journal.id)) throw new Error("duplicate_trial_charge");
 		seen.add(journal.id);
+	}
+
+	const leaves = journals.filter(
+		(journal) =>
+			!journals.some((other) => other.id.startsWith(`${journal.id}/`)),
+	);
+
+	for (const journal of leaves) {
 		const charge = journalCharge(journal.text ?? "");
 		chargedTokens += Math.max(
 			journal.receiptTokens,
@@ -90,6 +99,25 @@ export function trialAccounting(journals: readonly TrialJournal[]) {
 		}
 	}
 
+	for (const parent of journals.filter(
+		(journal) => !leaves.includes(journal),
+	)) {
+		const children = leaves.filter((leaf) =>
+			leaf.id.startsWith(`${parent.id}/`),
+		);
+
+		const total = children.reduce((sum, child) => {
+			const charge = journalCharge(child.text ?? "");
+
+			return (
+				sum +
+				Math.max(child.receiptTokens, charge.tokens + charge.uncertainTokens)
+			);
+		}, 0);
+
+		chargedTokens += Math.max(0, parent.receiptTokens - total);
+	}
+
 	const cost = estimateCost(requests, PINNED_TARIFF);
 	cost.coverage.missingJournals = missing;
 	cost.coverage.missing += invalid;
@@ -100,7 +128,11 @@ export function trialAccounting(journals: readonly TrialJournal[]) {
 		if (cost.coverage.priced === 0) cost.estimate.usdMicros = null;
 	}
 
-	return { chargedTokens, cost, sources: [...seen].sort() };
+	return {
+		chargedTokens,
+		cost,
+		sources: leaves.map((journal) => journal.id).sort(),
+	};
 }
 
 export type BenchTrial = {
@@ -120,6 +152,7 @@ export type BenchTrial = {
 		readonly gateRunner: string;
 		readonly thinking: "runtime_default:not_historically_recorded";
 	};
+	readonly respec?: BenchRespec;
 	readonly tokenCap: number;
 	readonly startedAt: string;
 	readonly endedAt: string;
@@ -297,6 +330,38 @@ const seatCodec = (value: JsonValue | undefined) => {
 	};
 };
 
+const respecCodec = record({
+	baseSha: (value) => {
+		const sha = text(value);
+
+		if (!isGitSha(sha)) throw new Error("invalid_respec_base");
+
+		return sha;
+	},
+	archiveDigest: digest,
+	snapshotDigest: digest,
+	contractDigest: (value) => (value === null ? null : digest(value)),
+	acceptanceDigest: (value) => (value === null ? null : digest(value)),
+	baseReceiptDigest: (value) => (value === null ? null : digest(value)),
+	acceptEffort: oneOf("low", "medium", "high"),
+	models: list(
+		record({
+			session: text,
+			requested: (value) => {
+				const model = text(value);
+
+				if (!isModelId(model)) throw new Error("invalid_respec_model");
+
+				return model;
+			},
+			observed: nullableText,
+			fallback: nullableText,
+		}),
+	),
+});
+
+export type BenchRespec = ReturnType<typeof respecCodec>;
+
 const trialCodec = record({
 	version: literal(1),
 	kind: literal("factory_benchmark_trial"),
@@ -342,7 +407,54 @@ const trialCodec = record({
 
 export function parseBenchTrial(raw: string): BenchTrial {
 	if (hasDuplicateKey(raw)) throw new Error("duplicate_trial_key");
-	const trial = trialCodec(parseJson(raw));
+	const value = objectOf(parseJson(raw));
+
+	if (value === null) throw new Error("invalid_trial");
+	const { respec: rawRespec, ...body } = value;
+	const parsed = trialCodec(body);
+	const respec = rawRespec === undefined ? undefined : respecCodec(rawRespec);
+
+	const trial: BenchTrial =
+		respec === undefined ? parsed : { ...parsed, respec };
+
+	if ((trial.variant.change.kind === "respec") !== (respec !== undefined))
+		throw new Error("trial_respec_binding_mismatch");
+
+	if (
+		respec !== undefined &&
+		((respec.acceptanceDigest !== null && respec.contractDigest === null) ||
+			(respec.baseReceiptDigest !== null && respec.acceptanceDigest === null) ||
+			new Set(respec.models.map((model) => model.session)).size !==
+				respec.models.length ||
+			respec.models.some(
+				(model) =>
+					![
+						"specify/draft",
+						"specify/review",
+						"specify/revision",
+						"accept",
+					].includes(model.session) ||
+					(model.fallback !== null && !isModelId(model.fallback)),
+			))
+	)
+		throw new Error("trial_respec_binding_mismatch");
+
+	if (
+		respec !== undefined &&
+		trial.outcome.kind === "passed" &&
+		(respec.contractDigest === null ||
+			respec.acceptanceDigest === null ||
+			respec.baseReceiptDigest === null ||
+			!["specify", "accept", "accept-base"].every((name) =>
+				trial.stages.some(
+					(stage) => stage.name === name && stage.outcome === "passed",
+				),
+			) ||
+			!["specify/draft", "specify/review", "accept"].every((name) =>
+				respec.models.some((model) => model.session === name),
+			))
+	)
+		throw new Error("trial_respec_proof_missing");
 	const { cost, chargedTokens } = trial.accounting;
 
 	if (trial.variantDigest !== digestOf(JSON.stringify(trial.variant)))

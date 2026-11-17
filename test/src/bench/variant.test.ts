@@ -21,6 +21,7 @@ describe("BenchVariant v1", () => {
 	it("accepts exactly one declared build revision, model or skill dimension", () => {
 		for (const change of [
 			variant.change,
+			{ kind: "respec", value: "on" },
 			{ kind: "model", stage: "build", model: "openai/gpt-6.1-sol" },
 			{
 				kind: "skill",
@@ -39,6 +40,11 @@ describe("BenchVariant v1", () => {
 
 		for (const value of [
 			without,
+			{ ...variant, change: { kind: "respec", value: "off" } },
+			{
+				...variant,
+				change: { kind: "respec", value: "on", buildRevision: "off" },
+			},
 			{ ...variant, change: {} },
 			{ ...variant, change: [variant.change, { kind: "model" }] },
 			{

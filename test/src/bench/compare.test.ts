@@ -1,11 +1,102 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { isGitSha } from "../../../src/config/schema.ts";
+import type { BenchRespec } from "../../../src/bench/trial.ts";
 import { compareTrials } from "../../../src/bench/compare.ts";
 import { parseBenchVariant } from "../../../src/bench/variant.ts";
 import { digestOf } from "../../../src/core/run.ts";
 import { syntheticTrial } from "../../host/bench/trial-fixtures.ts";
 
 describe("BenchComparison", () => {
+	it("pairs baseline with respec and repetitions by frozen inputs, never generated output digests", () => {
+		const baseline = syntheticTrial({ id: "baseline" });
+
+		const variant = parseBenchVariant(
+			JSON.stringify({
+				...baseline.variant,
+				name: "respec",
+				change: { kind: "respec", value: "on" },
+			}),
+		);
+
+		const baseSha = "b".repeat(40);
+		const changedSha = "c".repeat(40);
+		assert.ok(isGitSha(baseSha) && isGitSha(changedSha));
+
+		const respec = {
+			baseSha,
+			archiveDigest: digestOf("archive"),
+			snapshotDigest: digestOf("snapshot"),
+			contractDigest: digestOf("contract-a"),
+			acceptanceDigest: digestOf("suite-a"),
+			baseReceiptDigest: digestOf("base-a"),
+			acceptEffort: "medium",
+			models: [],
+		} satisfies BenchRespec;
+
+		const a = {
+			...baseline,
+			id: digestOf("a"),
+			variant,
+			variantDigest: digestOf(JSON.stringify(variant)),
+			respec,
+		};
+
+		const b = {
+			...a,
+			id: digestOf("b"),
+			respec: {
+				...respec,
+				contractDigest: digestOf("contract-b"),
+				acceptanceDigest: digestOf("suite-b"),
+				baseReceiptDigest: digestOf("base-b"),
+			},
+		};
+
+		const result = compareTrials([baseline, a, b]);
+		assert.equal(result.tasks[0]?.differences[0]?.status, "paired");
+		assert.equal(
+			result.tasks[0]?.variants[1]?.trials.find((trial) => trial.id === b.id)
+				?.respec?.acceptanceDigest,
+			b.respec.acceptanceDigest,
+		);
+
+		for (const changed of [
+			{ ...b, respec: { ...b.respec, snapshotDigest: digestOf("changed") } },
+			{ ...b, respec: { ...b.respec, baseSha: changedSha } },
+			{ ...b, runtime: { ...b.runtime, factoryRevision: "c".repeat(40) } },
+		])
+			assert.throws(() => compareTrials([a, changed]), /incomparable_trials/);
+
+		for (const change of [
+			{ kind: "buildRevision", value: "off" },
+			{ kind: "model", stage: "build", model: "openai/gpt-6.1-terra" },
+			{
+				kind: "skill",
+				path: "skills/build/SKILL.md",
+				file: "replacement.md",
+				digest: digestOf("skill"),
+			},
+		]) {
+			const other = {
+				...baseline,
+				id: digestOf("other"),
+				variant: parseBenchVariant(
+					JSON.stringify({ ...baseline.variant, name: "other", change }),
+				),
+			};
+
+			assert.throws(() => compareTrials([a, other]), /incomparable_trials/);
+			assert.throws(
+				() =>
+					compareTrials([
+						a,
+						{ ...other, originalRunId: digestOf("another task") },
+					]),
+				/incomparable_trials/,
+			);
+		}
+	});
 	it("pairs by task and reports pass counts, medians, spread and right-minus-left differences", () => {
 		const trials = [100, 200, 600].flatMap((tokens, i) => [
 			syntheticTrial({ id: `on-${i}`, tokens, passed: i !== 2 }),

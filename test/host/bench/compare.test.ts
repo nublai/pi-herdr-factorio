@@ -46,6 +46,62 @@ function fixture(t: TestContext) {
 }
 
 describe("bench compare and spend CLI", () => {
+	it("spend covers nested specify journals once, retaining incomplete aggregate floors", (t) => {
+		const f = fixture(t);
+		const dir = join(f.root, "nested");
+		mkdirSync(join(dir, "claim"), { recursive: true });
+		writeFileSync(
+			join(dir, "claim/binding.json"),
+			JSON.stringify({
+				kind: "factory_benchmark_state",
+				version: 1,
+				bundleDigest: syntheticTrial().bundleDigest,
+				variantDigest: syntheticTrial().variantDigest,
+				tokenCap: 540000,
+			}),
+			{ mode: 0o600 },
+		);
+		mkdirSync(join(dir, "runtime/specify/draft"), { recursive: true });
+		mkdirSync(join(dir, "runtime/specify/review"), { recursive: true });
+		writeFileSync(join(dir, "runtime/specify/specify.json"), '{"version":1}');
+		writeFileSync(
+			join(dir, "runtime/specify/receipt.json"),
+			JSON.stringify({ usage: { total: 30 } }),
+		);
+
+		for (const session of ["draft", "review"])
+			writeFileSync(
+				join(dir, `runtime/specify/${session}/egress.requests.jsonl`),
+				JSON.stringify({
+					kind: "result",
+					req: 1,
+					route: "model-openai",
+					inputTokens: 10,
+					outputTokens: 5,
+					status: 200,
+				}),
+			);
+		const exact = f.run("spend", dir);
+		assert.equal(exact.status, 0, exact.stderr);
+		assert.equal(JSON.parse(exact.stdout).chargedTokens, 30);
+		assert.equal(JSON.parse(exact.stdout).trials[0].coverage, "exact");
+		writeFileSync(
+			join(dir, "runtime/specify/receipt.json"),
+			JSON.stringify({ usage: { total: 50 } }),
+		);
+		const floor = f.run("spend", dir);
+		assert.equal(floor.status, 0, floor.stderr);
+		assert.equal(JSON.parse(floor.stdout).chargedTokens, 50);
+		assert.equal(JSON.parse(floor.stdout).trials[0].coverage, "lower_bound");
+		rmSync(join(dir, "runtime/specify/review/egress.requests.jsonl"));
+		const missing = f.run("spend", dir);
+		assert.equal(missing.status, 0, missing.stderr);
+		assert.ok(
+			JSON.parse(missing.stdout).trials[0].unavailableStages.includes(
+				"specify/review",
+			),
+		);
+	});
 	it("prints read-only JSON through the real command entry point", (t) => {
 		const f = fixture(t);
 		const a = f.put("a");
