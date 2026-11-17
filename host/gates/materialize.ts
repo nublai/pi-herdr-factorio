@@ -188,6 +188,7 @@ function pinnedMaterializerIdentity(tree: string): Buffer | null {
 export function gateMaterializerIdentity(
 	tree: string,
 	targetRepository: string | null,
+	selfHosted: "presence" | "running-product" = "running-product",
 ): Buffer {
 	const pinned = pinnedMaterializerIdentity(tree);
 
@@ -195,6 +196,20 @@ export function gateMaterializerIdentity(
 
 	if (targetRepository !== "nublai/pi-herdr-factorio")
 		throw new Error("unsupported_materializer");
+
+	if (selfHosted === "running-product") {
+		const files = [
+			...MATERIALIZER_FILES,
+			...TARGET_GATE_FILES.map((name) => `.github/factory/gates/${name}`),
+		];
+
+		if (
+			!materializerIdentity(tree, files).equals(
+				materializerIdentity(PRODUCT_ROOT, files),
+			)
+		)
+			throw new Error("unsupported_materializer");
+	}
 
 	return materializerIdentity(tree);
 }

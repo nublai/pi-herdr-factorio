@@ -390,9 +390,9 @@ async function diagnoseExternal(
 	product: Awaited<ReturnType<typeof pinnedProduct>>,
 	f: ReturnType<typeof externalTarget>,
 	runner: GateRunner = localRunner,
+	repo: string = "giuseppecrj/pi-herdr-agents",
 ) {
 	let runnerCalls = 0;
-	const repo = "giuseppecrj/pi-herdr-agents";
 	assert.ok(isRepoSlug(repo));
 	const runId = digestOf("external-tooling-run");
 	const dir = join(f.root, "private-diagnosis");
@@ -1108,8 +1108,91 @@ test("837b diagnosis fresh base refuses a pinned target with a changed reporter 
 	assert.equal(calls, 0);
 });
 
-test("837d gates infer self-hosting only from the trusted checkout's GitHub origin", async (t) => {
+for (const name of ["freeze.mjs", "reporter.mjs", "scan-rules.json"]) {
+	test(`837d gates refuse a spoofed Factorio origin with changed ${name}`, async (t) => {
+		const f = repo(t);
+		f.git(
+			"remote",
+			"set-url",
+			"origin",
+			"https://github.com/giuseppecrj/pi-herdr-agents.git",
+		);
+		const path = `.github/factory/gates/${name}`;
+		f.put(path, readFileSync(join(f.root, path), "utf8") + "\n");
+		const gateSha = f.commit();
+		f.git(
+			"remote",
+			"set-url",
+			"origin",
+			"https://github.com/nublai/pi-herdr-factorio.git",
+		);
+		let calls = 0;
+
+		const receipt = await checkCandidate({
+			...gateInput(f, gateSha),
+			gateSha,
+			runner: {
+				kind: miniRunner.kind,
+				run(input) {
+					calls++;
+
+					return miniRunner.run(input);
+				},
+			},
+		});
+
+		t.diagnostic(
+			`origin-spoof ${name}: runner calls=${calls}, status=${receipt.status}, reason=${receipt.reason}`,
+		);
+		assert.equal(calls, 0, "spoofed origin must not reach the runner");
+		assert.equal(receipt.reason, "unsupported_materializer");
+		assert.equal(receipt.checks.length, 0);
+	});
+
+	test(`837d replay refuses self-hosted Factorio with changed ${name}`, async (t) => {
+		const product = await pinnedProduct(t);
+		const f = externalTarget(t, product.revision);
+		f.put(GATE_POLICY, readFileSync(GATE_POLICY, "utf8"));
+
+		for (const path of MATERIALIZER_FILES)
+			f.put(path, readFileSync(join(product.root, path), "utf8"));
+		const path = `.github/factory/gates/${name}`;
+		f.put(path, readFileSync(join(product.root, path), "utf8") + "\n");
+		const sha = gitSha(f.commit());
+		let calls = 0;
+
+		const facts = await diagnoseExternal(
+			product,
+			{ ...f, gateSha: sha, candidateSha: sha },
+			{
+				kind: mustNotRun.kind,
+				run(input) {
+					calls++;
+
+					return mustNotRun.run(input);
+				},
+			},
+			"nublai/pi-herdr-factorio",
+		);
+
+		assert.equal(calls, 0);
+		assert.equal(
+			facts.replay?.kind === "unavailable" ? facts.replay.reason : null,
+			"unsupported_materializer",
+		);
+	});
+}
+
+test("837d gates require a Factorio origin and nine running-product files to self-host", async (t) => {
 	const f = repo(t);
+
+	for (const path of [
+		...MATERIALIZER_FILES,
+		...["freeze.mjs", "reporter.mjs", "scan-rules.json"].map(
+			(name) => `.github/factory/gates/${name}`,
+		),
+	])
+		assert.ok(readFileSync(join(f.root, path)).equals(readFileSync(path)));
 
 	for (const [index, origin] of [
 		"https://github.com/nublai/pi-herdr-factorio.git",
