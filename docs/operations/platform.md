@@ -101,4 +101,4 @@ Run the full inventory with `rg -n 'exe\.xyz|exe-dev-github-integration|169\.254
 
 ## Not covered here
 
-Installing the optional root-owned selection file remains an operator action. Provisioning renders the unit environment but does not install or start the unit. Fresh-VM and cgroup checks remain MV3 live work. Foreign-marker reporting is MV4. Widening `exmach`'s Anthropic positions and its limits table is MV7.
+Installing the optional root-owned selection file remains an operator action, except that the exe.dev installer writes an `exe-dev` singleton for a non-default `--repo` ([install](install-exe-dev.md#another-target-repository)). Provisioning renders the unit environment but does not install or start the unit. Fresh-VM and cgroup checks remain MV3 live work. Foreign-marker reporting is MV4. Widening `exmach`'s Anthropic positions and its limits table is MV7.

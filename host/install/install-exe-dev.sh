@@ -17,6 +17,28 @@ verify_head() {
   [ "$actual" = "$2" ] || refuse checkout_sha 'Stop here; fetch the requested full commit and verify git rev-parse HEAD before retrying.'
 }
 
+validate_selection() {
+  local installed_commit installed_repo extra
+  if [ "$repo" = nublai/pi-herdr-factorio ]; then
+    [ "${FACTORY_PLATFORM:-exe-dev}" = exe-dev ] && ! { [ -e /etc/factory/platform.json ] || [ -L /etc/factory/platform.json ]; } || { refuse platform 'Use a VM with FACTORY_PLATFORM unset and no /etc/factory/platform.json; do not overwrite another platform installation.'; return 1; }
+  elif [ -e /etc/factory/platform.json ] || [ -L /etc/factory/platform.json ]; then
+    [ "${FACTORY_PLATFORM:-exe-dev}" = exe-dev ] && [ ! -L /etc/factory/platform.json ] && [ -f /etc/factory/platform.json ] && [ "$(stat -c %u:%a /etc/factory/platform.json)" = 0:644 ] && jq -s -e --arg repo "$repo" '. == [{version: 1, platform: "exe-dev", repositories: [$repo], historicalRepositories: {}}]' /etc/factory/platform.json >/dev/null 2>&1 || { refuse platform 'Use a separate VM for this repository; an existing /etc/factory/platform.json must be the root-owned 0644 exe-dev singleton naming exactly the selected repository.'; return 1; }
+  else
+    [ "${FACTORY_PLATFORM:-exe-dev}" = exe-dev ] || { refuse platform 'Use a VM with FACTORY_PLATFORM unset; do not overwrite another platform installation.'; return 1; }
+    ! { [ -e "$HOME/pi-herdr-factorio" ] || [ -L "$HOME/pi-herdr-factorio" ] || [ -e /etc/systemd/system/factory.service ]; } || { refuse repository_selection 'Use a new VM for another repository; never switch an existing installation to a different target.'; return 1; }
+  fi
+  if [ -e "$HOME/factory-state/install-exe-dev.commit" ]; then
+    read -r installed_commit installed_repo extra <"$HOME/factory-state/install-exe-dev.commit" && [ "$installed_repo" = "$repo" ] && [ -z "$extra" ] || { refuse repository_selection 'Keep the existing repository selection; use a separate VM for another repository.'; return 1; }
+  fi
+}
+
+install_selection() {
+  [ "$repo" != nublai/pi-herdr-factorio ] && [ ! -e /etc/factory/platform.json ] || return 0
+  sudo install -d -m 0755 -o root -g root /etc/factory
+  printf '{"version":1,"platform":"exe-dev","repositories":["%s"],"historicalRepositories":{}}\n' "$repo" | sudo install -m 0644 -o root -g root /dev/stdin /etc/factory/platform.json.tmp
+  sudo mv -T /etc/factory/platform.json.tmp /etc/factory/platform.json
+}
+
 preflight() {
   local tool package address state limit version available inodes
   for tool in sudo:sudo curl:curl git:git gh:gh jq:jq bwrap:bubblewrap unshare:util-linux systemctl:systemd loginctl:systemd systemd-notify:systemd getent:libc-bin df:coreutils awk:gawk timeout:coreutils flock:util-linux sysctl:procps tar:tar xz:xz-utils sha256sum:coreutils; do
@@ -29,7 +51,7 @@ preflight() {
   done
   [ "$(id -u)" = 1000 ] && [ "$(id -un)" = exedev ] && [ "$HOME" = /home/exedev ] || { refuse user "Run as the normal VM user: ssh exedev@$vm.exe.xyz (not sudo bash)."; return 1; }
   sudo -n true >/dev/null 2>&1 || { refuse sudo 'Give exedev passwordless sudo through the VM administrator; then rerun as exedev.'; return 1; }
-  [ "${FACTORY_PLATFORM:-exe-dev}" = exe-dev ] && ! { [ -e /etc/factory/platform.json ] || [ -L /etc/factory/platform.json ]; } || { refuse platform 'Use a VM with FACTORY_PLATFORM unset and no /etc/factory/platform.json; do not overwrite another platform installation.'; return 1; }
+  validate_selection || return 1
   version=$(bwrap --version)
   [[ "$version" =~ ([0-9]+)\.([0-9]+)\.([0-9]+) ]] && (( BASH_REMATCH[1] > 0 || BASH_REMATCH[2] >= 9 )) || { refuse bwrap_version 'sudo apt-get update && sudo apt-get install -y bubblewrap (version >= 0.9.0 required).'; return 1; }
   limit=$(sysctl -n user.max_user_namespaces 2>/dev/null) || limit=0
@@ -112,10 +134,11 @@ install_controller() (
     exit "$result"
   }
   trap cleanup_install EXIT
+  validate_selection || return 1
   if [ -e "$checkout" ] || [ -L "$checkout" ]; then
     [ ! -L "$checkout" ] || { refuse checkout_symlink 'Use a real /home/exedev/pi-herdr-factorio checkout, not a symlink.'; return 1; }
     [ -d "$checkout/.git" ] && [ -z "$(git -C "$checkout" status --porcelain)" ] || { refuse checkout_dirty 'Preserve local work, then provide a clean /home/exedev/pi-herdr-factorio checkout; the installer never resets local edits.'; return 1; }
-    [ "$(git -C "$checkout" remote get-url origin)" = "https://github.int.exe.xyz/$repo.git" ] || { refuse checkout_origin 'Use a separate clean VM or correct the checkout origin to the selected repository through github.int.exe.xyz after preserving existing work.'; return 1; }
+    [ "$(git -C "$checkout" remote get-url origin)" = "$product_url" ] || { refuse checkout_origin 'Preserve existing work and use a clean checkout of the Factorio product from the installer source URL, not the target repository.'; return 1; }
   fi
   after=$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ)
   # Hold before any stop, checkout change, provisioning, enable or restart. Never remove it.
@@ -135,14 +158,15 @@ install_controller() (
   fi
   if [ -z "$continuation" ]; then
     staging=$(mktemp -d "$HOME/.pi-herdr-factorio.install.XXXXXX")
-    git -c credential.helper= -c http.extraHeader= clone --quiet --no-checkout --depth 1 "https://github.int.exe.xyz/$repo.git" "$staging" >/dev/null 2>&1 || { refuse clone 'Confirm network access and the GitHub integration attachment, then retry.'; return 1; }
-    git -C "$staging" -c credential.helper= -c http.extraHeader= fetch --quiet --depth 1 origin "$commit" >/dev/null 2>&1 || { refuse fetch_commit 'Check network access and the GitHub integration; confirm the requested full commit is published in the selected repository, then retry with that SHA.'; return 1; }
-    [ "$(git -C "$staging" rev-parse FETCH_HEAD)" = "$commit" ] || { refuse fetched_sha 'Do not continue: the integration did not return the requested commit.'; return 1; }
+    git -c credential.helper= -c http.extraHeader= clone --quiet --no-checkout --depth 1 "$product_url" "$staging" >/dev/null 2>&1 || { refuse clone 'Confirm network access to the Factorio product source, then retry.'; return 1; }
+    git -C "$staging" -c credential.helper= -c http.extraHeader= fetch --quiet --depth 1 origin "$commit" >/dev/null 2>&1 || { refuse fetch_commit 'Check network access to the Factorio product source; confirm the requested full commit is published in nublai/pi-herdr-factorio, then retry with that SHA.'; return 1; }
+    [ "$(git -C "$staging" rev-parse FETCH_HEAD)" = "$commit" ] || { refuse fetched_sha 'Do not continue: the product source did not return the requested commit.'; return 1; }
     git -C "$staging" checkout --quiet --detach "$commit"
     verify_head "$staging" "$commit"
     exec bash "$staging/host/install/install-exe-dev.sh" --continue "$staging" --repo "$repo" --vm "$vm" "$commit"
   fi
   [ "$continuation" != "$checkout" ] || { refuse continuation 'The same-commit service changed during installation; rerun the pinned installer.'; return 1; }
+  install_selection
   sudo systemctl stop factory.service >/dev/null 2>&1 || { [ "$(systemctl show factory.service -p LoadState --value)" = not-found ] || { refuse service_stop 'sudo systemctl stop factory.service; resolve the stop failure before upgrading.'; return 1; }; }
   stopped=true
   # Disable before changing the checkout so even an interrupted provision cannot boot it.
@@ -184,6 +208,7 @@ install_controller() (
 
 main() {
   local check=false commit='' repo=nublai/pi-herdr-factorio vm=nubl-factory continuation=''
+  local product_url=https://github.int.exe.xyz/nublai/pi-herdr-factorio.git
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --check) check=true; shift;;
@@ -195,6 +220,7 @@ main() {
   done
   [[ "$repo" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] && [[ "$vm" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { refuse arguments 'Use --repo owner/name and a lowercase exe.dev --vm name.'; return 1; }
   if [ "$check" = false ] || [ -n "$commit" ]; then validate_commit "$commit" || return 1; fi
+  if [ "$repo" != nublai/pi-herdr-factorio ]; then product_url=https://github.com/nublai/pi-herdr-factorio.git; fi
   export PATH="$HOME/.local/bin:$HOME/.local/share/mise/shims:$PATH"
   if [ -n "$continuation" ]; then
     [ "$check" = false ] && { [ "$continuation" = "$HOME/pi-herdr-factorio" ] || [[ "$continuation" = "$HOME"/.pi-herdr-factorio.install.* ]]; } && [ "${BASH_SOURCE[0]}" = "$continuation/host/install/install-exe-dev.sh" ] && verify_head "$continuation" "$commit" && [ -z "$(git -C "$continuation" status --porcelain)" ] || { refuse continuation 'Use the public pinned installer command; continuation requires its verified checkout.'; return 1; }
