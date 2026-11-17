@@ -68,6 +68,7 @@ import {
 	boundedText,
 	executionCharge,
 	publishFile,
+	readStageReceipt,
 } from "../sandbox/receipts.ts";
 import { runStage, type StageHost } from "../sandbox/run-stage.ts";
 import { runSpecify } from "../sandbox/specify.ts";
@@ -132,6 +133,16 @@ export async function respecBench(input: {
 	readonly stage: <T>(name: string, run: () => Promise<T>) => Promise<T>;
 }) {
 	const { task, metadata } = input;
+
+	const remainingRunTokens = () =>
+		Math.max(
+			0,
+			Math.min(
+				input.remaining(),
+				input.config.usage.maxTokensPerRun -
+					(input.tokenCap - input.remaining()),
+			),
+		);
 
 	const retry = async (error: FailedAttempt, attempt: number) => {
 		const decision = stageRetryDecision({
@@ -258,7 +269,7 @@ export async function respecBench(input: {
 			budget: specify.budget,
 			maxTokens: null,
 		},
-		remainingRunTokens: input.remaining(),
+		remainingRunTokens: remainingRunTokens(),
 		signal: new AbortController().signal,
 		progress: () => {},
 	};
@@ -269,7 +280,7 @@ export async function respecBench(input: {
 
 		return input.stage("specify", async () => {
 			const result = await runSpecify(
-				{ ...request, attempt, remainingRunTokens: input.remaining() },
+				{ ...request, attempt, remainingRunTokens: remainingRunTokens() },
 				stageDir,
 				(dir, tools) =>
 					input.host(
@@ -352,8 +363,8 @@ export async function respecBench(input: {
 		}),
 	);
 	const accept = input.config.stages.accept;
-	const acceptStarted = Date.now();
-	let deadline = acceptStarted + accept.budget.wallMs;
+	let acceptWallMs = 0;
+	let baseWallMs = 0;
 	let spent = 0;
 	let feedback: RetryFeedback | undefined;
 	let previousSuite: AcceptanceSuite | undefined;
@@ -368,8 +379,15 @@ export async function respecBench(input: {
 
 		const stageDir = join(input.state, "runtime", name);
 
-		if (feedback === undefined) deadline = Date.now() + accept.budget.wallMs;
-		else if (spent >= ACCEPTANCE_MAX_TOKENS || Date.now() >= deadline)
+		const wallMs =
+			feedback === undefined
+				? accept.budget.wallMs
+				: accept.budget.wallMs - acceptWallMs - baseWallMs;
+
+		if (
+			feedback !== undefined &&
+			(spent >= ACCEPTANCE_MAX_TOKENS || wallMs <= 0)
+		)
 			throw new Error("budget_exhausted");
 
 		const acceptAttempt = () =>
@@ -412,16 +430,13 @@ export async function respecBench(input: {
 						settings: {
 							model: accept.model,
 							fallback: accept.fallbackModel,
-							budget: {
-								...accept.budget,
-								wallMs: Math.max(0, deadline - Date.now()),
-							},
+							budget: { ...accept.budget, wallMs },
 							maxTokens: Math.min(
 								ACCEPTANCE_MAX_TOKENS - (feedback === undefined ? 0 : spent),
-								input.remaining(),
+								remainingRunTokens(),
 							),
 						},
-						remainingRunTokens: input.remaining(),
+						remainingRunTokens: remainingRunTokens(),
 						signal: new AbortController().signal,
 						progress: () => {},
 						draftCheck: controllerDraftChecker({
@@ -469,21 +484,24 @@ export async function respecBench(input: {
 		let accepted: AcceptanceSuite;
 		let attemptCharge = 0;
 
+		const charge = async () => {
+			attemptCharge = (await executionCharge(stageDir))?.total ?? 0;
+			spent += attemptCharge;
+			acceptWallMs +=
+				(await readStageReceipt(join(stageDir, "receipt.json")))?.wallMs ?? 0;
+		};
+
 		try {
 			accepted = await acceptAttempt();
 		} catch (error) {
-			attemptCharge = (await executionCharge(stageDir))?.total ?? 0;
-			spent += attemptCharge;
+			await charge();
 
 			if (!(error instanceof FailedAttempt)) throw error;
 			await retry(error, attempt);
 			continue;
 		}
 
-		attemptCharge = (await executionCharge(stageDir))?.total ?? 0;
-		spent += attemptCharge;
-
-		deadline = acceptStarted + accept.budget.wallMs;
+		await charge();
 
 		const canary = `factory-holdout-${randomBytes(32).toString("hex")}`;
 		const acceptanceDigest = acceptanceDigestOf(accepted, canary);
@@ -496,10 +514,15 @@ export async function respecBench(input: {
 			keep(target, content);
 		}
 
+		const baseStarted = Date.now();
+
 		try {
 			await input.stage("accept-base", async () => {
 				const startedAt = Date.now();
-				const boundedDeadline = Math.min(deadline, startedAt + 180_000);
+
+				const boundedDeadline =
+					startedAt +
+					Math.min(180_000, accept.budget.wallMs - acceptWallMs - baseWallMs);
 
 				if (boundedDeadline <= startedAt) throw new Error("base_timeout");
 				const signal = AbortSignal.timeout(boundedDeadline - startedAt);
@@ -576,6 +599,7 @@ export async function respecBench(input: {
 			});
 		} catch (error) {
 			if (!(error instanceof RefusedBase)) throw error;
+			const refusedWallMs = Date.now() - baseStarted;
 			const charge = await executionCharge(stageDir);
 
 			if (charge !== null) spent += Math.max(0, charge.total - attemptCharge);
@@ -588,11 +612,12 @@ export async function respecBench(input: {
 					maxAttempts: input.config.retry.maxAttempts,
 					spent: charge === null ? null : spent,
 					maxTokens: ACCEPTANCE_MAX_TOKENS,
-					remainingRunTokens: input.remaining(),
-					baseWallMs: 0,
-					remainingWallMs: deadline - Date.now(),
+					remainingRunTokens: remainingRunTokens(),
+					baseWallMs: refusedWallMs,
+					remainingWallMs: accept.budget.wallMs - acceptWallMs - refusedWallMs,
 				}) === null
 			) {
+				baseWallMs = refusedWallMs;
 				renameSync(
 					join(privateDir, "acceptance"),
 					join(privateDir, `accept-base-${attempt}/acceptance`),

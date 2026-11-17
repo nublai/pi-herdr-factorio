@@ -180,12 +180,18 @@ reasoning effort, and `controllerDraftChecker`. Specify and accept retry failed
 or malformed attempts up to the frozen workflow's `maxAttempts`, default 3,
 through production's shared decision in `src/controller/retry.ts`. Questions,
 provider refusals and budget exhaustion do not retry. Every attempt charges the
-same trial cap, which stands in for production's `maxTokensPerRun` (the lower of
-the two applies). Each retry first waits production's backoff: 10 seconds,
-doubling per retry up to the workflow's `maxBackoffMs`.
+trial cap. Each launch's token allowance is the lowest of its stage allowance,
+the frozen workflow's `maxTokensPerRun` less the trial's spend so far, and the
+remaining trial cap. The retry decision uses the lower of the two run caps. Each
+retry first waits production's backoff: 10 seconds, doubling per retry up to the
+workflow's `maxBackoffMs`.
 Ordinary stage failures get production's fresh per-attempt stage allowance.
-Once accept receives base feedback, later attempts share its remaining
-100,000 tokens and wall allowance, including earlier accept spend and base checks.
+As in production, accept's wall allowance is charged only for accept stage
+execution (the `wallMs` in each attempt's receipt) and for the refused suite's
+base checks. Retry backoff and prompt preparation are never charged. Final base
+qualification gets the lower of 180 seconds and that remaining allowance. Once
+accept receives base feedback, later attempts share its remaining 100,000 tokens
+and that wall allowance.
 Each attempt has a separate receipt, journal and entry in trial `stages`.
 Its archive adapter serves only the frozen repository and SHA from a locally
 generated gzip archive. It has no GitHub fallback. Judge-only gate/execution demands and new-behavior checks that

@@ -124,6 +124,7 @@ async function harness(
 				| "accept_tool_limit";
 		};
 		onFinalBaseRun?: () => void;
+		sleepAdvancesClock?: boolean;
 		respec?:
 			| "on"
 			| "github-path"
@@ -223,10 +224,17 @@ async function harness(
 	let visibleDeadline: number | undefined;
 	let buildHostAt = 0;
 	const sleeps: number[] = [];
+	let slept = 0;
+
+	if (options.sleepAdvancesClock) {
+		const now = Date.now.bind(Date);
+		("mock" in t ? t.mock : mock).method(Date, "now", () => now() + slept);
+	}
 
 	const runtime: BenchRuntime = {
 		sleep: async (ms) => {
 			sleeps.push(ms);
+			slept += ms;
 		},
 		exec: async (command, args) => {
 			assert.equal(command, "systemctl");
@@ -1431,6 +1439,61 @@ describe("bench run offline CLI", (suite) => {
 			assert.deepEqual(f.sleeps, []);
 		});
 	}
+
+	it("respec gives every launch the lower of the remaining workflow run cap and trial cap", {
+		timeout: 60000,
+	}, async (t) => {
+		const f = await harness(t, false, 1, {
+			respec: "on",
+			maxTokensPerRun: 1000,
+			failure: { stage: "accept", exit: "error", attempts: 1 },
+		});
+
+		const result = await f.run(undefined, 300000);
+		assert.equal(result.code, 0, result.stderr);
+		const trial = parseBenchTrial(result.stdout);
+		assert.equal(trial.outcome.kind, "passed", JSON.stringify(trial.outcome));
+
+		const charges = await Promise.all(
+			["specify", "accept"].map((name) =>
+				executionCharge(join(f.root, "trial/runtime", name)),
+			),
+		);
+
+		assert.ok(charges.every((charge) => charge !== null));
+
+		const retried = f.reservations.find(
+			({ stage }) => stage === "accept-retry",
+		);
+
+		assert.equal(retried?.attempt, 2);
+		assert.equal(
+			retried?.tokens,
+			1000 - charges.reduce((sum, charge) => sum + (charge?.total ?? 0), 0),
+		);
+		assert.equal(f.reservations[0]?.tokens, 1000);
+	});
+
+	it("respec leaves retry backoff out of accept's wall allowance", {
+		timeout: 60000,
+	}, async (t) => {
+		const f = await harness(t, false, 1, {
+			respec: "on",
+			acceptWallMs: 25000,
+			sleepAdvancesClock: true,
+			malformed: { stage: "accept", attempts: 2 },
+		});
+
+		const result = await f.run();
+		assert.equal(result.code, 0, result.stderr);
+		const trial = parseBenchTrial(result.stdout);
+		assert.deepEqual(f.sleeps, [backoffMs(1, 300_000), backoffMs(2, 300_000)]);
+		assert.deepEqual(trial.outcome, { kind: "passed" });
+		assert.equal(
+			trial.stages.filter((entry) => entry.name === "accept").length,
+			3,
+		);
+	});
 
 	for (const exhausted of [false, true])
 		it(`respec retains base feedback across a malformed retry, exhausted=${exhausted}`, {
