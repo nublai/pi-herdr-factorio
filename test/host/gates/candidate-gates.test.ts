@@ -601,6 +601,11 @@ test("837b pinned qualification equals unchanged Factorio v1 base results", asyn
 
 	writeFileSync(join(tree, GATE_POLICY), readFileSync(GATE_POLICY));
 
+	for (const path of MATERIALIZER_FILES) {
+		mkdirSync(dirname(join(tree, path)), { recursive: true });
+		cpSync(join(product.root, path), join(tree, path));
+	}
+
 	const legacy = assessBase(
 		await product.runHeldoutBase({
 			...input,
@@ -624,6 +629,147 @@ test("837b pinned qualification equals unchanged Factorio v1 base results", asyn
 		assert.equal(after.exitCode, before.exitCode);
 		assert.deepEqual(after.files, before.files);
 	}
+});
+
+for (const [name, policy] of [
+	["dropped toolingRevision", '{"version":1}'],
+	["misspelled toolingRevision", '{"version":1,"toolingRevison":"missing"}'],
+	["missing gates.json", null],
+	["unparsable gates.json", "{"],
+	["empty gates.json", ""],
+	["array gates.json", "[]"],
+	["changed six-file identity", '{"version":1}'],
+	[
+		"unpinned external tree without the six files",
+		readFileSync(".github/factory/gates/gates.json", "utf8"),
+	],
+] as const) {
+	test(`837b draft check refuses ${name} before any runner call`, async (t) => {
+		const product = await pinnedProduct(t);
+		const f = await externalBase(t, product, false);
+
+		if (policy === null) rmSync(join(f.root, GATE_POLICY));
+		else f.put(GATE_POLICY, policy);
+
+		if (name === "changed six-file identity") {
+			for (const path of MATERIALIZER_FILES)
+				f.put(path, readFileSync(join(product.root, path), "utf8"));
+			f.put(
+				"host/gates/base.ts",
+				readFileSync(join(product.root, "host/gates/base.ts"), "utf8") + "\n",
+			);
+		}
+
+		f.git("add", "-A", "--", ".github");
+
+		if (name === "changed six-file identity") f.git("add", "host");
+		f.git("commit", "-qm", "unverified base");
+		const sha = gitSha(f.git("rev-parse", "HEAD"));
+		const stageDir = join(f.stateDir, "draft");
+		mkdirSync(stageDir, { recursive: true, mode: 0o700 });
+		let calls = 0;
+
+		const check = product.controllerDraftChecker({
+			stateDir: f.stateDir,
+			stageDir,
+			attempt: 1,
+			input: {
+				contract: { ...f.contract, base: { ...f.contract.base, sha } },
+				digest: f.binding.contractDigest,
+				repo: f.binding.repo,
+				issue: f.binding.issue,
+				baseSha: sha,
+				files: new Set(),
+			},
+			fetch: async () =>
+				execFileSync("git", [
+					"-C",
+					f.root,
+					"archive",
+					"--format=tar.gz",
+					"--prefix=target/",
+					sha,
+				]),
+			runner: {
+				kind: localRunner.kind,
+				run(input) {
+					calls++;
+
+					return localRunner.run(input);
+				},
+			},
+		});
+
+		const feedback = await check(f.text, {
+			signal: new AbortController().signal,
+			deadline: Date.now() + 30_000,
+			run: 1,
+		});
+
+		const receipt = JSON.parse(
+			readFileSync(join(stageDir, "draft-1.json"), "utf8"),
+		).receipt;
+
+		assert.equal(calls, 0);
+		assert.equal(feedback?.verdict, "would_refuse");
+		assert.equal(feedback?.reason, "base_tree_unsupported");
+		assert.deepEqual(receipt.evidence.source, {
+			kind: "unavailable",
+			reason: "tree_refused",
+		});
+	});
+}
+
+test("837b running-product base and draft qualification accept the bench's historical tooling", async (t) => {
+	const product = await pinnedProduct(t);
+	const f = await externalBase(t, product, true);
+	const tree = join(f.root, "bench-base");
+	await exportTree(f.root, f.binding.baseSha, tree);
+
+	const input = {
+		tooling: "running-product" as const,
+		tree,
+		cacheDir: join(f.stateDir, "cache"),
+		binding: f.binding,
+		contract: f.contract,
+		suite: f.suite,
+		canary: f.canary,
+		startedAt: Date.now(),
+		deadline: Date.now() + 30_000,
+	};
+
+	const base = await product.runHeldoutBase({
+		...input,
+		workDir: join(f.stateDir, "bench"),
+	});
+
+	assert.equal(assessBase(base).assessment.kind, "ready");
+	const stageDir = join(f.stateDir, "draft");
+	mkdirSync(stageDir, { recursive: true, mode: 0o700 });
+
+	const check = product.controllerDraftChecker({
+		tooling: "running-product",
+		stateDir: f.stateDir,
+		stageDir,
+		attempt: 1,
+		input: {
+			contract: f.contract,
+			digest: f.binding.contractDigest,
+			repo: f.binding.repo,
+			issue: f.binding.issue,
+			baseSha: f.binding.baseSha,
+			files: new Set(),
+		},
+		fetch: f.fetch,
+	});
+
+	const feedback = await check(f.text, {
+		signal: new AbortController().signal,
+		deadline: Date.now() + 30_000,
+		run: 1,
+	});
+
+	assert.equal(feedback?.verdict, "would_qualify");
 });
 
 test("837b draft check refuses a pinned target with a changed reporter before execution", async (t) => {

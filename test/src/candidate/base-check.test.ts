@@ -26,7 +26,10 @@ import {
 	runDraftBase,
 	runHeldoutBase,
 } from "../../../host/gates/base.ts";
-import { exportTree } from "../../../host/gates/materialize.ts";
+import {
+	exportTree,
+	MATERIALIZER_FILES,
+} from "../../../host/gates/materialize.ts";
 import {
 	assessBase,
 	baseRefusalNotice,
@@ -321,6 +324,11 @@ export async function baseFixture(
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	const tree = join(root, "base");
 	mkdirSync(tree);
+
+	for (const path of MATERIALIZER_FILES) {
+		mkdirSync(dirname(join(tree, path)), { recursive: true });
+		cpSync(resolve(path), join(tree, path));
+	}
 
 	if (gates !== "absent") {
 		cpSync(
@@ -808,6 +816,12 @@ async function controllerWorld(
 		join(source, ".github/factory/gates"),
 		{ recursive: true },
 	);
+
+	for (const path of MATERIALIZER_FILES) {
+		mkdirSync(dirname(join(source, path)), { recursive: true });
+		cpSync(resolve(path), join(source, path));
+	}
+
 	extra(source);
 	git(root, "init", "-q", source);
 	git(source, "add", ".");
@@ -1856,6 +1870,12 @@ async function replay(
 		join(tree, ".github/factory/gates"),
 		{ recursive: true },
 	);
+
+	for (const path of MATERIALIZER_FILES) {
+		mkdirSync(dirname(join(tree, path)), { recursive: true });
+		cpSync(resolve(path), join(tree, path));
+	}
+
 	writeFileSync(
 		join(tree, "package.json"),
 		'{"name":"base","version":"1.0.0","type":"module"}',

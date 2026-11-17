@@ -1,6 +1,5 @@
 import {
 	cpSync,
-	existsSync,
 	lstatSync,
 	mkdirSync,
 	readdirSync,
@@ -52,6 +51,8 @@ import {
 import {
 	gateMaterializerIdentity,
 	heldoutOf,
+	materializerIdentity,
+	productMaterializerIdentity,
 	safePath,
 } from "./materialize.ts";
 import {
@@ -304,6 +305,7 @@ export function baseTreeDigest(tree: string): ReturnType<typeof digestOf> {
 
 type BaseRunInput = {
 	readonly tree: string;
+	readonly tooling?: "running-product";
 	readonly refused?: "tree_partial" | "tree_refused" | "tree_unavailable";
 	readonly workDir: string;
 	readonly cacheDir: string;
@@ -434,23 +436,26 @@ async function runBase(
 	};
 
 	try {
-		if (source.reason !== "unsafe_tree") throw new Error(source.reason);
 		remaining();
-		const policy = join(gates, "gates.json");
 
-		if (existsSync(policy)) {
-			const manifest = objectOf(parseJson(readFileSync(policy, "utf8")));
+		if (input.refused === undefined && input.tooling !== "running-product") {
+			try {
+				const identity = gateMaterializerIdentity(input.tree);
+				const product = fileURLToPath(new URL("../..", import.meta.url));
 
-			if (fieldOf(manifest, "toolingRevision") !== undefined) {
-				try {
-					gateMaterializerIdentity(input.tree);
-				} catch {
-					source = { kind: "unavailable", reason: "tree_refused" };
+				if (
+					!identity.equals(materializerIdentity(product)) &&
+					!identity.equals(productMaterializerIdentity(product))
+				)
+					throw new Error("unsupported_materializer");
+			} catch {
+				source = { kind: "unavailable", reason: "tree_refused" };
 
-					return evidence();
-				}
+				return evidence();
 			}
 		}
+
+		if (source.reason !== "unsafe_tree") throw new Error(source.reason);
 
 		const version = await command(
 			"bwrap",
