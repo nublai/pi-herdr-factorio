@@ -107,6 +107,28 @@ describe("packed package", () => {
 		assert.deepEqual(unresolved, []);
 	});
 
+	it("837b parses replacement tests with only declared runtime dependencies", () => {
+		const output = execFileSync(
+			process.execPath,
+			[
+				"--experimental-strip-types",
+				"--input-type=module",
+				"-e",
+				`
+import {declaresTest} from "./src/contract/parse.ts";
+console.log(declaresTest('test("named", () => {});', "named"));
+`,
+			],
+			{
+				cwd: join(scratch, "package"),
+				encoding: "utf8",
+				env: { PATH: process.env.PATH ?? "", HOME: scratch },
+			},
+		);
+
+		assert.equal(output.trim(), "true");
+	});
+
 	it("loads every packaged module and registers /factory outside the checkout", () => {
 		const modules = files.filter(
 			(path) =>

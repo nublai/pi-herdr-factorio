@@ -1,5 +1,6 @@
 import {
 	cpSync,
+	existsSync,
 	lstatSync,
 	mkdirSync,
 	readdirSync,
@@ -48,7 +49,11 @@ import {
 	readDependencies,
 	validateDependencies,
 } from "./manifest.ts";
-import { heldoutOf, safePath } from "./materialize.ts";
+import {
+	gateMaterializerIdentity,
+	heldoutOf,
+	safePath,
+} from "./materialize.ts";
 import {
 	CLEAN_ENV,
 	command,
@@ -431,6 +436,21 @@ async function runBase(
 	try {
 		if (source.reason !== "unsafe_tree") throw new Error(source.reason);
 		remaining();
+		const policy = join(gates, "gates.json");
+
+		if (existsSync(policy)) {
+			const manifest = objectOf(parseJson(readFileSync(policy, "utf8")));
+
+			if (fieldOf(manifest, "toolingRevision") !== undefined) {
+				try {
+					gateMaterializerIdentity(input.tree);
+				} catch {
+					source = { kind: "unavailable", reason: "tree_refused" };
+
+					return evidence();
+				}
+			}
+		}
 
 		const version = await command(
 			"bwrap",

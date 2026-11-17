@@ -11,6 +11,7 @@ import {
 	readFileSync,
 	rmSync,
 	symlinkSync,
+	watch,
 	writeFileSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
@@ -21,6 +22,7 @@ import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { parse as parseYaml } from "yaml";
 import type { DiagnosisFacts } from "../../../host/controller/checkers.ts";
+import { fileRunFiles } from "../../../host/controller/run-files.ts";
 import { checkCandidate, receiptPasses } from "../../../host/gates/gates.ts";
 import {
 	exportTree,
@@ -328,7 +330,11 @@ async function pinnedProduct(
 	const checkers: typeof import("../../../host/controller/checkers.ts") =
 		await import(pathToFileURL(join(root, "host/controller/checkers.ts")).href);
 
-	return { root, revision, git, ...gates, ...checkers };
+	const base: typeof import("../../../host/gates/base.ts") = await import(
+		pathToFileURL(join(root, "host/gates/base.ts")).href
+	);
+
+	return { root, revision, git, ...gates, ...checkers, ...base };
 }
 
 function externalTarget(t: { after(fn: () => void): void }, revision: string) {
@@ -458,6 +464,342 @@ async function externalRefused(
 	assert.ok(facts.replay?.kind === "unavailable");
 	assert.equal(facts.replay.reason, "unsupported_materializer");
 }
+
+async function externalBase(
+	t: { after(fn: () => void): void },
+	product: Awaited<ReturnType<typeof pinnedProduct>>,
+	changedReporter: boolean,
+) {
+	const f = externalTarget(t, product.revision);
+
+	if (changedReporter)
+		f.put(
+			".github/factory/gates/reporter.mjs",
+			readFileSync(join(f.root, ".github/factory/gates/reporter.mjs"), "utf8") +
+				"\n",
+		);
+	const sha = gitSha(changedReporter ? f.commit() : f.candidateSha);
+	const slug = "giuseppecrj/pi-herdr-agents";
+	assert.ok(isRepoSlug(slug));
+
+	const contract: Contract = {
+		version: 2,
+		runId: digestOf("pinned base qualification"),
+		issue: 123,
+		base: { repo: slug, sha },
+		snapshot: {
+			digest: digestOf("snapshot"),
+			source: "unedited",
+			eventId: "1",
+			eventAt: "2026-11-17T00:00:00Z",
+		},
+		link: null,
+		summary: "Preserve value",
+		behavior: ["Preserve value"],
+		exclusions: [],
+		acceptance: [{ id: "A1", kind: "preservation", text: "Preserve value" }],
+		compatibility: [],
+		limits: [],
+		files: [],
+		evidence: [],
+	};
+
+	const text = JSON.stringify({
+		version: 2,
+		scenarios: [
+			{ id: "S1", criteria: ["A1"], checks: ["value.test.mjs"], judge: null },
+		],
+		files: [
+			{
+				path: "value.test.mjs",
+				type: "node:test",
+				content: 'import {test} from "node:test"; test("value",()=>{});',
+			},
+		],
+	});
+
+	const parsed = writeAcceptance(text, contract, new Set());
+	assert.equal(parsed.kind, "suite");
+	const stateDir = join(f.root, "private-base");
+	const files = fileRunFiles(stateDir);
+	const bytes = contractBytes(contract);
+	const contractDigest = contractDigestOf(bytes);
+	assert.ok(
+		await files.writeContract({ contract, bytes, digest: contractDigest }),
+	);
+
+	const stored = await files.artifacts.store({
+		contract,
+		contractDigest,
+		suite: parsed.suite,
+		model: "openai/gpt-6.1-sol",
+		observed: null,
+	});
+
+	assert.equal(stored.kind, "found");
+
+	const canary = readFileSync(
+		join(stateDir, "acceptance", contract.runId, "canary.txt"),
+		"utf8",
+	).trimEnd();
+
+	const binding = {
+		runId: contract.runId,
+		repo: slug,
+		issue: 123,
+		contractDigest,
+		acceptanceDigest: stored.receipt.acceptanceDigest,
+		baseSha: sha,
+		gateSha: sha,
+	};
+
+	const fetch = async () =>
+		execFileSync("git", [
+			"-C",
+			f.root,
+			"archive",
+			"--format=tar.gz",
+			"--prefix=target/",
+			sha,
+		]);
+
+	return {
+		...f,
+		contract,
+		suite: parsed.suite,
+		text,
+		stateDir,
+		binding,
+		canary,
+		fetch,
+	};
+}
+
+test("837b pinned qualification equals unchanged Factorio v1 base results", async (t) => {
+	const product = await pinnedProduct(t);
+	const f = await externalBase(t, product, false);
+	const tree = join(f.root, "base-export");
+	await exportTree(f.root, f.binding.baseSha, tree);
+
+	const input = {
+		tree,
+		cacheDir: join(f.stateDir, "cache"),
+		binding: f.binding,
+		contract: f.contract,
+		suite: f.suite,
+		canary: f.canary,
+		startedAt: Date.now(),
+		deadline: Date.now() + 30_000,
+	};
+
+	const pinned = assessBase(
+		await product.runHeldoutBase({
+			...input,
+			workDir: join(f.stateDir, "pinned"),
+		}),
+	);
+
+	writeFileSync(join(tree, GATE_POLICY), readFileSync(GATE_POLICY));
+
+	const legacy = assessBase(
+		await product.runHeldoutBase({
+			...input,
+			workDir: join(f.stateDir, "legacy"),
+		}),
+	);
+
+	assert.equal(legacy.assessment.kind, "ready");
+	assert.equal(pinned.assessment.kind, legacy.assessment.kind);
+	assert.deepEqual(pinned.receipt.results, legacy.receipt.results);
+	assert.equal(
+		pinned.receipt.evidence.runtime.protocolDigest,
+		legacy.receipt.evidence.runtime.protocolDigest,
+	);
+
+	for (const key of ["execution", "repeat"] as const) {
+		const before = legacy.receipt.evidence[key];
+		const after = pinned.receipt.evidence[key];
+		assert.equal(before.kind, "observed");
+		assert.equal(after.kind, "observed");
+		assert.equal(after.exitCode, before.exitCode);
+		assert.deepEqual(after.files, before.files);
+	}
+});
+
+test("837b draft check refuses a pinned target with a changed reporter before execution", async (t) => {
+	const product = await pinnedProduct(t);
+	const f = await externalBase(t, product, true);
+	let calls = 0;
+	const stageDir = join(f.stateDir, "draft");
+	mkdirSync(stageDir, { recursive: true, mode: 0o700 });
+
+	const check = product.controllerDraftChecker({
+		stateDir: f.stateDir,
+		stageDir,
+		attempt: 1,
+		input: {
+			contract: f.contract,
+			digest: f.binding.contractDigest,
+			repo: f.binding.repo,
+			issue: f.binding.issue,
+			baseSha: f.binding.baseSha,
+			files: new Set(),
+		},
+		fetch: f.fetch,
+		runner: {
+			kind: localRunner.kind,
+			run(input) {
+				calls++;
+
+				return localRunner.run(input);
+			},
+		},
+	});
+
+	const feedback = await check(f.text, {
+		signal: new AbortController().signal,
+		deadline: Date.now() + 30_000,
+		run: 1,
+	});
+
+	assert.equal(feedback?.verdict, "would_refuse");
+	assert.equal(feedback?.reason, "base_tree_unsupported");
+
+	const receipt = JSON.parse(
+		readFileSync(join(stageDir, "draft-1.json"), "utf8"),
+	).receipt;
+
+	assert.deepEqual(receipt.evidence.source, {
+		kind: "unavailable",
+		reason: "tree_refused",
+	});
+	assert.equal(calls, 0);
+});
+
+test("837b accept held-out base qualification refuses a pinned target with a changed reporter", {
+	timeout: 30_000,
+}, async (t) => {
+	const product = await pinnedProduct(t);
+	const f = await externalBase(t, product, true);
+
+	const checker = product.controllerBaseChecker({
+		stateDir: f.stateDir,
+		fetch: f.fetch,
+	});
+
+	const input = {
+		binding: f.binding,
+		acceptAttempt: 1,
+		remainingAcceptMs: 30_000,
+		signal: new AbortController().signal,
+	};
+
+	assert.equal((await checker.check(input)).kind, "checking");
+	await new Promise<void>((resolve, reject) => {
+		const watcher = watch(
+			join(
+				f.stateDir,
+				"base-check",
+				f.contract.runId,
+				digestOf(JSON.stringify(f.binding)),
+				"a1",
+			),
+			(_event, name) => {
+				if (name === "result.json") {
+					watcher.close();
+					resolve();
+				}
+			},
+		);
+
+		watcher.on("error", reject);
+		t.after(() => watcher.close());
+	});
+	await checker.stop(f.contract.runId);
+	const progress = await checker.check({ ...input, readOnly: true });
+	assert.equal(progress.kind, "refused");
+
+	if (progress.kind === "refused")
+		assert.equal(progress.failure.reason, "base_tree_unsupported");
+
+	const receipt = JSON.parse(
+		readFileSync(
+			join(
+				f.stateDir,
+				"base-check",
+				f.contract.runId,
+				digestOf(JSON.stringify(f.binding)),
+				"a1/result.json",
+			),
+			"utf8",
+		),
+	);
+
+	assert.deepEqual(receipt.evidence.source, {
+		kind: "unavailable",
+		reason: "tree_refused",
+	});
+	assert.equal(receipt.evidence.execution.kind, "unavailable");
+});
+
+test("837b diagnosis fresh base refuses a pinned target with a changed reporter before execution", async (t) => {
+	const product = await pinnedProduct(t);
+	const f = await externalBase(t, product, true);
+	let calls = 0;
+
+	const owner = product.controllerDiagnosis({
+		stateDir: f.stateDir,
+		fetch: f.fetch,
+		runner: {
+			kind: localRunner.kind,
+			run(input) {
+				calls++;
+
+				return localRunner.run(input);
+			},
+		},
+	});
+
+	const facts = await new Promise<DiagnosisFacts>((finish, reject) => {
+		void owner
+			.check({
+				runId: f.contract.runId,
+				dir: f.stateDir,
+				bindingDigest: digestOf("fresh-pinned-base"),
+				repo: f.binding.repo,
+				gateSha: f.binding.gateSha,
+				candidateSha: f.binding.gateSha,
+				round: 0,
+				allowanceMs: 30_000,
+				needs: { replay: true, dependencies: false },
+				heldoutDir: f.heldoutDir,
+				heldoutDigest: f.heldoutDigest,
+				replacements: [],
+				base: {
+					kind: "fresh",
+					binding: f.binding,
+					contract: f.contract,
+					suite: f.suite,
+					canary: f.canary,
+				},
+				finish,
+				interrupted: () => assert.fail("unexpected interruption"),
+			})
+			.catch(reject);
+	});
+
+	await owner.stop(f.contract.runId);
+	assert.equal(facts.baseRefusal, "base_tree_unsupported");
+	assert.deepEqual(facts.base?.evidence.source, {
+		kind: "unavailable",
+		reason: "tree_refused",
+	});
+	assert.equal(
+		facts.replay?.kind === "unavailable" ? facts.replay.reason : null,
+		"unsupported_materializer",
+	);
+	assert.equal(calls, 0);
+});
 
 for (const [member, text] of [
 	[

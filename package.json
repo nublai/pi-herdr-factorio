@@ -53,8 +53,7 @@
     "@earendil-works/pi-coding-agent": "1.4.0",
     "@oxlint/plugins": "1.90.0",
     "@types/node": "^26.6.6",
-    "oxlint": "1.90.0",
-    "typescript": "5.9.3"
+    "oxlint": "1.90.0"
   },
   "repository": {
     "type": "git",
@@ -66,6 +65,7 @@
   },
   "dependencies": {
     "marked": "^18.1.2",
+    "typescript": "5.9.3",
     "yaml": "^2.9.0"
   },
   "overrides": {
