@@ -11139,6 +11139,10 @@ describe("controller-run specify review", () => {
 			])
 				assert.ok(prompt.includes(pin), pin);
 			assert.match(prompt, /evidence.*exact test name.*sequence/);
+			assert.match(
+				prompt,
+				/List each such test only when the ticket must alter its expected sequence/,
+			);
 			assert.ok(prompt.includes(test.split("\n")[6] ?? "missing assertion"));
 			const critique = h.calls[1]?.prompt ?? "";
 			assert.ok(
@@ -11147,6 +11151,10 @@ describe("controller-run specify review", () => {
 				),
 			);
 			assert.match(critique, /missing.*replacesTests.*finding/);
+			assert.match(
+				critique,
+				/expected sequence\. Do not invent repository facts or test names\./,
+			);
 			assert.ok(critique.includes(JSON.stringify(draft)));
 			const revision = h.calls[2]?.prompt ?? "";
 			assert.ok(revision.includes(finding));
@@ -11156,6 +11164,367 @@ describe("controller-run specify review", () => {
 					.replacesTests,
 				[replacement],
 			);
+		} finally {
+			h.close();
+		}
+	});
+
+	for (const additive of [false, true])
+		it(`discovers a trusted sequence candidate through a helper for ${additive ? "an additive ticket without forcing replacement" : "critique and revision"}`, async () => {
+			const path = "test/src/announce.test.ts";
+			const title = 'pins the exact "start", then finish lines';
+			const sourcePath = "src/announce.ts";
+			const helper = "test/support/announce.ts";
+			const files = [sourcePath, helper, path];
+
+			const draft = JSON.stringify({
+				kind: "contract",
+				summary: "Announcement progress",
+				behavior: [
+					additive
+						? "Add a separate progress formatter"
+						: "Log progress during announcement",
+				],
+				acceptance: [{ kind: "new_behavior", text: "Progress is available" }],
+				exclusions: [],
+				compatibility: [],
+				limits: [],
+				files: [sourcePath],
+				evidence: [],
+			});
+
+			const replacement = {
+				path,
+				test: title,
+				reason: "Progress changes the ordered log array",
+			};
+
+			const h = setup(
+				additive
+					? [draft, CLEAN_REVIEW]
+					: [
+							draft,
+							JSON.stringify({
+								kind: "ambiguities",
+								ambiguities: [
+									"The ordered announcement test must change and is missing from replacesTests",
+								],
+							}),
+							JSON.stringify({
+								...JSON.parse(draft),
+								replacesTests: [replacement],
+							}),
+						],
+			);
+
+			const base = new Map([
+				[
+					sourcePath,
+					'export function announce(log) { log("start"); log("finish"); }',
+				],
+				[helper, 'export { announce } from "../../src/announce.ts";'],
+				[
+					path,
+					`import { announce } from "../support/announce.ts";
+import { it } from "node:test";
+it(${JSON.stringify(title)}, () => {
+  const lines = [];
+  announce(line => lines.push(line));
+  assert.deepEqual(lines, ["start", "finish"]);
+});`,
+				],
+			]);
+
+			const reads: string[] = [];
+
+			try {
+				mkdirSync(join(h.dir, "test/src"), { recursive: true });
+				writeFileSync(join(h.dir, path), 'it("workspace decoy", () => {});');
+
+				const result = await specifyModule.runSpecify(
+					{
+						...h.run,
+						specify: {
+							title: "Announcement progress",
+							body: additive
+								? "Add a progress formatter without changing existing logs."
+								: "Log progress between start and finish.",
+							answers: null,
+							files,
+						},
+						testFiles: [path],
+					},
+					h.dir,
+					h.create,
+					{
+						files,
+						async readBase(path) {
+							reads.push(path);
+
+							return base.get(path) ?? null;
+						},
+					},
+				);
+
+				assert.equal(result.kind, "passed");
+				assert.ok(reads.includes(helper));
+				const candidate = `${path} > ${JSON.stringify(title)}`;
+				assert.ok(!h.calls[0]?.prompt.includes(candidate));
+				const critique = h.calls[1]?.prompt ?? "";
+				assert.ok(critique.includes(candidate));
+				assert.ok(!critique.includes("workspace decoy"));
+				assert.match(critique, /Candidates, not required replacements/);
+				assert.match(
+					critique,
+					/only when the ticket must alter its expected sequence/,
+				);
+				assert.match(critique, /Do not invent repository facts or test names/);
+				assert.ok(
+					critique.startsWith(
+						"You review a draft contract for a software ticket. Flag only an ambiguity that would change an acceptance test: two readings of the ticket that need different tests, or a missing replacement for an existing test whose exact sequence the ticket must alter. Ignore style, wording, missing nice-to-haves and implementation choices. Do not reopen a decision the draft explicitly settles consistently with the ticket. No tools.",
+					),
+				);
+
+				const output = JSON.parse(
+					readFileSync(join(h.dir, "output.txt"), "utf8"),
+				);
+
+				if (additive) {
+					assert.equal(h.calls.length, 2);
+					assert.equal(output.replacesTests, undefined);
+					assert.equal(readFileSync(join(h.dir, "output.txt"), "utf8"), draft);
+				} else {
+					const revision = h.calls[2]?.prompt ?? "";
+					assert.ok(revision.includes(candidate));
+					assert.match(revision, /exact controller-provided title/);
+					assert.deepEqual(output.replacesTests, [replacement]);
+				}
+
+				assert.ok(h.calls.slice(1).every((call) => call.tools.length === 0));
+			} finally {
+				h.close();
+			}
+		});
+
+	it("selects only inventory tests with literal unique titles, import reach and sequence pins", async () => {
+		const target = "lib/worker.ts";
+
+		const fixtures = new Map([
+			[target, "export const work = () => {};"],
+			["support/one.ts", 'export { work } from "../lib/worker.js";'],
+			["support/two.ts", 'export { work } from "./one.ts";'],
+			[
+				"test/direct.ts",
+				`import { work } from "../lib/worker.ts";
+// it("comment decoy", () => assert.deepEqual(events, []));
+it("digest", () => assert.equal(hash(work()), "${"c".repeat(64)}"));
+it("snapshot", t => t.assert.snapshot(work()));
+it("golden", () => assert.equal(work(), goldenText));
+it("calls", () => assert.deepEqual(recorded.calls, []));
+it("requests", () => assert.deepStrictEqual(requests, []));
+it("events", () => assert.deepEqual(events, []));
+it("logs", () => assert.deepEqual(logs, []));
+it("lines", () => assert.deepEqual(lines, []));
+it("ordinary", () => assert.deepEqual(result, []));
+it("not a body pin", () => work(), "${"c".repeat(64)}");
+it("computed" + work(), () => assert.deepEqual(events, []));
+it("duplicate", () => assert.deepEqual(events, []));
+it("duplicate", () => assert.deepEqual(events, []));`,
+			],
+			[
+				"test/helper.ts",
+				'import { work } from "../support/one.ts"; test.skip(`helper title`, () => assert.deepEqual(events, []));',
+			],
+			[
+				"test/two.ts",
+				'import { work } from "../support/two.ts"; it("too distant", () => assert.deepEqual(events, []));',
+			],
+			[
+				"test/unrelated.ts",
+				'it("unrelated", () => assert.deepEqual(events, []));',
+			],
+			[
+				"test/types.ts",
+				'import type { Work } from "../lib/worker.ts"; it("type only", () => assert.deepEqual(events, []));',
+			],
+			[
+				"test/not-in-inventory.ts",
+				'import { work } from "../lib/worker.ts"; it("not inventoried", () => assert.deepEqual(events, []));',
+			],
+		]);
+
+		const testFiles = [
+			"test/direct.ts",
+			"test/helper.ts",
+			"test/two.ts",
+			"test/unrelated.ts",
+			"test/types.ts",
+		];
+
+		const base = {
+			files: [...fixtures.keys()],
+			readBase: async (path: string) => fixtures.get(path) ?? null,
+		};
+
+		const result = await specifyModule.sequenceCandidates(
+			base,
+			[target],
+			testFiles,
+		);
+
+		assert.equal(result.truncated, false);
+		assert.deepEqual(
+			result.tests.map((t) => t.test),
+			[
+				"digest",
+				"snapshot",
+				"golden",
+				"calls",
+				"requests",
+				"events",
+				"logs",
+				"lines",
+				"helper title",
+			],
+		);
+		assert.ok(result.tests.every((t) => testFiles.includes(t.path)));
+		assert.deepEqual(
+			await specifyModule.sequenceCandidates(
+				base,
+				["test/direct.ts"],
+				testFiles,
+			),
+			{ tests: [], truncated: false },
+		);
+	});
+
+	for (const long of [false, true])
+		it(`bounds sequence candidates by ${long ? "UTF-8 bytes" : "test count"} with a truncation signal`, async () => {
+			const path = "test/pins.ts";
+
+			const titles = Array.from(
+				{ length: 70 },
+				(_, n) => `${n} ${long ? "é".repeat(120) : "pin"}`,
+			);
+
+			const source =
+				'import { work } from "../lib/worker.ts";\n' +
+				titles
+					.map(
+						(title) =>
+							`it(${JSON.stringify(title)}, () => assert.deepEqual(events, []));`,
+					)
+					.join("\n");
+
+			const result = await specifyModule.sequenceCandidates(
+				{ files: [path, "lib/worker.ts"], readBase: async () => source },
+				["lib/worker.ts"],
+				[path],
+			);
+
+			const bytes = Buffer.byteLength(
+				result.tests
+					.map(({ path, test }) => `${path} > ${JSON.stringify(test)}\n`)
+					.join(""),
+			);
+
+			assert.equal(result.truncated, true);
+			assert.ok(bytes <= 8 * 1024);
+			assert.ok(result.tests.length > 0 && result.tests.length <= 64);
+			assert.equal(result.tests.length === 64, !long);
+			assert.ok(result.tests.every((test, n) => test.test === titles[n]));
+		});
+
+	it("threads trusted base candidates from executor checkout into the actual critique RPC", async () => {
+		const h = setup([DRAFT, CLEAN_REVIEW]);
+		const path = "test/src/traces.test.ts";
+		const title = "pins the command trace digest";
+		const repo = "owner/commands";
+		const sha = "b".repeat(40);
+
+		assert.ok(isRepoSlug(repo) && isGitSha(sha));
+
+		try {
+			const seed = join(h.dir, "seed");
+			const workspace = join(h.dir, "workspace");
+			const root = join(h.dir, "runtime");
+			const staging = join(root, "staging");
+
+			mkdirSync(join(seed, "server"), { recursive: true });
+			mkdirSync(join(seed, "test/src"), { recursive: true });
+			mkdirSync(workspace);
+			writeFileSync(join(seed, "server/cli.ts"), "export const version = 1;");
+			writeFileSync(
+				join(seed, path),
+				`import { version } from "../../server/cli.ts"; it(${JSON.stringify(title)}, () => assert.equal(hash(version), "${"a".repeat(64)}"));`,
+			);
+
+			const archive = execFileSync(
+				"tar",
+				["-czf", "-", "--transform=s,^,repo/,", "server", "test"],
+				{ cwd: seed },
+			);
+
+			mkdirSync(staging, { recursive: true });
+			writeFileSync(join(staging, "marker"), "bundle");
+			const hash = await manifestDigest(staging);
+			assert.ok(hash);
+			fs.renameSync(staging, join(root, `assets-${hash}`));
+			symlinkSync(`assets-${hash}`, join(root, "current"));
+
+			const executor = executorModule.sandboxExecutor({
+				platform: EXE_DEV_PLATFORM,
+				stateDir: h.dir,
+				root,
+				arch: "x64",
+				usernsLimit: async () => "15000",
+				xdgRuntimeDir: "/run/user/1000",
+				log: () => {},
+				fetchTarball: async () => archive,
+				exec: async (command) => ({
+					code: 0,
+					stdout: command === "bwrap" ? "bubblewrap 0.9.0\n" : "",
+					stderr: "",
+				}),
+				host: (config) => {
+					assert.ok(config.stageDir);
+
+					return h.create(config.stageDir, config.tools);
+				},
+			});
+
+			assert.equal(await executor.preflight(), true);
+
+			const checked = await executor.checkout({
+				runId: h.run.runId,
+				repo,
+				sha,
+				workspace,
+				build: false,
+			});
+
+			assert.equal(checked.kind, "ready");
+
+			if (checked.kind !== "ready") return;
+			writeFileSync(join(workspace, path), 'it("workspace decoy", () => {});');
+			const specify = h.run.specify;
+			assert.ok(specify);
+
+			const launched = await executor.launch({
+				...h.run,
+				workspace,
+				testFiles: [path],
+				specify: { ...specify, files: checked.checkout.files },
+			});
+
+			assert.equal(launched.kind, "started");
+
+			if (launched.kind !== "started") return;
+			assert.equal((await launched.done).kind, "passed");
+			assert.ok(
+				h.calls[1]?.prompt.includes(`${path} > ${JSON.stringify(title)}`),
+			);
+			assert.ok(!h.calls[1]?.prompt.includes("workspace decoy"));
 		} finally {
 			h.close();
 		}

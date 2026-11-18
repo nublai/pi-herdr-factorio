@@ -55,6 +55,7 @@ import { FAMILY_MISSING } from "../../src/core/models.ts";
 import { blocksReview, digestOf, type Digest } from "../../src/core/run.ts";
 import type { Exec } from "../../src/github/exec.ts";
 import type {
+	Checkout,
 	StageExecutor,
 	StageLaunch,
 	StageLaunchInput,
@@ -562,6 +563,7 @@ export function sandboxExecutor(config: SandboxExecutorConfig): StageExecutor {
 	};
 
 	const visibleJobs = new Map<string, VisibleJob>();
+	const specifyBases = new Map<string, Pick<Checkout, "files" | "readBase">>();
 
 	const testKept = async (
 		request: VisibleRequest,
@@ -1069,6 +1071,12 @@ export function sandboxExecutor(config: SandboxExecutorConfig): StageExecutor {
 				log: config.log,
 			});
 
+			if (!build && checked.kind === "ready")
+				specifyBases.set(runId, {
+					files: checked.checkout.files,
+					readBase: checked.checkout.readBase,
+				});
+
 			if (build && round > 0 && checked.kind === "ready") {
 				try {
 					const previous = readRunPatch(
@@ -1321,6 +1329,10 @@ export function sandboxExecutor(config: SandboxExecutorConfig): StageExecutor {
 				exec: config.exec,
 			};
 
+			const specifyBase = specifyBases.get(input.runId);
+
+			specifyBases.delete(input.runId);
+
 			if (input.stage === "specify" && input.specify !== undefined) {
 				const stages = join(config.stateDir, "stages", input.runId);
 				const base = `${input.stage}-${input.attempt}`;
@@ -1348,8 +1360,12 @@ export function sandboxExecutor(config: SandboxExecutorConfig): StageExecutor {
 
 				return {
 					kind: "started",
-					done: runSpecify({ ...input, prompt }, dir, (stageDir, tools) =>
-						sandboxHost({ ...hostConfig, stageDir, tools }),
+					done: runSpecify(
+						{ ...input, prompt },
+						dir,
+						(stageDir, tools) =>
+							(config.host ?? sandboxHost)({ ...hostConfig, stageDir, tools }),
+						specifyBase,
 					),
 				};
 			}
