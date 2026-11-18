@@ -75,6 +75,88 @@ Export `TARGET_COPY` before running the command. Each glob must match a file, an
 
 ## Validate held-out exclusions
 
+### Step 1: Check the target's own configs and tools
+
+Use an isolated checkout of the target's reviewed main, with its dependencies installed from its lockfile. For Agents, prepare it with a public clone:
+
+```bash
+TARGET_MAIN=$(mktemp -d "$HOME/.herdr/tmp/onboarding-main-XXXXXX")
+export TARGET_MAIN
+git clone --depth=1 --branch main https://github.com/giuseppecrj/pi-herdr-agents.git "$TARGET_MAIN"
+(cd "$TARGET_MAIN" && TMPDIR=$HOME/.herdr/tmp systemd-run --user --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- npm ci --ignore-scripts)
+git -C "$TARGET_MAIN" rev-parse HEAD
+```
+
+For another target, adapt the clone URL and dependency installation. Run the command below from the product checkout. It copies the target twice, without `.git` or `node_modules`, and shares only the installed target dependencies. The tooling copy stays unplanted, so the gate's `-c /g/tooling/...` config and plugins remain outside the checked tree. The policy comes from the target main copy, not this example or a candidate branch. It does not apply the exclusion patch for you.
+
+```bash
+TMPDIR=$HOME/.herdr/tmp systemd-run --user --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- \
+  node --experimental-strip-types --input-type=module <<'NODE'
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { cpSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, join, resolve } from 'node:path';
+import { gatePolicyOf } from './host/gates/manifest.ts';
+
+assert.ok(process.env.TARGET_MAIN, 'export TARGET_MAIN to an isolated target main checkout with installed dependencies');
+const source = resolve(process.env.TARGET_MAIN);
+const scratch = mkdtempSync(join(tmpdir(), 'onboarding-target-'));
+const tree = join(scratch, 'target');
+const tooling = join(scratch, 'tooling');
+try {
+	for (const copy of [tree, tooling]) {
+		cpSync(source, copy, {
+			recursive: true,
+			filter: path => !['.git', 'node_modules'].includes(basename(path)),
+		});
+		symlinkSync(join(source, 'node_modules'), join(copy, 'node_modules'), 'dir');
+	}
+	const ordinary = ['lint', 'format:check', 'typecheck'].map(name => ({
+		name: `ordinary ${name}`, argv: ['npm', 'run', name],
+	}));
+	const gates = gatePolicyOf(tooling).checks
+		.filter(check => ['lint', 'format', 'typecheck'].includes(check.name))
+		.map(check => ({
+			name: `gate ${check.name}`,
+			argv: check.argv.map(arg => arg
+				.replaceAll('/g/tooling/', `${tooling}/`)
+				.replaceAll('/w/', `${tree}/`)),
+		}));
+	assert.equal(gates.length, 3, 'target main must supply lint, format and typecheck gates');
+	const heldout = join(tree, 'test/acceptance/999999/checks');
+	mkdirSync(heldout, { recursive: true });
+	writeFileSync(join(heldout, 'dirty.mjs'), "export const dirty={value:typeof 1};debugger;\n");
+	writeFileSync(join(heldout, 'dirty.ts'), 'export const dirty: string=1;\n');
+	let failed = 0;
+	for (const check of [...ordinary, ...gates]) {
+		const result = spawnSync(check.argv[0], check.argv.slice(1), {
+			cwd: tree, env: process.env, encoding: 'utf8', timeout: 120_000,
+		});
+		assert.ifError(result.error);
+		assert.equal(result.signal, null, check.name);
+		console.log(`${check.name}: exit ${result.status}`);
+		if (result.status !== 0) {
+			failed++;
+			console.error(result.stdout.slice(-2000), result.stderr.slice(-2000));
+		}
+	}
+	assert.equal(failed, 0, `${failed} target static checks rejected the planted held-out files`);
+	console.log('PASS: target main ignores held-out files in all six static checks');
+} finally {
+	rmSync(scratch, { recursive: true, force: true });
+}
+NODE
+```
+
+Require all six commands to exit 0. Missing exclusions must fail this command. The `.mjs` file exercises Agents' real `typeof` lint rule and formatter; the `.ts` file exercises its typechecker. For other targets, adapt the lint violation and extensions to their enabled rules and inputs. Do not plant files in a live controller checkout. After validation, remove the isolated clone with `rm -rf -- "$TARGET_MAIN"` and `unset TARGET_MAIN`.
+
+This is target-tool host evidence, not pinned-image or live qualification. Run ordinary CI on the exact onboarding PR head too.
+
+### Step 2: Check the example's documented patch
+
+The onboarding test runs this second command hermetically. It validates the example patch, not a target's onboarding state.
+
 Run this from the product checkout with its installed dependencies. It uses only the example files, local static tools, and a synthetic target under `TMPDIR`. It never reads an Agents checkout, installs packages, or contacts a VM.
 
 The procedure applies the README's additive config patch to synthetic configs. It runs the example policy's three static checks with local paths substituted for `/g` and `/w`. It also runs the target-shaped ordinary npm scripts. The synthetic lint rule is built-in `no-debugger`, so this check needs no target plugins. Target CI must still verify the target's real rules and dependencies.
@@ -208,4 +290,4 @@ The final line must be:
 PASS: all four exclusions work and neighboring paths remain checked
 ```
 
-This is hermetic host-tool evidence, not pinned-image or live qualification. Before merging target onboarding, repeat the dirty-file check in an isolated target copy with its own configs and plugins, then run ordinary CI on the exact PR head. Do not plant files in a live controller checkout or count a gate run without a held-out suite as exclusion proof.
+This second step is hermetic example-patch evidence, not target-tool, pinned-image, or live qualification. Step 1 is required to detect missing exclusions in the target. A gate run without a held-out suite does not prove exclusions.

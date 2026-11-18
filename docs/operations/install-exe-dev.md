@@ -93,18 +93,18 @@ Use one controller per target repository on a separate VM. Keep `nubl-factory` h
 
 ### Prepare target static checks and tests
 
-Exclude exactly `test/acceptance/**` in all four places before onboarding a target:
+Exclude exactly `test/acceptance/**` in all four places before onboarding a target. Use the Agents configs and argv below as a model, adapted to each target's tools:
 
-1. The gate's oxlint argv, with `--ignore-pattern test/acceptance/**`. Its lint config lives outside the checked tree, so the target's config exclusion alone is insufficient.
-2. The target's root Biome config, with `!test/acceptance/**` in `files.includes`.
-3. The target's tsconfig, with `test/acceptance/**` in `exclude`.
-4. The target's own lint config, with `test/acceptance/**` in oxlint `ignorePatterns` or the equivalent for its linter. Ordinary PR-head CI sees the published held-out suite too.
+1. The gate's oxlint argv, with `--ignore-pattern test/acceptance/**`, or equivalent. Agents uses `-c /g/tooling/oxlint.config.ts` outside the checked tree, so the target's config exclusion alone is insufficient.
+2. The target's root Biome config, with `!test/acceptance/**` in `files.includes`, or equivalent.
+3. The target's tsconfig, with `test/acceptance/**` in `exclude`, or equivalent.
+4. The target's own lint config, with `test/acceptance/**` in oxlint `ignorePatterns`, or equivalent. Ordinary PR-head CI sees the published held-out suite too.
 
-Apply the [Agents config patch](examples/onboarding/pi-herdr-agents/README.md#exclude-published-held-out-checks) without replacing existing settings or plugins. Run the [hermetic dirty-file validation](examples/onboarding/pi-herdr-agents/validation.md#validate-held-out-exclusions), then the target's ordinary CI. Require unformatted, lint-dirty, and ill-typed files under `test/acceptance/<n>/checks/` to leave both the trusted static checks and ordinary lint, format, and typecheck green. Files under neighboring paths such as `test/acceptance-other.test.ts` must still fail. A parser pass or a gate run with no held-out suite does not prove this.
+Adapt the [Agents config patch](examples/onboarding/pi-herdr-agents/README.md#exclude-published-held-out-checks) without replacing existing settings or plugins. Run [Step 1 against the target's own configs and tools](examples/onboarding/pi-herdr-agents/validation.md#step-1-check-the-targets-own-configs-and-tools), then [Step 2 for the example patch](examples/onboarding/pi-herdr-agents/validation.md#step-2-check-the-examples-documented-patch) and the target's ordinary CI. Require unformatted, lint-dirty, and ill-typed files under `test/acceptance/<n>/checks/` to leave both the trusted static checks and ordinary lint, format, and typecheck green. Files under neighboring paths such as `test/acceptance-other.test.ts` must still fail. A parser pass or a gate run with no held-out suite does not prove this.
 
 Put the new-test location in builder-visible WORKFLOW guidance. New tests must go where the target's existing test command already looks. The factory restores main's package scripts, so adding a file to `package.json` cannot register it. For Agents, use `test/maestro/<name>.test.ts` and import `../clean-host-env.ts` first.
 
-Audit tests that register one test per discovered file. They break the exact per-file count rule when a candidate adds a file, even if every assertion passes. Use one aggregate test that retains every assertion and reports offending paths instead of varying the registered count.
+Keep per-file test generators count-stable. Under v1, an exact-count gate fails added files; under v2, increases pass only when every test passes. Use one aggregate test that retains every assertion and reports offending paths instead of varying the registered count.
 
 ### Repository selection and reruns
 

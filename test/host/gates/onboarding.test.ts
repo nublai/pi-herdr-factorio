@@ -149,6 +149,42 @@ it("accepts the Agents onboarding policy and expands all four inventory forms", 
 	}
 });
 
+it("validates the documented exclusion patch with hermetic example tools", () => {
+	const validation = readFileSync(join(example, "validation.md"), "utf8");
+
+	const step = validation.split(
+		"### Step 2: Check the example's documented patch",
+	)[1];
+
+	assert.ok(step);
+	const script = step.match(/<<'NODE'\n([\s\S]*?)\nNODE/);
+	assert.ok(script?.[1]);
+
+	const result = spawnSync(
+		process.execPath,
+		["--experimental-strip-types", "--input-type=module"],
+		{
+			cwd: root,
+			input: script[1],
+			encoding: "utf8",
+			timeout: 120_000,
+		},
+	);
+
+	assert.ifError(result.error);
+	assert.equal(result.signal, null);
+	assert.equal(
+		result.status,
+		0,
+		`${result.stdout.slice(-2000)}\n${result.stderr.slice(-2000)}`,
+	);
+	assert.ok(
+		result.stdout.includes(
+			"PASS: all four exclusions work and neighboring paths remain checked",
+		),
+	);
+});
+
 it("preserves Agents CI commands and bridges Checks to the factory check context", () => {
 	const workflow = parseDocument(
 		readFileSync(join(example, ".github/workflows/check.yml"), "utf8"),
@@ -230,6 +266,12 @@ it("parses the Agents workflow with explicit budgets and npm test", () => {
 	if (parsed.kind !== "valid") return;
 	assert.equal(parsed.config.usage.maxTokensPerRun, 800_000);
 	assert.equal(visibleTestCommand(parsed.guidance), "npm test");
+	assert.ok(
+		parsed.guidance.stages.build?.includes("test/maestro/<name>.test.ts"),
+	);
+	assert.ok(
+		parsed.guidance.stages.build?.includes('import "../clean-host-env.ts";'),
+	);
 	assert.equal(parsed.config.checkpoints.approveMerge.mode, "always");
 	assert.deepEqual(parsed.config.handoff?.reviewers, ["giuseppecrj"]);
 });
