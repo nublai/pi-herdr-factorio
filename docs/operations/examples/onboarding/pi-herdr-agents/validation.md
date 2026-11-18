@@ -72,3 +72,140 @@ NODE
 ```
 
 Export `TARGET_COPY` before running the command. Each glob must match a file, and duplicate matches refuse. This is parser and inventory evidence only. The zero tooling SHA is a placeholder, not an installed or executable product pin. No Agents tests, gate execution, VM, integration, or Actions dispatch ran in this probe. The [README qualification checklist](README.md#test-inventory-and-remaining-qualification) remains pending.
+
+## Validate held-out exclusions
+
+Run this from the product checkout with its installed dependencies. It uses only the example files, local static tools, and a synthetic target under `TMPDIR`. It never reads an Agents checkout, installs packages, or contacts a VM.
+
+The procedure applies the README's additive config patch to synthetic configs. It runs the example policy's three static checks with local paths substituted for `/g` and `/w`. It also runs the target-shaped ordinary npm scripts. The synthetic lint rule is built-in `no-debugger`, so this check needs no target plugins. Target CI must still verify the target's real rules and dependencies.
+
+```bash
+TMPDIR=$HOME/.herdr/tmp systemd-run --user --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- \
+  node --experimental-strip-types --input-type=module <<'NODE'
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { gatePolicyOf } from './host/gates/manifest.ts';
+
+const example = resolve('docs/operations/examples/onboarding/pi-herdr-agents');
+const scratch = mkdtempSync(join(tmpdir(), 'onboarding-static-'));
+const tree = join(scratch, 'target');
+const tooling = join(scratch, 'tooling');
+const modules = resolve('node_modules');
+const env = { ...process.env, PATH: `${modules}/.bin:${process.env.PATH}` };
+
+function put(path, text) {
+	mkdirSync(dirname(path), { recursive: true });
+	writeFileSync(path, text);
+}
+
+function run(name, argv, expected) {
+	const result = spawnSync(argv[0], argv.slice(1), {
+		cwd: tree, env, encoding: 'utf8', timeout: 30_000,
+	});
+	assert.ifError(result.error);
+	assert.equal(result.signal, null, name);
+	assert.equal(result.status === 0, expected === 0, `${name}\n${result.stdout.slice(-500)}\n${result.stderr.slice(-500)}`);
+	console.log(`${name}: exit ${result.status}`);
+}
+
+try {
+	cpSync(join(example, '.github'), join(tree, '.github'), { recursive: true });
+	for (const dir of ['pi-extension', 'maestro', 'plugins', 'scripts', 'skills', 'tools', '.pi/skills'])
+		mkdirSync(join(tree, dir), { recursive: true });
+	put(join(tree, 'package.json'), JSON.stringify({
+		type: 'module', scripts: {
+			lint: 'oxlint pi-extension test maestro plugins scripts',
+			'format:check': 'biome format pi-extension test maestro plugins scripts',
+			typecheck: 'tsc -p .',
+		},
+	}));
+	put(join(tree, 'biome.json'), `{
+  "files": {
+    "includes": [
+      "pi-extension/**",
+      "test/**",
+      "maestro/**",
+      "plugins/**",
+      "scripts/**",
+      "!**/*.md"
+    ]
+  },
+  "formatter": { "enabled": true },
+  "linter": { "enabled": false },
+  "assist": { "enabled": false }
+}
+`);
+	put(join(tree, 'tsconfig.json'), `{
+  "compilerOptions": { "strict": true, "noEmit": true, "types": [] },
+  "include": ["pi-extension/**/*.ts", "test/**/*.ts"],
+  "exclude": ["node_modules"]
+}
+`);
+	put(join(tree, 'oxlint.config.ts'), `export default {
+	ignorePatterns: [
+		"tools/oxlint/anti-slop/**",
+	],
+	rules: { "no-debugger": "error" },
+};
+`);
+	put(join(tree, 'test/test.ts'), 'export const clean = 1;\n');
+	put(join(tooling, 'oxlint.config.ts'), readFileSync(join(tree, 'oxlint.config.ts')));
+	const ordinary = ['lint', 'format:check', 'typecheck'].map(name => ({
+		name: `ordinary ${name}`, argv: ['npm', 'run', name],
+	}));
+	const gates = gatePolicyOf(tree).checks.map(check => ({
+		name: `gate ${check.name}`,
+		argv: check.argv.map(arg => arg
+			.replace('/g/tooling/node_modules', modules)
+			.replace('/g/tooling/', `${tooling}/`)
+			.replace('/w/', `${tree}/`)),
+	}));
+	const checks = [...ordinary, ...gates];
+	for (const check of checks) run(`clean ${check.name}`, check.argv, 0);
+
+	const dirty = 'export const dirty: string=1;debugger;\n';
+	const heldout = join(tree, 'test/acceptance/154/checks');
+	put(join(heldout, 'dirty.test.ts'), dirty);
+	put(join(heldout, 'dirty.test.mjs'), "export const dirty={value:'bad'};debugger;\n");
+	for (const check of checks)
+		run(`before ${check.name}`, check.argv, check.name === 'gate lint' ? 0 : 1);
+	const lint = gates.find(check => check.name === 'gate lint');
+	assert.ok(lint);
+	const withoutIgnore = lint.argv.slice();
+	const ignore = withoutIgnore.indexOf('--ignore-pattern');
+	assert.notEqual(ignore, -1);
+	withoutIgnore.splice(ignore, 2);
+	run('gate lint without argv exclusion', withoutIgnore, 1);
+
+	const patch = readFileSync(join(example, 'README.md'), 'utf8').match(/```diff\n([\s\S]*?)\n```/);
+	assert.ok(patch, 'README must include the static-check exclusion patch');
+	const applied = spawnSync('git', ['apply', '--unidiff-zero', '-'], {
+		cwd: tree, input: patch[1] + '\n', encoding: 'utf8',
+	});
+	assert.equal(applied.status, 0, applied.stderr);
+	put(join(tooling, 'oxlint.config.ts'), readFileSync(join(tree, 'oxlint.config.ts')));
+	for (const check of checks) run(`held-out ${check.name}`, check.argv, 0);
+	for (const neighbor of ['test/acceptance-other.test.ts', 'test/accept/dirty.test.ts']) {
+		put(join(tree, neighbor), dirty);
+		for (const check of checks) run(`${neighbor} ${check.name}`, check.argv, 1);
+		rmSync(join(tree, neighbor));
+	}
+	console.log('PASS: all four exclusions work and neighboring paths remain checked');
+} finally {
+	rmSync(scratch, { recursive: true, force: true });
+}
+NODE
+```
+
+Require all 31 command assertions to pass. Clean-tree checks must exit 0. Before the config patch, ordinary lint, format, and typecheck must reject the planted files, as must gate format and typecheck. The existing gate lint argv must ignore them, but removing its exclusion must fail. After the patch, all six static commands must exit 0 with the dirty held-out files still present. Each neighboring-path control must then fail all six commands. TypeScript reports these type errors with exit 2, while lint and format report exit 1.
+
+The final line must be:
+
+```text
+PASS: all four exclusions work and neighboring paths remain checked
+```
+
+This is hermetic host-tool evidence, not pinned-image or live qualification. Before merging target onboarding, repeat the dirty-file check in an isolated target copy with its own configs and plugins, then run ordinary CI on the exact PR head. Do not plant files in a live controller checkout or count a gate run without a held-out suite as exclusion proof.

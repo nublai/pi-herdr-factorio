@@ -11,8 +11,8 @@ Root applies this set to `giuseppecrj/pi-herdr-agents` under its target-onboardi
 | 1 | Giuseppe, then authorized agent | Authorize a new VM and held install. Prefer agent creation, which automatically gets `tester`, then tailnet setup through `exe-dev-test-vm`. If Giuseppe creates it, he must tag it `tester` himself. Follow [runbook step 1](../../../install-exe-dev.md#set-up-a-factory-for-another-repository-on-a-new-vm). | Fresh VM identity, tester tag and tailnet proof. No production copy. |
 | 2 | Giuseppe | Authorize and attach the target GitHub integration on his computer. Attach an existing correctly scoped integration rather than adding it again. Confirm `llm` through `auto:all`, without inference, as in runbook step 2. | Integration-list readback. The agent's key cannot attach integrations. |
 | 3 | Root and Giuseppe | Review current target main. This set was checked against Agents `181728b29f4f4af40d9a5ed3b945421255fa0bf6` and Factorio `ad6f07f99fa2bf7f6d365b564f55947bad364d06` (R1–R4). Reconcile later changes. Giuseppe approved the Anthropic second judge and its spend on 2026-11-17; the example WORKFLOW already sets it. Root selects the reviewed product SHA, replaces both placeholders in `gates.json` and `ci.yml`, and refreshes the three gate assets. | Recorded full SHAs, scripts and inventory, target-specific model/spend approval, pin equality and three byte comparisons. Product commit published in `nublai/pi-herdr-factorio`. |
-| 4 | Root | Copy this directory's `.github/` tree to Agents. Apply the [release-workflow test changes](release-workflow-test.md). Update the target README badge and `RELEASING.md` CI references as described below. | Target diff contains the seven onboarding files, the release-workflow test edit, and those two doc corrections only. No dependency, engine, or unrelated workflow changes. |
-| 5 | Root opens; Giuseppe merges | Run the real workflow and gate parsers, expand the four globs, and run ordinary CI. Root opens the onboarding PR under its grant. Giuseppe merges after exact-head `Checks` and `check` pass, or Root merges under Giuseppe's explicit grant. Keep ruleset 27348552 unchanged at this step. | Parser outputs, exact inventory, both green contexts, reviewed diff and main merge SHA. No admin bypass is needed for the context transition. |
+| 4 | Root | Copy this directory's `.github/` tree to Agents. Apply the [static-check exclusions](#exclude-published-held-out-checks) and [release-workflow test changes](release-workflow-test.md). Update the target README badge and `RELEASING.md` CI references as described below. | Target diff contains the seven onboarding files, three static-check config edits, the release-workflow test edit, and those two doc corrections only. No dependency, engine, or unrelated workflow changes. |
+| 5 | Root opens; Giuseppe merges | Run the real workflow and gate parsers, expand the four globs, and run the [held-out exclusion validation](validation.md#validate-held-out-exclusions). Then run ordinary CI. Root opens the onboarding PR under its grant. Giuseppe merges after exact-head `Checks` and `check` pass, or Root merges under Giuseppe's explicit grant. Keep ruleset 27348552 unchanged at this step. | Parser outputs, exact inventory, dirty-file controls, both green contexts, reviewed diff and main merge SHA. No admin bypass is needed for the context transition. |
 | 6 | Authorized installer operator | Run `--check`, install held at the same product SHA, and prove readiness through runbook steps 4–5. | Fresh current-invocation readiness, singleton target, product/receipt pin, target workflow, sandbox preflight, held status and OwnerFeed evidence. |
 | 7 | Root, under separate verification grants | After #837 closes and #842 is fixed, verify both fixes are pinned and require timed baseline evidence under 360 seconds in the pinned image without raising the limit. Then prove the main-backed trusted workflow/report protocol and pinned-image host/unit suite before enabling. | Baseline timing, exact target main, candidate, product, nonce, run and reporter-owned check ID, App 15368 and held-out bindings. No model calls for gate qualification. |
 | 8 | Giuseppe | After main-backed bootstrap checks exist, update ruleset 27348552 and apply the separate approval ruleset and Actions settings below. | Settings readback and actual required checks on a normal PR and a factory-shaped head. |
@@ -68,6 +68,46 @@ git diff --check
 
 Keep docs generation, package preview, and whitespace checks in ordinary `check`. The trusted policy runs typecheck, lint, format, install, baseline, main, candidate, and held-out tests. It omits Factorio-only layout and decisions checks rather than replacing them with no-ops. It does not claim main-owned parity for the three ordinary-only checks.
 
+## Exclude published held-out checks
+
+Every target must exclude exactly `test/acceptance/**` in four places:
+
+| Place | Exclusion |
+| --- | --- |
+| Gate oxlint argv in `.github/factory/gates/gates.json` | `--ignore-pattern test/acceptance/**`, already present in this example. The gate loads lint config outside the checked tree, so config alone is not enough. |
+| Root `biome.json` | `!test/acceptance/**` in `files.includes`. |
+| Root `tsconfig.json` | `test/acceptance/**` in `exclude`. |
+| Target's own `oxlint.config.ts` | `test/acceptance/**` in `ignorePatterns`, so ordinary PR-head CI ignores the published suite too. |
+
+Apply this additive patch to the existing root configs. It contains the exclusions from Agents [#157](https://github.com/giuseppecrj/pi-herdr-agents/pull/157) and [#159](https://github.com/giuseppecrj/pi-herdr-agents/pull/159). Preserve every other setting, lint rule, and plugin. Use `git apply --unidiff-zero <patch-file>` to apply the patch. If target main has changed, reconcile the patch rather than replace the configs.
+
+```diff
+diff --git a/biome.json b/biome.json
+--- a/biome.json
++++ b/biome.json
+@@ -8,4 +8,5 @@
+       "scripts/**",
+-      "!**/*.md"
++      "!**/*.md",
++      "!test/acceptance/**"
+     ]
+   },
+diff --git a/tsconfig.json b/tsconfig.json
+--- a/tsconfig.json
++++ b/tsconfig.json
+@@ -20,2 +20,2 @@
+-  "exclude": ["node_modules"]
++  "exclude": ["node_modules", "test/acceptance/**"]
+ }
+diff --git a/oxlint.config.ts b/oxlint.config.ts
+--- a/oxlint.config.ts
++++ b/oxlint.config.ts
+@@ -2,0 +3 @@
++		"test/acceptance/**",
+```
+
+Validate both the trusted static checks and the target's ordinary lint, format, and typecheck commands with dirty held-out files. A clean-tree parser pass cannot prove these exclusions. Do not exclude all of `test/**` or ask builders to format the private acceptance suite.
+
 ## Labels
 
 Root creates these labels and records their readback:
@@ -100,6 +140,10 @@ The dispatcher is `exe-dev-github-integration[bot]`; the reporter is GitHub Acti
 ## Test inventory and remaining qualification
 
 The four configured globs are `test/test.ts`, `test/*.test.ts`, `test/*.test.js`, and `test/maestro/*.test.ts`. The [local validation record](validation.md) lists the exact 34 files at Agents `181728b29f4f4af40d9a5ed3b945421255fa0bf6`. Re-expand after target changes.
+
+Put new tests where the target's existing test command already looks, not merely where `testGlobs` allows them. The factory restores main's package scripts, so a builder cannot register a new test by editing `package.json`. For Agents, use `test/maestro/<name>.test.ts` with `import "../clean-host-env.ts";` first. Keep this placement rule in the target's builder-visible WORKFLOW guidance.
+
+Tests that register one test per discovered file break the gate's exact per-file count rule when a candidate adds a file. Use one aggregate test that checks every discovered file and reports the offending paths. Agents #157 applied that change to its environment-scrub test without dropping the guard.
 
 Before enabling, Root must prove those host/unit tests under the pinned image, read-only tree, frozen reporter, concurrency 3, and 60-second per-file limit. The gate has no network, 4 GiB RAM, 512 PIDs, and 1 GiB tmpfs. Local parser and inventory checks do not prove this compatibility.
 
