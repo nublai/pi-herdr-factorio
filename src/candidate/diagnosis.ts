@@ -1304,7 +1304,8 @@ export type MissingEvidenceReason =
 	| "materialize_mismatch"
 	| "ci_replay_disagrees"
 	| "tree_replays_disagree"
-	| "visible_base_failed";
+	| "visible_base_failed"
+	| "unrepairable_check";
 
 export type InfrastructureReason =
 	| "runner_unavailable"
@@ -2261,6 +2262,7 @@ const MISSING_REASONS: readonly MissingEvidenceReason[] = [
 	"ci_replay_disagrees",
 	"tree_replays_disagree",
 	"visible_base_failed",
+	"unrepairable_check",
 ];
 
 const INFRASTRUCTURE_REASONS: readonly InfrastructureReason[] = [
@@ -2343,6 +2345,8 @@ export function diagnosisDetail(failure: FailureClass): string | null {
 	if (failure.kind !== "missing_evidence") return null;
 
 	switch (failure.reason) {
+		case "unrepairable_check":
+			return "No repairable feedback was produced by the failed checks.";
 		case "ci_replay_disagrees":
 			return "CI and the gate-tree replay disagree.";
 		case "tree_replays_disagree":

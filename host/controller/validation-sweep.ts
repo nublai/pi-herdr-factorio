@@ -359,6 +359,21 @@ function candidateValidator(
 				verdict,
 			});
 
+			const feedbackOf = (raw: ReturnType<typeof receiptOf>) => [
+				...repairFeedback(
+					suite.suite,
+					contract.contract,
+					textsOf(jsonField(raw, "heldoutFailures")) ?? [],
+					heldout.directory,
+				),
+				...((present(checksPath)
+					? parseCheckFeedback(parseJson(regularText(checksPath, 64 * 1024)), {
+							changedPaths: patch.receipt.changedPaths,
+							heldoutDir: heldout.directory,
+						})
+					: null) ?? []),
+			];
+
 			const classifyWith = (
 				raw: ReturnType<typeof receiptOf>,
 				facts: DiagnosisFacts | null,
@@ -372,7 +387,7 @@ function candidateValidator(
 					),
 				);
 
-				return classifyFailure({
+				const failure = classifyFailure({
 					receipt: raw ?? undefined,
 					identity: {
 						gateSha: state.baseSha,
@@ -403,6 +418,10 @@ function candidateValidator(
 					candidatePaths: patch.receipt.changedPaths,
 					baseRefusal: facts?.baseRefusal ?? null,
 				});
+
+				return failure.kind === "candidate" && feedbackOf(raw).length === 0
+					? { kind: "missing_evidence", reason: "unrepairable_check" }
+					: failure;
 			};
 
 			const diagnosed = async (verdict: Verdict): Promise<boolean> => {
@@ -508,23 +527,7 @@ function candidateValidator(
 				)
 					keepValidationFile(
 						join(dir, "feedback.json"),
-						feedbackBytes(read.ref, [
-							...repairFeedback(
-								suite.suite,
-								contract.contract,
-								textsOf(jsonField(raw, "heldoutFailures")) ?? [],
-								heldout.directory,
-							),
-							...((present(checksPath)
-								? parseCheckFeedback(
-										parseJson(regularText(checksPath, 64 * 1024)),
-										{
-											changedPaths: patch.receipt.changedPaths,
-											heldoutDir: heldout.directory,
-										},
-									)
-								: null) ?? []),
-						]),
+						feedbackBytes(read.ref, feedbackOf(raw)),
 					);
 
 				return read;

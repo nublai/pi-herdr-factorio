@@ -101,6 +101,10 @@ import {
 	storePatch,
 } from "../../../src/candidate/build.ts";
 import { generationIntent } from "../../../src/candidate/state.ts";
+import {
+	beginCandidate,
+	handoffCandidate,
+} from "../../../src/candidate/handoff.ts";
 import { candidateBranch } from "../../../src/github/publish.ts";
 import { CONTROLLER_LOGIN } from "../../../src/trust/markers.ts";
 import type { Exec } from "../../../src/github/exec.ts";
@@ -1897,6 +1901,7 @@ async function jobWorld(
 		slow?: boolean;
 		drift?: string | null;
 		differentGateMaterializer?: boolean;
+		ciFailure?: { check: string; log: string };
 	} = {},
 ) {
 	const raw = manifest.entries.find((e) => e.id === id);
@@ -2104,19 +2109,21 @@ async function jobWorld(
 	const patch = readPatch(state, patchBinding);
 	assert.ok(patch.kind === "found");
 
+	const pin = {
+		runId,
+		repo,
+		issue: entry.issue,
+		originalBase: gateSha,
+		workflowSha: gateSha,
+		workflowDigest: digestOf("workflow"),
+		contractDigest,
+		acceptanceDigest,
+		maxTokens: 500_000,
+		maxReviewAttempts: 3,
+	};
+
 	const generation = generationIntent({
-		pin: {
-			runId,
-			repo,
-			issue: entry.issue,
-			originalBase: gateSha,
-			workflowSha: gateSha,
-			workflowDigest: digestOf("workflow"),
-			contractDigest,
-			acceptanceDigest,
-			maxTokens: 500_000,
-			maxReviewAttempts: 3,
-		},
+		pin,
 		patch: patch.receipt,
 		round: 0,
 		generation: 0,
@@ -2184,6 +2191,18 @@ async function jobWorld(
 			ignoredChanges: [...(entry.ci.ignoredChanges ?? [])],
 		};
 	}
+
+	if (options.ciFailure !== undefined)
+		receipt = {
+			...receipt,
+			status: "failed",
+			reason: null,
+			checks: ci.checks.map((check) => ({
+				...check,
+				exitCode: check.name === options.ciFailure?.check ? 1 : 0,
+			})),
+			heldoutFailures: [],
+		};
 
 	assert.equal(receipt.status, "failed", JSON.stringify(receipt));
 
@@ -2296,7 +2315,12 @@ async function jobWorld(
 			stateDir: state,
 			exec,
 			fetch,
-			receipt: async () => `${JSON.stringify(receipt)}\n`,
+			receipt: async (_repo, _id, logs) => {
+				if (options.ciFailure !== undefined)
+					logs?.set(options.ciFailure.check, options.ciFailure.log);
+
+				return `${JSON.stringify(receipt)}\n`;
+			},
 			diagnosis,
 		})({
 			runId,
@@ -2331,6 +2355,8 @@ async function jobWorld(
 
 	return {
 		state,
+		pin,
+		patch: patch.receipt,
 		dir: validationDir(state, runId, 0, 0),
 		deadline: start + 1_200_000,
 		fetches,
@@ -2353,6 +2379,134 @@ function finishedAssessment(
 
 	return result.assessment;
 }
+
+for (const { check, log, repair } of [
+	{
+		check: "format",
+		log: "test/acceptance/999/checks/private.mjs format ━━━\nPRIVATE-HELDOUT-CONTENT",
+		repair: false,
+	},
+	{ check: "main_tests", log: '{"bad":false,"failures":[]}', repair: false },
+	{
+		check: "format",
+		log: "src/value.ts format ━━━\nPRIVATE-TOOL-OUTPUT",
+		repair: true,
+	},
+])
+	scoped(
+		`#856 ${check} with ${repair ? "repairable" : "empty"} feedback ${repair ? "starts" : "stops before"} repair through the validator and candidate policy`,
+		async (t) => {
+			const w = await jobWorld(t, "synthetic-wrong-value", {
+				ciFailure: { check, log },
+			});
+
+			const result = await w.step(w.owner());
+
+			assert.ok(result.kind === "finished");
+			assert.equal(result.verdict.pass, false);
+			assert.deepEqual(
+				JSON.parse(readFileSync(join(w.dir, "checks.json"), "utf8")),
+				repair ? [{ check: "format", file: "src/value.ts" }] : [],
+			);
+			assert.deepEqual(result.assessment.assessment, {
+				kind: "failed",
+				failure: repair
+					? { kind: "candidate", reason: "candidate_check", scenarios: [] }
+					: { kind: "missing_evidence", reason: "unrepairable_check" },
+			});
+
+			const observation = {
+				kind: "observed",
+				now: 100,
+				main: w.pin.originalBase,
+				pr: { kind: "none" },
+				executionAllowed: true,
+				capacityAvailable: true,
+				eligibility: "ready",
+				readiness: { kind: "unavailable" },
+			} as const;
+
+			const selected = handoffCandidate(
+				beginCandidate(w.pin, w.patch, 0),
+				observation,
+			).state;
+
+			assert.ok(
+				selected.kind === "selected" && selected.work.kind === "effect",
+			);
+			const request = selected.work.request;
+
+			assert.ok(request.kind === "validate");
+
+			const completed = handoffCandidate(selected, {
+				kind: "effect_completed",
+				now: 101,
+				completion: {
+					kind: "validate",
+					request,
+					result: {
+						kind: "finished",
+						validation: result.state,
+						verdict: result.verdict,
+						assessment: result.assessment,
+						report: null,
+						seats: [],
+					},
+				},
+			}).state;
+
+			assert.ok(completed.kind === "selected");
+
+			if (repair) {
+				assert.equal(completed.work.kind, "repair_due");
+				assert.equal(
+					handoffCandidate(completed, observation).effect?.kind,
+					"repair_build",
+				);
+
+				const feedback = readFeedbackBytes(
+					readFileSync(join(w.dir, "feedback.json"), "utf8"),
+					result.assessment.ref,
+				);
+
+				assert.deepEqual(feedback, [{ check: "format", file: "src/value.ts" }]);
+			} else {
+				assert.deepEqual(completed.work, {
+					kind: "effect",
+					request: {
+						kind: "finish_pr",
+						terminal: {
+							kind: "failed",
+							reason: "diagnosis_missing_evidence",
+						},
+					},
+				});
+				assert.equal(existsSync(join(w.dir, "feedback.json")), false);
+				assert.equal(result.assessment.assessment.kind, "failed");
+
+				if (result.assessment.assessment.kind !== "failed") return;
+
+				const notice = diagnosisNotice(
+					result.assessment.assessment.failure,
+					"key",
+					{
+						failedChecks: failedVisibleChecks(result.verdict.checks),
+						patchDigest: null,
+					},
+				).body;
+
+				assert.match(notice, /No repairable feedback/);
+				assert.ok(notice.includes(check));
+				assert.doesNotMatch(notice, /PRIVATE-|private\.mjs|checks\//);
+			}
+
+			assert.deepEqual(
+				finishedAssessment(await w.step(w.owner())),
+				result.assessment,
+			);
+			assert.equal(w.fetches.length, 0);
+		},
+	);
 
 function diagnosisFiles(dir: string): string[] {
 	const root = join(dir, "diagnosis");
