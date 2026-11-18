@@ -571,7 +571,8 @@ task bundles and a Git bundle of the desired committed factory checkout.
    cd "$HOME/factory-bench"
    umask 077
    mkdir -p "$HOME/bench"
-   sha=$(git rev-parse HEAD)
+   sha=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).base.sha)' "$HOME/bench/tasks/<task>/task.json")
+   git cat-file -e "$sha^{commit}"
    node host/cli/index.ts gates --repository "$PWD" \
      --target-repo nublai/pi-herdr-factorio \
      --gate-sha "$sha" --candidate-sha "$sha" \
@@ -583,6 +584,11 @@ task bundles and a Git bundle of the desired committed factory checkout.
    `--target-repo` names the trusted repository identity. The bench checkout is
    unpinned Factorio source, so without it the gate refuses as
    `unsupported_materializer` (#847).
+
+   Gate the task's frozen base, `task.json` `base.sha`, not the bench checkout's
+   HEAD. That base is the tree a trial's trusted gate runs, and the current
+   factory suite can be much heavier than it. Run the preflight once for each task
+   base in a trial series.
 
    Require exit 0 and `status: "passed"` in
    `$HOME/bench/gate-smoke/receipt.json`, including an `install` check with
@@ -596,8 +602,10 @@ task bundles and a Git bundle of the desired committed factory checkout.
 
    Size the host with that limit in mind. At `76826ef`, `baseline_tests` took
    about 177 seconds on 4 vCPU and about 312 seconds on 2 vCPU. That leaves a
-   thin margin at 2 vCPU, which is the bench's resting size. Each trial's
-   validation runs the same gate. If a growing suite pushes the baseline near
+   thin margin at 2 vCPU, which is the bench's resting size. Those figures gated
+   the factory checkout's own HEAD. At `5e4c778` that HEAD baseline exceeded
+   360 seconds on 2 vCPU, so preflight the task base instead. Each trial's
+   validation gates that base. If a growing suite pushes the baseline near
    360 seconds, ask the owner to resize the VM before a trial series. Never
    raise the limit.
 4. Set the private task and variant paths. Generate the baseline's pins from
