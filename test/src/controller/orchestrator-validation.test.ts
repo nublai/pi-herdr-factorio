@@ -5352,6 +5352,76 @@ describe("controller-only validate", () => {
 		}
 	});
 
+	for (const check of ["format", "main_tests"])
+		it(`#856 ${check} without repairable facts posts the stop and records the failed check with no repair`, async () => {
+			const dir = stateDir();
+			const outbox = fileLedgerOutbox(dir);
+
+			const f = await waitingRun((world) => {
+				const native = fileRunFiles(dir);
+				Object.assign(world.files, {
+					ledger: outbox,
+					accounting: native.accounting,
+				});
+			});
+
+			const validate = assessedValidator(
+				f,
+				{ kind: "candidate", reason: "candidate_check", scenarios: [] },
+				(digest) => {
+					const verdict = failingVerdict(digest);
+
+					return {
+						...verdict,
+						checks: verdict.checks.map((c) => ({
+							...c,
+							passed: c.name !== check,
+						})),
+					};
+				},
+			);
+
+			f.executor.validate = async (input) => {
+				const result = await validate(input);
+
+				return result.kind === "finished"
+					? { ...result, automaticRepair: "unrepairable_check" }
+					: result;
+			};
+
+			await drive(f.controller, f);
+			assert.equal(
+				f.executor.launches.filter(
+					(e) => e.stage === "build" && (e.round ?? 0) > 0,
+				).length,
+				0,
+			);
+			const notices = keyed(f.github, 14, "diagnosis");
+			assert.equal(notices.length, 1);
+			assert.match(
+				notices[0] ?? "",
+				/Stopped: unrepairable_check\. No repairable feedback/,
+			);
+			assert.ok(notices[0]?.includes(`Other failed checks: ${check}.`));
+			const row = (await outbox.scan())?.[0]?.row?.row;
+			assert.ok(row?.v === 6);
+			assert.deepEqual(row.failure, {
+				kind: "known",
+				value: {
+					stage: "validate",
+					class: "handoff",
+					reason: "unrepairable_check",
+					failedVisibleChecks: [check],
+					retainedPatch: digestOf("patch"),
+				},
+			});
+			const status = await readRunCharges(dir, runOf(14), 0);
+			assert.deepEqual(status.terminal, {
+				outcome: row.outcome,
+				failure: row.failure,
+			});
+		});
+
 	it("repairs a candidate load error after a qualified base exactly once, bound to its assessment", async () => {
 		const f = await waitingRun();
 		const failure = classifiedCase("candidate_load_error");

@@ -171,6 +171,7 @@ export type ValidationResult =
 			readonly verdict: Verdict;
 			readonly report?: TrustedReport;
 			readonly assessment: ReadAssessment;
+			readonly automaticRepair?: "unrepairable_check";
 	  }
 	| {
 			readonly kind: "failed";
@@ -613,6 +614,29 @@ const FACT_READERS: Readonly<
 	decisions: repositoryGuardFacts,
 	candidate_tests: testFacts,
 };
+
+export function checkRepairability(input: {
+	readonly logs: ReadonlyMap<string, string>;
+	readonly failed: readonly string[];
+	readonly heldoutDir: string;
+}) {
+	return FEEDBACK_CHECKS.flatMap((check) => {
+		if (!input.failed.includes(check)) return [];
+		const log = input.logs.get(check);
+
+		return [
+			{
+				check,
+				logRead: log !== undefined,
+				visibleFinding:
+					log !== undefined &&
+					FACT_READERS[check](log).some(
+						([file]) => !hiddenPath(file, input.heldoutDir),
+					),
+			},
+		];
+	});
+}
 
 /**
  * Fixed-form facts about the failed visible gate checks, for repair: at most

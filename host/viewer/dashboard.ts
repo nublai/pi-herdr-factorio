@@ -33,6 +33,7 @@ const HOLD_WORDS: Record<HandoffReason, string> = {
 	pr_ambiguous: "more than one PR matches",
 	workflow_unavailable: "the run's workflow file cannot be read",
 	validation_failed: "checks could not finish",
+	unrepairable_check: "the failed checks gave no repair feedback",
 	evidence_unavailable: "saved checks or review cannot be read",
 	repair_limit: "the repair limit was reached",
 	diagnosis_oracle: "a hidden test can never pass",

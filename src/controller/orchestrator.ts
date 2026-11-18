@@ -4253,13 +4253,19 @@ export class Orchestrator {
 			) {
 				const read = result.assessment;
 
+				const unrepairable =
+					state.published === null &&
+					result.automaticRepair === "unrepairable_check";
+
 				if (
 					read.assessment.kind === "failed" &&
-					read.assessment.failure.kind !== "candidate"
+					(read.assessment.failure.kind !== "candidate" || unrepairable)
 				) {
 					// A dead end spends no repair, so the owner sees what else failed.
 					const notice = diagnosisNotice(
-						read.assessment.failure,
+						read.assessment.failure.kind === "candidate" && unrepairable
+							? { kind: "unrepairable_check" }
+							: read.assessment.failure,
 						`<!-- factory-diagnosis run=${run.runId} g=${read.binding.round}.${read.binding.generation} a=${read.ref.recordDigest} -->`,
 						{
 							failedChecks: failedVisibleChecks(result.verdict.checks),
@@ -4297,6 +4303,7 @@ export class Orchestrator {
 							result.verdict.unjudged,
 						),
 						assessment: result.assessment,
+						automaticRepair: result.automaticRepair,
 					},
 				};
 			} else if (result.kind === "failed")
