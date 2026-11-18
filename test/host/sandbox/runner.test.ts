@@ -24,7 +24,10 @@ import {
 } from "../gateway/http-fixtures.ts";
 import { runHeldoutBase } from "../../../host/gates/base.ts";
 import { MATERIALIZER_FILES } from "../../../host/gates/materialize.ts";
-import { assessBase } from "../../../src/candidate/diagnosis.ts";
+import {
+	assessBase,
+	assessVisibleChecks,
+} from "../../../src/candidate/diagnosis.ts";
 import {
 	createReadTool,
 	createGrepTool,
@@ -2410,6 +2413,7 @@ describe("private build executor", () => {
 		"revised",
 		"still-unrun",
 		"new-and-unrun",
+		"v2",
 		"replaced",
 		"near-token-cap",
 		"near-wall-cap",
@@ -2446,6 +2450,28 @@ describe("private build executor", () => {
 					'{"scripts":{"test":"node --test"}}',
 				);
 			}
+
+			if (scenario === "v2")
+				for (const root of [base, workspace]) {
+					mkdirSync(join(root, ".github/factory/gates"), { recursive: true });
+					mkdirSync(join(root, "test/maestro"));
+					writeFileSync(join(root, "test/maestro/existing.test.ts"), "base");
+					writeFileSync(
+						join(root, "package.json"),
+						JSON.stringify({
+							scripts: {
+								test: "node --test test/old.test.ts test/maestro/*.test.ts",
+							},
+						}),
+					);
+					writeFileSync(
+						join(root, ".github/factory/gates/gates.json"),
+						JSON.stringify({
+							version: 2,
+							testGlobs: ["test/*.test.ts", "test/maestro/*.test.ts"],
+						}),
+					);
+				}
 
 			if (scenario === "repair-acceptance") {
 				mkdirSync(join(base, "test/acceptance"));
@@ -2754,6 +2780,17 @@ describe("private build executor", () => {
 				assert.match(String(revisions[0]!.message), /test\/old\.test\.ts/);
 				assert.match(String(revisions[0]!.message), /base bytes/);
 				assert.match(String(revisions[0]!.message), /new test file/);
+
+				if (scenario === "v2") {
+					assert.match(
+						String(revisions[0]!.message),
+						/test\/maestro\/\*\.test\.ts/,
+					);
+					assert.doesNotMatch(
+						String(revisions[0]!.message),
+						/"test\/\*\.test\.ts"/,
+					);
+				}
 			}
 
 			assert.equal(h.pis.length, 1);
@@ -4904,6 +4941,120 @@ describe("controller-run visible tests", () => {
 						false,
 					);
 				}));
+
+	for (const version of [1, 2])
+		for (const fails of [false, true])
+			it(`visible tests run candidate-added Agents files from v${version} base inventory: failing=${fails}`, async (t) => {
+				const root = mkdtempSync(join(tmpdir(), "factory-visible-added-"));
+				t.after(() => rmSync(root, { recursive: true, force: true }));
+				const base = join(root, "base");
+				const workspace = join(root, "candidate");
+
+				for (const dir of [base, workspace]) {
+					mkdirSync(join(dir, ".github/factory/gates"), { recursive: true });
+					mkdirSync(join(dir, "test/maestro"), { recursive: true });
+					writeFileSync(
+						join(dir, "package.json"),
+						JSON.stringify({ scripts: { test: "node --test test/test.ts" } }),
+					);
+					writeFileSync(
+						join(dir, "test/test.ts"),
+						'import { test } from "node:test"; test("BASE-RAN", () => {});',
+					);
+					writeFileSync(
+						join(dir, ".github/factory/gates/gates.json"),
+						JSON.stringify({
+							version,
+							testGlobs: ["test/test.ts", "test/maestro/*.test.ts"],
+						}),
+					);
+				}
+
+				writeFileSync(
+					join(workspace, "test/maestro/x.test.ts"),
+					`import { test } from "node:test"; test("ADDED-RAN", () => { ${fails ? 'throw new Error("ADDED-FAILED")' : ""} });`,
+				);
+				const patch = await collectPatch({ base, workspace });
+				assert.equal(patch.kind, "collected");
+
+				if (patch.kind !== "collected") return;
+
+				const run = (patch: string | Uint8Array) =>
+					runVisibleTests(
+						{
+							platform: EXE_DEV_PLATFORM,
+							stateDir: root,
+							bundleDir: "unused",
+							workspace: "",
+							runId: digest(RUN),
+							stage: "build",
+							attempt: 1,
+							tools: [],
+							arch: "x86_64",
+							xdgRuntimeDir: "/run/user/1000",
+							assetsDigest: "e".repeat(64),
+							versions: {
+								pi: "1.4.0",
+								piHerdrAgents: "3.3.1",
+								piHerdrPstack: "0.5.0",
+							},
+							exec: async () => ({ code: 0, stdout: "", stderr: "" }),
+							launch: (config) => {
+								mkdirSync(config.agentDir);
+
+								return {
+									unit: "fixture.scope",
+									child: spawn(
+										config.command[0] ?? "",
+										config.command
+											.slice(1)
+											.map((arg) =>
+												arg.replaceAll("/run/pi-agent", config.agentDir),
+											),
+										{
+											cwd: config.workspace,
+											env: {
+												PATH: process.env.PATH ?? "/usr/bin:/bin",
+												HOME: root,
+											},
+										},
+									),
+								};
+							},
+						},
+						base,
+						patch,
+						"npm test",
+					);
+
+				const result = await run(patch.patch);
+				const control = await run("");
+
+				const assessment = assessVisibleChecks({
+					runId: digest(RUN),
+					baseSha: "a".repeat(40),
+					patchDigest: patch.patchDigest,
+					visibleTests: { ...result, base: control },
+				});
+
+				assert.equal(
+					assessment.kind,
+					version === 2 && fails ? "candidate_failure" : "passed",
+				);
+				assert.equal(
+					assessment.binding.plan.includes("test/maestro/x.test.ts"),
+					version === 2,
+				);
+				assert.equal(result.command, control.command);
+				assert.equal(result.exitCode, version === 2 && fails ? 1 : 0);
+				assert.match(result.tail, /BASE-RAN/);
+
+				if (version === 2) assert.match(result.tail, /ADDED-RAN/);
+				else {
+					assert.doesNotMatch(result.tail, /ADDED-RAN/);
+					assert.equal(result.command, "node --test test/test.ts");
+				}
+			});
 
 	it("does not let candidate scripts or deleted base tests manufacture a pass", async (t) => {
 		const root = mkdtempSync(join(tmpdir(), "factory-visible-trusted-"));

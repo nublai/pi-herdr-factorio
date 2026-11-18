@@ -23,12 +23,11 @@ import {
 	readRepairBuildResult,
 	roundKey,
 	storePatch,
-	workspaceTestEdits,
+	workspaceTestFeedback,
 	type PatchRead,
 	type VisibleTests,
 } from "../../src/candidate/build.ts";
 import { parseReviewReceipt } from "../../src/candidate/codec.ts";
-import { unrunTestFeedback } from "../../src/candidate/diagnosis.ts";
 import {
 	builderDispositions,
 	builderFindingDispositions,
@@ -1471,13 +1470,11 @@ export function sandboxExecutor(config: SandboxExecutorConfig): StageExecutor {
 								)
 									return null;
 
-								return unrunTestFeedback(
-									workspaceTestEdits(
-										join(config.stateDir, "pristine", input.runId),
-										input.workspace,
-										contract.contract.replacesTests ?? [],
-										(input.round ?? 0) > 0,
-									).unrunTestEdits,
+								return workspaceTestFeedback(
+									join(config.stateDir, "pristine", input.runId),
+									input.workspace,
+									contract.contract.replacesTests ?? [],
+									(input.round ?? 0) > 0,
 								);
 							}
 						: undefined;
