@@ -1091,13 +1091,19 @@ export type UnrunTestFeedback = Readonly<{
 
 export function unrunTestFeedback(
 	files: readonly string[],
+	newTestLocations?: readonly string[],
 ): UnrunTestFeedback | null {
+	const placement =
+		newTestLocations === undefined
+			? "Put new or changed tests in a new test file, including new helpers and fixtures."
+			: `Put new tests in a new test file at a location the base test command already covers.${newTestLocations.length === 0 ? " Follow the target's WORKFLOW build guidance for the location." : ` Use these trusted inventory globs from that command: ${JSON.stringify(newTestLocations)}.`} Keep new helpers and fixtures in new files. Base package.json scripts are restored, so adding a file to a candidate script cannot register it. Follow the target's WORKFLOW build guidance for required imports.`;
+
 	return files.length === 0
 		? null
 		: {
 				verdict: "unrun_test_edits",
 				files,
-				message: `Existing test files not named in the contract's replacesTests run from their base bytes, so edits to them are not run. Put new or changed tests in a new test file, including new helpers and fixtures. Do not change, skip or delete existing tests the contract does not name. Revise the patch in this workspace, then settle again. Unrun test edits: ${JSON.stringify(files)}.`,
+				message: `Existing test files not named in the contract's replacesTests run from their base bytes, so edits to them are not run. ${placement} Do not change, skip or delete existing tests the contract does not name. Revise the patch in this workspace, then settle again. Unrun test edits: ${JSON.stringify(files)}.`,
 			};
 }
 
@@ -1451,7 +1457,10 @@ export function assessVisibleChecks(
 	const bindingOf = (result: VisibleTests | null): CheckBinding => ({
 		baseSha: receipt.baseSha,
 		candidate: { kind: "patch", digest: receipt.patchDigest },
-		plan: result?.command ?? "",
+		plan:
+			result?.additionalCommand === undefined
+				? (result?.command ?? "")
+				: `(${result.command}\n) && ${result.additionalCommand}`,
 		dependencies:
 			result?.environment === undefined
 				? { kind: "unknown" }

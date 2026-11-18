@@ -63,6 +63,7 @@ export async function runVisibleTests(
 	let unit: string | null = null;
 	let tail = Buffer.alloc(0);
 	let environment: VisibleTests["environment"];
+	let additionalCommand: string | undefined;
 	const { signal } = options;
 	const stop = new AbortController();
 	let timedOut = false;
@@ -92,12 +93,16 @@ export async function runVisibleTests(
 		live();
 		await patchedTree(base, workspace, patch);
 		live();
-		command = trustedVisiblePlan(
-			base,
-			workspace,
-			command,
-			replacesTests,
-		).command;
+		const plan = trustedVisiblePlan(base, workspace, command, replacesTests);
+		command = plan.command;
+		additionalCommand =
+			"additionalCommand" in plan ? plan.additionalCommand : undefined;
+
+		const executionCommand =
+			additionalCommand === undefined
+				? command
+				: `(${command}\n) && ${additionalCommand}`;
+
 		environment = visibleEnvironment(
 			workspace,
 			digestOf(
@@ -149,7 +154,7 @@ export async function runVisibleTests(
 			command: [
 				"/bin/bash",
 				"-c",
-				`set -o pipefail; export PATH="/workspace/node_modules/.bin:$PATH"; export npm_config_ignore_scripts=true; if [ -f package-lock.json ]; then npm ci --ignore-scripts --no-audit --no-fund || exit 125; fi; /bin/bash -o pipefail -c '${command.replaceAll("'", "'\\''")}'; code=$?; printf '%s\\n' "$code" > /run/pi-agent/visible-exit; exit "$code"`,
+				`set -o pipefail; export PATH="/workspace/node_modules/.bin:$PATH"; export npm_config_ignore_scripts=true; if [ -f package-lock.json ]; then npm ci --ignore-scripts --no-audit --no-fund || exit 125; fi; /bin/bash -o pipefail -c '${executionCommand.replaceAll("'", "'\\''")}'; code=$?; printf '%s\\n' "$code" > /run/pi-agent/visible-exit; exit "$code"`,
 			],
 		});
 
@@ -196,13 +201,19 @@ export async function runVisibleTests(
 		if (checkBuildDisk([workspace, join(execution, "agent")]) !== null)
 			throw new Error("build_disk_limit");
 
-		return visibleBudget({
+		const result = {
 			command,
 			environment,
 			exitCode,
 			tail: tail.toString(),
 			wallMs: Date.now() - start,
-		});
+		};
+
+		return visibleBudget(
+			additionalCommand === undefined
+				? result
+				: { ...result, additionalCommand },
+		);
 	} catch (error) {
 		const detail =
 			error instanceof Error &&

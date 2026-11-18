@@ -33,9 +33,8 @@ import {
 	collectPatch,
 	prepareRepairTree,
 	visibleTestCommand,
-	workspaceTestEdits,
+	workspaceTestFeedback,
 } from "../../src/candidate/build.ts";
-import { unrunTestFeedback } from "../../src/candidate/diagnosis.ts";
 import {
 	candidateReviewPrompt,
 	parseSeat,
@@ -599,13 +598,11 @@ export async function runBench(
 				variant.change.value === "off"
 			)
 				? async () =>
-						unrunTestFeedback(
-							workspaceTestEdits(
-								base,
-								workspace,
-								contract.replacesTests ?? [],
-								true,
-							).unrunTestEdits,
+						workspaceTestFeedback(
+							base,
+							workspace,
+							contract.replacesTests ?? [],
+							true,
 						)
 				: undefined;
 

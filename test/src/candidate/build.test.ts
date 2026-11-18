@@ -708,6 +708,133 @@ test("refuses a symlink replacing the top-level test directory", async (t) => {
 	});
 });
 
+test("v2 repair feedback names new-test globs covered by the base command", async (t) => {
+	const f = fixture(t);
+
+	for (const root of [f.base, f.workspace]) {
+		mkdirSync(join(root, ".github/factory/gates"), { recursive: true });
+		mkdirSync(join(root, "test/maestro"), { recursive: true });
+		writeFileSync(join(root, "test/test.ts"), "base");
+		writeFileSync(join(root, "test/maestro/existing.test.ts"), "base");
+		writeFileSync(
+			join(root, "package.json"),
+			JSON.stringify({
+				scripts: { test: "node --test test/test.ts test/maestro/*.test.ts" },
+			}),
+		);
+		writeFileSync(
+			join(root, ".github/factory/gates/gates.json"),
+			JSON.stringify({
+				version: 2,
+				testGlobs: ["test/test.ts", "test/*.test.ts", "test/maestro/*.test.ts"],
+			}),
+		);
+	}
+
+	writeFileSync(join(f.workspace, "test/test.ts"), "changed");
+	const patch = await collectPatch(f);
+	assert.equal(patch.kind, "collected");
+
+	if (patch.kind !== "collected") return;
+	const dest = join(f.root, "repair");
+	await prepareRepairTree(f.base, dest, patch.patch, patch.changedPaths, "{}");
+
+	const feedback = JSON.parse(
+		readFileSync(join(dest, ".factory-feedback.json"), "utf8"),
+	);
+
+	const message = feedback.controller[0].message;
+	assert.match(message, /test\/maestro\/\*\.test\.ts/);
+	assert.doesNotMatch(message, /"test\/\*\.test\.ts"/);
+	assert.match(message, /base test command/);
+});
+
+test("v2 visible selection uses only base inventory and excludes preserved tests, fixtures and acceptance", (t) => {
+	const f = fixture(t);
+
+	for (const root of [f.base, f.workspace]) {
+		mkdirSync(join(root, ".github/factory/gates"), { recursive: true });
+		mkdirSync(join(root, "test/maestro"), { recursive: true });
+		writeFileSync(join(root, "test/maestro/old.test.ts"), "base");
+		writeFileSync(
+			join(root, "package.json"),
+			JSON.stringify({ scripts: { test: "true" } }),
+		);
+	}
+
+	writeFileSync(
+		join(f.base, ".github/factory/gates/gates.json"),
+		JSON.stringify({
+			version: 2,
+			testGlobs: [
+				"test/**/*.test.ts",
+				"test/maestro/*.test.ts",
+				"test/maestro/helper.ts",
+			],
+		}),
+	);
+	writeFileSync(
+		join(f.workspace, ".github/factory/gates/gates.json"),
+		JSON.stringify({
+			version: 2,
+			testGlobs: ["test/other/*.test.ts"],
+		}),
+	);
+
+	for (const path of [
+		"test/maestro/added.test.ts",
+		"test/maestro/helper.ts",
+		"test/acceptance/1/private.test.ts",
+		"test/fixtures/data.test.ts",
+		"test/other/unmatched.ts",
+	]) {
+		mkdirSync(join(f.workspace, path, ".."), { recursive: true });
+		writeFileSync(join(f.workspace, path), "new");
+	}
+
+	writeFileSync(join(f.workspace, "test/maestro/old.test.ts"), "edited");
+	const plan = trustedVisiblePlan(f.base, f.workspace, "npm test");
+	assert.equal(plan.command, "true");
+	assert.ok("additionalCommand" in plan);
+	assert.equal(
+		plan.additionalCommand,
+		"node --experimental-strip-types --test 'test/maestro/added.test.ts' 'test/maestro/helper.ts'",
+	);
+	assert.equal(
+		readFileSync(join(f.workspace, "test/maestro/old.test.ts"), "utf8"),
+		"base",
+	);
+});
+
+test("v2 visible tests cannot pass after a failing base command", (t) => {
+	const f = fixture(t);
+	mkdirSync(join(f.base, ".github/factory/gates"), { recursive: true });
+	writeFileSync(
+		join(f.base, ".github/factory/gates/gates.json"),
+		JSON.stringify({ version: 2, testGlobs: ["test/*.test.ts"] }),
+	);
+	writeFileSync(
+		join(f.base, "package.json"),
+		JSON.stringify({ scripts: { test: "exit 7" } }),
+	);
+	mkdirSync(join(f.workspace, "test"));
+	writeFileSync(
+		join(f.workspace, "test/added.test.ts"),
+		'throw new Error("must not run");',
+	);
+	const plan = trustedVisiblePlan(f.base, f.workspace, "npm test");
+	assert.ok("additionalCommand" in plan);
+	assert.throws(
+		() =>
+			execFileSync(
+				"/bin/bash",
+				["-c", `(${plan.command}\n) && ${plan.additionalCommand}`],
+				{ cwd: f.workspace },
+			),
+		{ status: 7 },
+	);
+});
+
 test("base scripts and base test inputs defeat candidate script rewrites and deletions", async (t) => {
 	const f = fixture(t);
 	writeFileSync(

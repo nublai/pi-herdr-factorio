@@ -13,7 +13,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, matchesGlob } from "node:path";
 import type { Guidance } from "../config/schema.ts";
 import {
 	checkPrivateDir,
@@ -45,6 +45,7 @@ import {
 	type BuilderDisposition,
 	type BuilderFindingDisposition,
 } from "./feedback.ts";
+import { trustedTestGlobsOf } from "./review.ts";
 
 export const BUILD_TOOLS = [
 	"read",
@@ -70,6 +71,7 @@ export type CommandReceipt = {
 export type VisibleTestResult = {
 	readonly environment?: CheckEnvironment;
 	readonly command: string;
+	readonly additionalCommand?: string;
 	readonly exitCode: number | null;
 	readonly tail: string;
 	readonly wallMs: number;
@@ -603,6 +605,44 @@ export function workspaceTestEdits(
 	return testInputEdits(entries, tree(workspace), replacesTests);
 }
 
+function visibleTestGlobs(entries: ReadonlyMap<string, Entry>) {
+	const policy = objectOf(
+		parseJson(
+			entries.get(".github/factory/gates/gates.json")?.data.toString() ?? "",
+		),
+	);
+
+	if (fieldOf(policy, "version") !== 2) return null;
+	const globs = trustedTestGlobsOf(fieldOf(policy, "testGlobs"));
+
+	if (globs === null) throw new Error("malformed_patch");
+
+	return globs;
+}
+
+export function workspaceTestFeedback(
+	base: string,
+	workspace: string,
+	replacesTests: readonly { readonly path: string }[],
+	repairTree = false,
+) {
+	const { unrunTestEdits } = workspaceTestEdits(
+		base,
+		workspace,
+		replacesTests,
+		repairTree,
+	);
+
+	const entries = tree(base);
+	const globs = visibleTestGlobs(entries);
+	const command = textOf(fieldOf(scriptsOf(entries), "test")) ?? "";
+
+	return unrunTestFeedback(
+		unrunTestEdits,
+		globs?.filter((glob) => glob.includes("*") && command.includes(glob)),
+	);
+}
+
 function scriptsOf(entries: ReadonlyMap<string, Entry>) {
 	return objectOf(
 		fieldOf(
@@ -671,13 +711,39 @@ export function trustedVisiblePlan(
 		materialize(workspace, new Map([[path, entry]]));
 	}
 
-	return {
-		command: baseTestCommand(base, requested),
+	const globs = visibleTestGlobs(entries);
+
+	const newTests =
+		globs === null
+			? []
+			: [...candidate.keys()]
+					.filter(
+						(path) =>
+							path.startsWith("test/") &&
+							!entries.has(path) &&
+							!path.startsWith("test/acceptance/") &&
+							!path.startsWith("test/fixtures/") &&
+							!replacesTests.some((test) => test.path === path) &&
+							globs.some((glob) => matchesGlob(path, glob)),
+					)
+					.sort();
+
+	const command = baseTestCommand(base, requested);
+
+	const plan = {
+		command,
 		scriptsChanged:
 			JSON.stringify(scriptsOf(entries)) !==
 			JSON.stringify(scriptsOf(candidate)),
 		testInputsChanged: unrunTestEdits.length > 0 || addsTestFile,
 	};
+
+	return newTests.length === 0
+		? plan
+		: {
+				...plan,
+				additionalCommand: `node --experimental-strip-types --test ${newTests.map((path) => `'${path}'`).join(" ")}`,
+			};
 }
 
 /** Identity of the dependency inputs actually supplied to npm ci, not builder caches. */
@@ -1061,9 +1127,7 @@ export async function prepareRepairTree(
 		}
 	}
 
-	const controller = unrunTestFeedback(
-		workspaceTestEdits(base, dest, replacesTests, true).unrunTestEdits,
-	);
+	const controller = workspaceTestFeedback(base, dest, replacesTests, true);
 
 	const parsed = objectOf(parseJson(feedback));
 	const prior = parsed?.controller;
