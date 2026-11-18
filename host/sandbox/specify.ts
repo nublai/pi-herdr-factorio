@@ -49,7 +49,12 @@ export async function sequenceCandidates(
 	base: TrustedBase,
 	files: readonly string[],
 	testFiles: readonly string[],
-): Promise<{ tests: { path: string; test: string }[]; truncated: boolean }> {
+): Promise<{
+	tests: { path: string; test: string }[];
+	truncated: boolean;
+} | null> {
+	if (base.readBase === undefined) return null;
+
 	const ts: typeof TS = createRequire(import.meta.url)("typescript");
 	const inventory = new Set(testFiles);
 	const targets = new Set(files.filter((path) => !inventory.has(path)));
@@ -120,8 +125,8 @@ export async function sequenceCandidates(
 		return [...paths];
 	};
 
-	const pinsSequence = (body: TS.Node): boolean => {
-		let pinned = false;
+	const sequenceCue = (body: TS.Node): number => {
+		let cue = 3;
 
 		const identifier = (node: TS.Node, pattern: RegExp): boolean =>
 			(ts.isIdentifier(node) && pattern.test(node.text)) ||
@@ -132,7 +137,7 @@ export async function sequenceCandidates(
 
 		const visit = (node: TS.Node): void => {
 			if (ts.isStringLiteralLike(node) && /^[a-f\d]{64}$/i.test(node.text))
-				pinned = true;
+				cue = 0;
 
 			if (ts.isCallExpression(node)) {
 				const callee = node.expression;
@@ -145,28 +150,38 @@ export async function sequenceCandidates(
 
 				if (
 					/snapshot|golden/i.test(name) ||
-					(/^(?:deepEqual|deepStrictEqual)$/.test(name) &&
-						node.arguments.some((arg) =>
-							identifier(arg, /calls|requests|events|logs|lines/i),
-						)) ||
 					(/^(?:equal|strictEqual|deepEqual|deepStrictEqual|toEqual|toBe)$/.test(
 						name,
 					) &&
 						node.arguments.some((arg) => identifier(arg, /snapshot|golden/i)))
 				)
-					pinned = true;
+					cue = Math.min(cue, 1);
+
+				if (
+					/^(?:deepEqual|deepStrictEqual)$/.test(name) &&
+					node.arguments.some((arg) =>
+						identifier(arg, /^(?:calls|requests|events|logs|lines)$/i),
+					)
+				)
+					cue = Math.min(cue, 2);
 			}
 
-			if (!pinned) ts.forEachChild(node, visit);
+			if (cue > 0) ts.forEachChild(node, visit);
 		};
 
 		visit(body);
 
-		return pinned;
+		return cue;
 	};
 
-	const tests: { path: string; test: string }[] = [];
-	let bytes = 0;
+	const candidates: {
+		path: string;
+		test: string;
+		direct: boolean;
+		named: boolean;
+		cue: number;
+		round: number;
+	}[] = [];
 
 	for (const path of [...inventory].sort()) {
 		if (!listed.has(path)) continue;
@@ -174,7 +189,8 @@ export async function sequenceCandidates(
 
 		if (file === null) continue;
 		const dependencies = imports(file);
-		let related = dependencies.some((path) => targets.has(path));
+		const direct = dependencies.some((path) => targets.has(path));
+		let related = direct;
 
 		if (!related)
 			for (const dependency of dependencies) {
@@ -191,7 +207,7 @@ export async function sequenceCandidates(
 			}
 
 		if (!related) continue;
-		const titles = new Map<string, { count: number; pinned: boolean }>();
+		const titles = new Map<string, { count: number; cue: number }>();
 
 		const visit = (node: TS.Node): void => {
 			if (ts.isCallExpression(node)) {
@@ -211,13 +227,16 @@ export async function sequenceCandidates(
 
 					titles.set(title.text, {
 						count: (previous?.count ?? 0) + 1,
-						pinned: node.arguments
-							.slice(1)
-							.some(
-								(arg) =>
-									(ts.isArrowFunction(arg) || ts.isFunctionExpression(arg)) &&
-									pinsSequence(arg.body),
-							),
+						cue: Math.min(
+							3,
+							...node.arguments
+								.slice(1)
+								.map((arg) =>
+									ts.isArrowFunction(arg) || ts.isFunctionExpression(arg)
+										? sequenceCue(arg.body)
+										: 3,
+								),
+						),
 					});
 				}
 			}
@@ -227,21 +246,45 @@ export async function sequenceCandidates(
 
 		visit(file);
 
-		for (const [test, facts] of titles) {
-			if (
-				facts.count !== 1 ||
-				!facts.pinned ||
-				test.length > LINE_MAX ||
-				/[\r\n]/.test(test)
-			)
-				continue;
-			const size = Buffer.byteLength(`${path} > ${JSON.stringify(test)}\n`);
+		const named = [...targets].some((target) =>
+			posix
+				.basename(path)
+				.includes(posix.basename(target, posix.extname(target))),
+		);
 
-			if (tests.length === 64 || bytes + size > 8 * 1024)
-				return { tests, truncated: true };
-			tests.push({ path, test });
-			bytes += size;
-		}
+		const ranked = [...titles]
+			.filter(
+				([test, facts]) =>
+					facts.count === 1 &&
+					facts.cue < 3 &&
+					test.length <= LINE_MAX &&
+					!/[\r\n]/.test(test),
+			)
+			.sort((a, b) => a[1].cue - b[1].cue);
+
+		for (const [round, [test, facts]] of ranked.entries())
+			candidates.push({ path, test, direct, named, cue: facts.cue, round });
+	}
+
+	candidates.sort(
+		(a, b) =>
+			a.round - b.round ||
+			Number(b.direct) - Number(a.direct) ||
+			Number(b.named) - Number(a.named) ||
+			a.cue - b.cue ||
+			(a.path < b.path ? -1 : a.path > b.path ? 1 : 0),
+	);
+
+	const tests: { path: string; test: string }[] = [];
+	let bytes = 0;
+
+	for (const { path, test } of candidates) {
+		const size = Buffer.byteLength(`${path} > ${JSON.stringify(test)}\n`);
+
+		if (tests.length === 64 || bytes + size > 8 * 1024)
+			return { tests, truncated: true };
+		tests.push({ path, test });
+		bytes += size;
 	}
 
 	return { tests, truncated: false };
@@ -591,7 +634,7 @@ export async function runSpecify(
 
 	const candidates =
 		base === undefined
-			? { tests: [], truncated: false }
+			? null
 			: await sequenceCandidates(
 					base,
 					parsed.draft.files,

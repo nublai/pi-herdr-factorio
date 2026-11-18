@@ -11306,6 +11306,201 @@ it(${JSON.stringify(title)}, () => {
 			}
 		});
 
+	for (const revised of [false, true])
+		it(`preserves no replacements for an unrelated ticket with many candidates after ${revised ? "revision" : "a clean review"}`, async () => {
+			const target = "src/engine.ts";
+			const path = "test/engine.test.ts";
+
+			const titles = Array.from(
+				{ length: 12 },
+				(_, n) => `pins event trace ${n}`,
+			);
+
+			const draft = {
+				kind: "contract",
+				summary: "Export a standalone label formatter",
+				behavior: ["Add a formatter without changing engine execution"],
+				acceptance: [
+					{ kind: "new_behavior", text: "Labels include the supplied name" },
+				],
+				exclusions: ["Do not change engine events or execution"],
+				compatibility: ["Existing event traces stay unchanged"],
+				limits: [],
+				files: [target],
+				evidence: [],
+			};
+
+			const revision = { ...draft, limits: ["The formatter is pure"] };
+			const expected = JSON.stringify(revised ? revision : draft);
+
+			const h = setup(
+				revised
+					? [
+							JSON.stringify(draft),
+							JSON.stringify({
+								kind: "ambiguities",
+								ambiguities: [
+									"Must the label formatter be pure? This changes its acceptance test.",
+								],
+							}),
+							expected,
+						]
+					: [JSON.stringify(draft), CLEAN_REVIEW],
+			);
+
+			const fixtures = new Map([
+				[target, "export function engine() { return ['start', 'finish']; }"],
+				[
+					path,
+					'import { engine } from "../src/engine.ts";\n' +
+						titles
+							.map(
+								(title) =>
+									`it(${JSON.stringify(title)}, () => { const events = engine(); assert.deepEqual(events, ["start", "finish"]); });`,
+							)
+							.join("\n"),
+				],
+			]);
+
+			try {
+				const result = await specifyModule.runSpecify(
+					{
+						...h.run,
+						specify: {
+							title: draft.summary,
+							body: "Add a standalone pure label formatter. Do not change engine execution or its event traces.",
+							answers: null,
+							files: [...fixtures.keys()],
+						},
+						testFiles: [path],
+					},
+					h.dir,
+					h.create,
+					{
+						files: [...fixtures.keys()],
+						readBase: async (path) => fixtures.get(path) ?? null,
+					},
+				);
+
+				assert.equal(result.kind, "passed");
+				assert.equal(h.calls.length, revised ? 3 : 2);
+
+				for (const call of h.calls.slice(1))
+					for (const title of titles)
+						assert.ok(
+							call.prompt.includes(`${path} > ${JSON.stringify(title)}`),
+						);
+
+				const output = readFileSync(join(h.dir, "output.txt"), "utf8");
+
+				assert.ok(JSON.parse(output).replacesTests === undefined);
+				assert.equal(output, expected);
+			} finally {
+				h.close();
+			}
+		});
+
+	it("ranks all sequence candidates before taking tests round-robin per file", async () => {
+		const target = "lib/worker.ts";
+
+		const fixtures = new Map([
+			[target, "export const work = () => {};"],
+			["support/helper.ts", 'export { work } from "../lib/worker.ts";'],
+		]);
+
+		const testFiles: string[] = [];
+
+		const add = (path: string, helper: boolean, bodies: string[]) => {
+			testFiles.push(path);
+			fixtures.set(
+				path,
+				`import { work } from "../${helper ? "support/helper" : "lib/worker"}.ts";\n` +
+					bodies
+						.map((body, n) => `it("${path} ${n}", () => { ${body} });`)
+						.join("\n"),
+			);
+		};
+
+		const trace = "assert.deepEqual(events, []);";
+		const snapshot = "assert.snapshot(work());";
+		const digest = `assert.equal(hash(work()), "${"c".repeat(64)}");`;
+
+		add("test/a-worker-helper.ts", true, [digest]);
+		add("test/a-unmatched.ts", false, [digest]);
+		add("test/a-worker-trace.ts", false, [trace]);
+		add("test/a-worker-snapshot.ts", false, [snapshot]);
+		add("test/z-worker-digest.ts", false, [
+			trace,
+			snapshot,
+			digest,
+			...Array<string>(70).fill(digest),
+		]);
+		add("test/b-worker-digest.ts", false, [digest]);
+
+		const base = {
+			files: [...fixtures.keys()],
+			readBase: async (path: string) => fixtures.get(path) ?? null,
+		};
+
+		const result = await specifyModule.sequenceCandidates(
+			base,
+			[target],
+			testFiles,
+		);
+
+		assert.ok(result !== null);
+		assert.equal(result.truncated, true);
+		assert.equal(result.tests.length, 64);
+		assert.deepEqual(
+			result.tests.slice(0, 7).map((t) => t.test),
+			[
+				"test/b-worker-digest.ts 0",
+				"test/z-worker-digest.ts 2",
+				"test/a-worker-snapshot.ts 0",
+				"test/a-worker-trace.ts 0",
+				"test/a-unmatched.ts 0",
+				"test/a-worker-helper.ts 0",
+				"test/z-worker-digest.ts 3",
+			],
+		);
+		assert.equal(
+			digestOf(
+				JSON.stringify(
+					await specifyModule.sequenceCandidates(
+						base,
+						[target],
+						[...testFiles].reverse(),
+					),
+				),
+			),
+			digestOf(JSON.stringify(result)),
+		);
+	});
+
+	it("reports unavailable candidate discovery when the trusted base reader is absent", async () => {
+		const h = setup([DRAFT, CRITIQUE, DRAFT]);
+
+		try {
+			const result = await specifyModule.runSpecify(h.run, h.dir, h.create, {
+				files: ["server/cli.ts"],
+			});
+
+			assert.equal(result.kind, "passed");
+
+			for (const call of h.calls.slice(1)) {
+				assert.match(call.prompt, /[Cc]andidate.*unavailable/);
+				assert.ok(!call.prompt.includes("Candidate list truncated: false"));
+			}
+
+			assert.equal(
+				await specifyModule.sequenceCandidates({ files: [] }, [], []),
+				null,
+			);
+		} finally {
+			h.close();
+		}
+	});
+
 	it("selects only inventory tests with literal unique titles, import reach and sequence pins", async () => {
 		const target = "lib/worker.ts";
 
@@ -11326,6 +11521,11 @@ it("events", () => assert.deepEqual(events, []));
 it("logs", () => assert.deepEqual(logs, []));
 it("lines", () => assert.deepEqual(lines, []));
 it("ordinary", () => assert.deepEqual(result, []));
+it("substring deadlines", () => assert.deepEqual(deadlines, []));
+it("substring callbacks", () => assert.deepEqual(callbacks, []));
+it("substring prequests", () => assert.deepEqual(prequests, []));
+it("substring prevents", () => assert.deepEqual(prevents, []));
+it("substring catalogs", () => assert.deepEqual(catalogs, []));
 it("not a body pin", () => work(), "${"c".repeat(64)}");
 it("computed" + work(), () => assert.deepEqual(events, []));
 it("duplicate", () => assert.deepEqual(events, []));
@@ -11372,11 +11572,13 @@ it("duplicate", () => assert.deepEqual(events, []));`,
 			testFiles,
 		);
 
+		assert.ok(result !== null);
 		assert.equal(result.truncated, false);
 		assert.deepEqual(
 			result.tests.map((t) => t.test),
 			[
 				"digest",
+				"helper title",
 				"snapshot",
 				"golden",
 				"calls",
@@ -11384,7 +11586,6 @@ it("duplicate", () => assert.deepEqual(events, []));`,
 				"events",
 				"logs",
 				"lines",
-				"helper title",
 			],
 		);
 		assert.ok(result.tests.every((t) => testFiles.includes(t.path)));
@@ -11421,6 +11622,8 @@ it("duplicate", () => assert.deepEqual(events, []));`,
 				["lib/worker.ts"],
 				[path],
 			);
+
+			assert.ok(result !== null);
 
 			const bytes = Buffer.byteLength(
 				result.tests
