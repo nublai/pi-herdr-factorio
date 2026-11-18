@@ -113,15 +113,30 @@ export type CandidateInput = {
 	readonly heldoutDigest?: string;
 };
 
-function sameCounts(
+function countsPreserved(
 	base: Readonly<Record<string, number>>,
 	candidate: Readonly<Record<string, number>>,
 	replacements: readonly GateReplacement[],
+	version: 1 | 2,
 ): boolean {
 	const except = new Set(replacements.map((r) => r.path));
 
-	for (const path of new Set([...Object.keys(base), ...Object.keys(candidate)]))
-		if (!except.has(path) && base[path] !== candidate[path]) return false;
+	for (const path of new Set([
+		...Object.keys(base),
+		...Object.keys(candidate),
+	])) {
+		if (except.has(path)) continue;
+
+		const before = base[path],
+			after = candidate[path];
+
+		if (
+			before === undefined ||
+			after === undefined ||
+			(version === 1 ? after !== before : after < before)
+		)
+			return false;
+	}
 
 	return replacements.every((r) => (candidate[r.path] ?? 0) >= 1);
 }
@@ -595,7 +610,12 @@ export async function checkCandidate(
 
 		if (
 			candidateCounts === null ||
-			!sameCounts(baseCounts, candidateCounts, replacements)
+			!countsPreserved(
+				baseCounts,
+				candidateCounts,
+				replacements,
+				manifest.version,
+			)
 		)
 			candidateRun.check.exitCode = 1;
 

@@ -3505,6 +3505,33 @@ test("per-file counts reject extra registrations, except named replacements", as
 	assert.match(JSON.stringify(replaced.replacedTests), /afterDigest/);
 });
 
+test("v1 main_tests still rejects per-file count increases", async (t) => {
+	const f = repo(t);
+	const path = "test/src/example/value.test.ts";
+	f.put(
+		path,
+		'import { globSync } from "node:fs"; import { test } from "node:test"; for (const path of globSync("test/src/example/*.test.ts")) test(path, () => {});\n',
+	);
+	const gateSha = f.commit();
+	f.put(
+		"test/src/example/new.test.ts",
+		'import { test } from "node:test"; test("new", () => {});\n',
+	);
+
+	const receipt = await checkCandidate({
+		...gateInput(f, f.commit()),
+		gateSha,
+	});
+
+	assert.equal(receipt.baselineCounts[path], 1);
+	assert.equal(receipt.candidateCounts[path], 2);
+	assert.equal(
+		receipt.checks.find((c) => c.name === "main_tests")?.exitCode,
+		1,
+	);
+	assert.equal(receipt.status, "failed");
+});
+
 const PINNED =
 	"waits through transient recovery reads after ready was removed, then finishes needs_info";
 
@@ -5174,6 +5201,88 @@ export default eslintCompatPlugin({
 
 	return { ...f, gateSha: f.commit() };
 }
+
+for (const [mode, expectedCount, expectedExit] of [
+	["increase", 3, 0],
+	["decrease", 1, 1],
+	["missing", undefined, 1],
+	["skip", 3, 1],
+	["todo", 3, 1],
+	["failure", 3, 1],
+	["extra-file", 3, 1],
+] as const)
+	test(`v2 main_tests per-file counts: ${mode}`, async (t) => {
+		const f = agentsRepo(t);
+		const path = "test/maestro/worker.test.ts";
+		f.put("pi-extension/value.ts", 'export const mode = "increase";\n');
+		f.put(
+			"test/maestro/base.test.ts",
+			'import { test } from "node:test";\ntest("base", () => {});\n',
+		);
+		f.put(
+			"test/test.ts",
+			`import { globSync } from "node:fs";
+import { test } from "node:test";
+for (const path of globSync("test/maestro/*.test.ts")) test(path, () => {});
+`,
+		);
+		f.put(
+			path,
+			`import { globSync } from "node:fs";
+import { test } from "node:test";
+import { mode } from "../../pi-extension/value.ts";
+if (mode === "extra-file") await import("./registrations.ts");
+const files = globSync("test/maestro/*.test.ts");
+const selected =
+	mode === "missing" ? [] : mode === "decrease" ? files.slice(0, 1) : files;
+for (const path of selected) {
+	test(path, { skip: mode === "skip", todo: mode === "todo" }, () => {
+		if (mode === "failure") throw new Error("MAIN_TEST_FAILURE");
+	});
+}
+`,
+		);
+		const gateSha = f.commit();
+		f.put("pi-extension/value.ts", `export const mode = "${mode}";\n`);
+		f.put(
+			"test/maestro/new.test.ts",
+			'import { test } from "node:test";\ntest("new", () => {});\n',
+		);
+
+		f.put(
+			"test/maestro/registrations.ts",
+			'import { test } from "node:test";\ntest("extra", () => {});\n',
+		);
+
+		const receipt = await checkCandidate({
+			...gateInput(f, f.commit()),
+			gateSha,
+			runner: toolingRunner,
+		});
+
+		const report = objectOf(
+			parseJson(readFileSync(join(f.root, "result/main_tests.log"), "utf8")),
+		);
+
+		assert.equal(report?.complete, true);
+		assert.equal(
+			report?.bad,
+			["missing", "skip", "todo", "failure"].includes(mode),
+		);
+		assert.equal(objectOf(report?.counts)?.[path], expectedCount);
+		assert.equal(receipt.baselineCounts[path], 2);
+		assert.equal(receipt.baselineCounts["test/test.ts"], 2);
+		assert.equal(objectOf(report?.counts)?.["test/test.ts"], 3);
+		assert.equal(
+			receipt.checks.find((c) => c.name === "candidate_tests")?.exitCode,
+			0,
+		);
+		assert.equal(
+			receipt.checks.find((c) => c.name === "main_tests")?.exitCode,
+			expectedExit,
+		);
+		assert.equal(receipt.status, expectedExit === 0 ? "passed" : "failed");
+	});
 
 test("837c runs candidate-added Agents suffix-less glob tests using only main policy", async (t) => {
 	const f = agentsRepo(t);
