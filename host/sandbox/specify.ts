@@ -1,6 +1,8 @@
 import { existsSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
-import type { SpecifyOutput } from "../../src/contract/contract.ts";
+import { createRequire } from "node:module";
+import { join, posix } from "node:path";
+import type TS from "typescript";
+import { LINE_MAX, type SpecifyOutput } from "../../src/contract/contract.ts";
 import {
 	parseReviewOutput,
 	parseSpecifyOutput,
@@ -22,7 +24,10 @@ import {
 	unknownEfficiency,
 } from "../../src/core/execution.ts";
 import { fieldOf, objectOf, parseJson, textOf } from "../../src/core/json.ts";
-import type { StageLaunchInput } from "../../src/controller/launch.ts";
+import type {
+	Checkout,
+	StageLaunchInput,
+} from "../../src/controller/launch.ts";
 import { PINNED_VERSIONS } from "../bundle/manifest.ts";
 import {
 	type SPECIFY_SESSIONS,
@@ -37,6 +42,253 @@ import {
 } from "./receipts.ts";
 import { type StageReceipt, type StageResult, stageResult } from "./result.ts";
 import { type StageHost, CRASHED, Ledger, runStage } from "./run-stage.ts";
+
+type TrustedBase = Pick<Checkout, "files" | "readBase">;
+
+export async function sequenceCandidates(
+	base: TrustedBase,
+	files: readonly string[],
+	testFiles: readonly string[],
+): Promise<{
+	tests: { path: string; test: string }[];
+	truncated: boolean;
+} | null> {
+	if (base.readBase === undefined) return null;
+
+	const ts: typeof TS = createRequire(import.meta.url)("typescript");
+	const inventory = new Set(testFiles);
+	const targets = new Set(files.filter((path) => !inventory.has(path)));
+	const listed = new Set(base.files);
+	const cache = new Map<string, TS.SourceFile | null>();
+
+	const source = async (path: string) => {
+		if (!cache.has(path)) {
+			const text = await base.readBase?.(path, NAMED_FILE_READ_BYTES);
+
+			cache.set(
+				path,
+				text == null || text instanceof Object
+					? null
+					: ts.createSourceFile(path, text, ts.ScriptTarget.Latest, false),
+			);
+		}
+
+		return cache.get(path) ?? null;
+	};
+
+	const imports = (file: TS.SourceFile): string[] => {
+		const paths = new Set<string>();
+
+		const add = (name: string) => {
+			if (!name.startsWith(".")) return;
+
+			const path = posix.normalize(
+				posix.join(posix.dirname(file.fileName), name),
+			);
+
+			const resolved = [
+				path,
+				path.replace(/\.[cm]?js$/, ".ts"),
+				...[".ts", ".tsx", ".js", ".mjs", ".cjs", "/index.ts", "/index.js"].map(
+					(suffix) => path + suffix,
+				),
+			].find((candidate) => listed.has(candidate));
+
+			if (resolved !== undefined) paths.add(resolved);
+		};
+
+		const visit = (node: TS.Node): void => {
+			if (
+				((ts.isImportDeclaration(node) && !node.importClause?.isTypeOnly) ||
+					(ts.isExportDeclaration(node) && !node.isTypeOnly)) &&
+				node.moduleSpecifier !== undefined &&
+				ts.isStringLiteral(node.moduleSpecifier)
+			)
+				add(node.moduleSpecifier.text);
+
+			if (
+				ts.isCallExpression(node) &&
+				(node.expression.kind === ts.SyntaxKind.ImportKeyword ||
+					(ts.isIdentifier(node.expression) &&
+						node.expression.text === "require"))
+			) {
+				const first = node.arguments[0];
+
+				if (first !== undefined && ts.isStringLiteral(first)) add(first.text);
+			}
+
+			ts.forEachChild(node, visit);
+		};
+
+		visit(file);
+
+		return [...paths];
+	};
+
+	const sequenceCue = (body: TS.Node): number => {
+		let cue = 3;
+
+		const identifier = (node: TS.Node, pattern: RegExp): boolean =>
+			(ts.isIdentifier(node) && pattern.test(node.text)) ||
+			ts.forEachChild(
+				node,
+				(child) => identifier(child, pattern) || undefined,
+			) === true;
+
+		const visit = (node: TS.Node): void => {
+			if (ts.isStringLiteralLike(node) && /^[a-f\d]{64}$/i.test(node.text))
+				cue = 0;
+
+			if (ts.isCallExpression(node)) {
+				const callee = node.expression;
+
+				const name = ts.isPropertyAccessExpression(callee)
+					? callee.name.text
+					: ts.isIdentifier(callee)
+						? callee.text
+						: "";
+
+				if (
+					/snapshot|golden/i.test(name) ||
+					(/^(?:equal|strictEqual|deepEqual|deepStrictEqual|toEqual|toBe)$/.test(
+						name,
+					) &&
+						node.arguments.some((arg) => identifier(arg, /snapshot|golden/i)))
+				)
+					cue = Math.min(cue, 1);
+
+				if (
+					/^(?:deepEqual|deepStrictEqual)$/.test(name) &&
+					node.arguments.some((arg) =>
+						identifier(arg, /^(?:calls|requests|events|logs|lines)$/i),
+					)
+				)
+					cue = Math.min(cue, 2);
+			}
+
+			if (cue > 0) ts.forEachChild(node, visit);
+		};
+
+		visit(body);
+
+		return cue;
+	};
+
+	const candidates: {
+		path: string;
+		test: string;
+		direct: boolean;
+		named: boolean;
+		cue: number;
+		round: number;
+	}[] = [];
+
+	for (const path of [...inventory].sort()) {
+		if (!listed.has(path)) continue;
+		const file = await source(path);
+
+		if (file === null) continue;
+		const dependencies = imports(file);
+		const direct = dependencies.some((path) => targets.has(path));
+		let related = direct;
+
+		if (!related)
+			for (const dependency of dependencies) {
+				if (inventory.has(dependency)) continue;
+				const helper = await source(dependency);
+
+				if (
+					helper !== null &&
+					imports(helper).some((path) => targets.has(path))
+				) {
+					related = true;
+					break;
+				}
+			}
+
+		if (!related) continue;
+		const titles = new Map<string, { count: number; cue: number }>();
+
+		const visit = (node: TS.Node): void => {
+			if (ts.isCallExpression(node)) {
+				const callee = ts.isPropertyAccessExpression(node.expression)
+					? node.expression.expression
+					: node.expression;
+
+				const title = node.arguments[0];
+
+				if (
+					ts.isIdentifier(callee) &&
+					/^(?:it|test)$/.test(callee.text) &&
+					title !== undefined &&
+					ts.isStringLiteralLike(title)
+				) {
+					const previous = titles.get(title.text);
+
+					titles.set(title.text, {
+						count: (previous?.count ?? 0) + 1,
+						cue: Math.min(
+							3,
+							...node.arguments
+								.slice(1)
+								.map((arg) =>
+									ts.isArrowFunction(arg) || ts.isFunctionExpression(arg)
+										? sequenceCue(arg.body)
+										: 3,
+								),
+						),
+					});
+				}
+			}
+
+			ts.forEachChild(node, visit);
+		};
+
+		visit(file);
+
+		const named = [...targets].some((target) =>
+			posix
+				.basename(path)
+				.includes(posix.basename(target, posix.extname(target))),
+		);
+
+		const ranked = [...titles]
+			.filter(
+				([test, facts]) =>
+					facts.count === 1 &&
+					facts.cue < 3 &&
+					test.length <= LINE_MAX &&
+					!/[\r\n]/.test(test),
+			)
+			.sort((a, b) => a[1].cue - b[1].cue);
+
+		for (const [round, [test, facts]] of ranked.entries())
+			candidates.push({ path, test, direct, named, cue: facts.cue, round });
+	}
+
+	candidates.sort(
+		(a, b) =>
+			a.round - b.round ||
+			Number(b.direct) - Number(a.direct) ||
+			Number(b.named) - Number(a.named) ||
+			a.cue - b.cue ||
+			(a.path < b.path ? -1 : a.path > b.path ? 1 : 0),
+	);
+
+	const tests: { path: string; test: string }[] = [];
+	let bytes = 0;
+
+	for (const { path, test } of candidates) {
+		const size = Buffer.byteLength(`${path} > ${JSON.stringify(test)}\n`);
+
+		if (tests.length === 64 || bytes + size > 8 * 1024)
+			return { tests, truncated: true };
+		tests.push({ path, test });
+		bytes += size;
+	}
+
+	return { tests, truncated: false };
+}
 
 type KeptSession = {
 	readonly outcome: SessionOutcome;
@@ -80,6 +332,7 @@ async function parseDeclared(
 	workspace: string,
 	files: readonly string[],
 	testFiles: readonly string[] | undefined,
+	base?: TrustedBase,
 ): Promise<SpecifyOutput> {
 	const parsed = parseSpecifyOutput(text, new Set(files));
 
@@ -97,10 +350,13 @@ async function parseDeclared(
 		if (!tests.includes(replaced.path))
 			return { kind: "malformed", reason: "bad_field" };
 
-		const source = await checkout.read(replaced.path, NAMED_FILE_READ_BYTES);
+		const source =
+			base === undefined
+				? await checkout.read(replaced.path, NAMED_FILE_READ_BYTES)
+				: await base.readBase?.(replaced.path, NAMED_FILE_READ_BYTES);
 
 		const count =
-			source === null || !("test" in replaced)
+			source == null || source instanceof Object || !("test" in replaced)
 				? 0
 				: testDeclarations(source, replaced.test);
 
@@ -118,6 +374,7 @@ export async function runSpecify(
 	input: StageLaunchInput,
 	dir: string,
 	createHost: (dir: string, tools: readonly string[]) => StageHost,
+	base?: TrustedBase,
 ): Promise<StageResult> {
 	const review = input.specify;
 
@@ -366,6 +623,7 @@ export async function runSpecify(
 		input.workspace,
 		review.files,
 		input.testFiles,
+		base,
 	);
 
 	if (parsed.kind === "malformed")
@@ -374,9 +632,18 @@ export async function runSpecify(
 	if (parsed.kind === "questions")
 		return finish({ kind: "passed" }, draft.text);
 
+	const candidates =
+		base === undefined
+			? null
+			: await sequenceCandidates(
+					base,
+					parsed.draft.files,
+					input.testFiles ?? [],
+				);
+
 	const critique = await session(
 		"review",
-		reviewPrompt(review, draft.text ?? ""),
+		reviewPrompt(review, draft.text ?? "", candidates),
 		[],
 	);
 
@@ -391,7 +658,7 @@ export async function runSpecify(
 
 	const revision = await session(
 		"revision",
-		revisionPrompt(review, draft.text ?? "", ambiguities),
+		revisionPrompt(review, draft.text ?? "", ambiguities, candidates),
 		[],
 	);
 
@@ -404,6 +671,7 @@ export async function runSpecify(
 				input.workspace,
 				review.files,
 				input.testFiles,
+				base,
 			)
 		).kind === "malformed"
 	)
