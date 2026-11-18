@@ -86,6 +86,7 @@ import {
 } from "../../../host/controller/checkout.ts";
 import { controllerValidator } from "../../../host/controller/validation-sweep.ts";
 import { fileRunFiles } from "../../../host/controller/run-files.ts";
+import { storeFeedbackBatch } from "../../../host/controller/candidate-port.ts";
 import {
 	dispatchNonce,
 	parseValidationState,
@@ -103,9 +104,17 @@ import {
 import { generationIntent } from "../../../src/candidate/state.ts";
 import {
 	beginCandidate,
+	certifyGeneration,
 	handoffCandidate,
 } from "../../../src/candidate/handoff.ts";
 import { candidateBranch } from "../../../src/github/publish.ts";
+import { storedAssessment } from "../../helpers.ts";
+import {
+	classifyFeedback,
+	feedbackId,
+} from "../../../src/candidate/feedback.ts";
+import { parseCandidateState } from "../../../src/candidate/codec.ts";
+import { candidateCause } from "../../../src/ledger/terminal.ts";
 import { CONTROLLER_LOGIN } from "../../../src/trust/markers.ts";
 import type { Exec } from "../../../src/github/exec.ts";
 import { EXE_DEV_PLATFORM } from "../../../src/trust/platform.ts";
@@ -1902,6 +1911,8 @@ async function jobWorld(
 		drift?: string | null;
 		differentGateMaterializer?: boolean;
 		ciFailure?: { check: string; log: string };
+		ciAbort?: "suppression_added" | "protected_path_changed";
+		successor?: boolean;
 	} = {},
 ) {
 	const raw = manifest.entries.find((e) => e.id === id);
@@ -2122,7 +2133,7 @@ async function jobWorld(
 		maxReviewAttempts: 3,
 	};
 
-	const generation = generationIntent({
+	const original = generationIntent({
 		pin,
 		patch: patch.receipt,
 		round: 0,
@@ -2132,7 +2143,22 @@ async function jobWorld(
 		publication: { kind: "initial" },
 	});
 
-	const nonce = dispatchNonce(runId, 0, 1);
+	const generation = options.successor
+		? generationIntent({
+				pin,
+				patch: patch.receipt,
+				round: 0,
+				generation: 1,
+				baseSha: ciGate,
+				origin: {
+					kind: "refresh",
+					previous: { round: 0, generation: 0, digest: original.digest },
+				},
+				publication: { kind: "successor", expectedHead: candidateSha },
+			})
+		: original;
+
+	const nonce = dispatchNonce(runId, 0, 1, generation.generation);
 	const heldoutDir = heldout.directory;
 
 	const ci = await checkCandidate({
@@ -2204,6 +2230,19 @@ async function jobWorld(
 			heldoutFailures: [],
 		};
 
+	if (options.ciAbort !== undefined)
+		receipt = {
+			...receipt,
+			status: "failed",
+			reason: options.ciAbort,
+			checks: [],
+			heldoutFailures: [],
+			tamperSignals:
+				options.ciAbort === "suppression_added"
+					? [{ rule: "suppression_added", path: "src/value.ts", line: 1 }]
+					: [],
+		};
+
 	assert.equal(receipt.status, "failed", JSON.stringify(receipt));
 
 	if (options.differentGateMaterializer) {
@@ -2215,13 +2254,17 @@ async function jobWorld(
 	}
 
 	const start = Date.parse("2026-11-03T00:00:00Z");
-	const branch = candidateBranch(entry.issue, runId, 0);
+	const branch = candidateBranch(entry.issue, runId, 0, generation.generation);
 	let ref: string | null = candidateSha;
 	const writes: string[] = [];
 
 	let validation: ValidationState = {
 		version: 2,
-		generation: { index: 0, digest: generation.digest, previousHead: null },
+		generation: {
+			index: generation.generation,
+			digest: generation.digest,
+			previousHead: options.successor ? candidateSha : null,
+		},
 		startedAt: start,
 		deadline: start + 1_200_000,
 		round: 0,
@@ -2357,7 +2400,9 @@ async function jobWorld(
 		state,
 		pin,
 		patch: patch.receipt,
-		dir: validationDir(state, runId, 0, 0),
+		patchText: patch.patch,
+		generation,
+		dir: validationDir(state, runId, 0, generation.generation),
 		deadline: start + 1_200_000,
 		fetches,
 		writes,
@@ -2410,9 +2455,11 @@ for (const { check, log, repair } of [
 			);
 			assert.deepEqual(result.assessment.assessment, {
 				kind: "failed",
-				failure: repair
-					? { kind: "candidate", reason: "candidate_check", scenarios: [] }
-					: { kind: "missing_evidence", reason: "unrepairable_check" },
+				failure: {
+					kind: "candidate",
+					reason: "candidate_check",
+					scenarios: [],
+				},
 			});
 
 			const observation = {
@@ -2445,7 +2492,7 @@ for (const { check, log, repair } of [
 					kind: "validate",
 					request,
 					result: {
-						kind: "finished",
+						...result,
 						validation: result.state,
 						verdict: result.verdict,
 						assessment: result.assessment,
@@ -2477,36 +2524,297 @@ for (const { check, log, repair } of [
 						kind: "finish_pr",
 						terminal: {
 							kind: "failed",
-							reason: "diagnosis_missing_evidence",
+							reason: "unrepairable_check",
 						},
 					},
 				});
-				assert.equal(existsSync(join(w.dir, "feedback.json")), false);
+				assert.deepEqual(
+					readFeedbackBytes(
+						readFileSync(join(w.dir, "feedback.json"), "utf8"),
+						result.assessment.ref,
+					),
+					[],
+				);
 				assert.equal(result.assessment.assessment.kind, "failed");
 
 				if (result.assessment.assessment.kind !== "failed") return;
 
-				const notice = diagnosisNotice(
-					result.assessment.assessment.failure,
-					"key",
-					{
-						failedChecks: failedVisibleChecks(result.verdict.checks),
-						patchDigest: null,
-					},
-				).body;
+				const notice = diagnosisNotice({ kind: "unrepairable_check" }, "key", {
+					failedChecks: failedVisibleChecks(result.verdict.checks),
+					patchDigest: null,
+				}).body;
 
 				assert.match(notice, /No repairable feedback/);
 				assert.ok(notice.includes(check));
 				assert.doesNotMatch(notice, /PRIVATE-|private\.mjs|checks\//);
+
+				const request =
+					completed.work.kind === "effect" ? completed.work.request : null;
+
+				assert.ok(request?.kind === "finish_pr");
+
+				const terminal = handoffCandidate(completed, {
+					kind: "effect_completed",
+					completion: { kind: "finish_pr", request },
+				}).state;
+
+				assert.ok(
+					parseCandidateState(JSON.parse(JSON.stringify(terminal))) !== null,
+				);
+				assert.deepEqual(
+					candidateCause(terminal, result.assessment.assessment.failure),
+					{
+						stage: "validate",
+						class: "handoff",
+						reason: "unrepairable_check",
+						failedVisibleChecks: [check],
+						retainedPatch: w.patch.patchDigest,
+					},
+				);
 			}
 
-			assert.deepEqual(
-				finishedAssessment(await w.step(w.owner())),
-				result.assessment,
-			);
+			const restored = await w.step(w.owner());
+			assert.ok(restored.kind === "finished");
+			assert.equal(restored.automaticRepair, result.automaticRepair);
+			assert.deepEqual(restored.assessment, result.assessment);
 			assert.equal(w.fetches.length, 0);
 		},
 	);
+
+for (const reason of ["suppression_added", "protected_path_changed"] as const)
+	scoped(
+		`#856 ${reason} on candidate files retains candidate_check through the validator`,
+		async (t) => {
+			const w = await jobWorld(t, "synthetic-wrong-value", { ciAbort: reason });
+			const result = await w.step(w.owner());
+			assert.ok(result.kind === "finished");
+			assert.deepEqual(result.assessment.assessment, {
+				kind: "failed",
+				failure: {
+					kind: "candidate",
+					reason: "candidate_check",
+					scenarios: [],
+				},
+			});
+			assert.equal(
+				"automaticRepair" in result ? result.automaticRepair : undefined,
+				undefined,
+			);
+		},
+	);
+
+scoped(
+	"#856 an open PR with empty CI feedback still starts an owner-comment repair",
+	async (t) => {
+		const w = await jobWorld(t, "synthetic-wrong-value", {
+			ciFailure: { check: "main_tests", log: '{"bad":false,"failures":[]}' },
+			successor: true,
+		});
+
+		const result = await w.step(w.owner());
+		assert.ok(result.kind === "finished");
+		assert.ok(isGitSha(result.verdict.candidateSha));
+
+		const observation = {
+			kind: "observed",
+			now: 100,
+			main: w.pin.originalBase,
+			pr: { kind: "none" },
+			executionAllowed: true,
+			capacityAvailable: true,
+			eligibility: "ready",
+			readiness: { kind: "unavailable" },
+		} as const;
+
+		const initial = handoffCandidate(
+			beginCandidate(w.pin, w.patch, 0),
+			observation,
+		).state;
+
+		assert.ok(initial.kind === "selected" && initial.work.kind === "effect");
+		const request = initial.work.request;
+		assert.ok(request.kind === "validate");
+		const intent = initial.current.intent;
+
+		const promoted = {
+			round: intent.round,
+			generation: intent.generation,
+			digest: intent.digest,
+		};
+
+		const verdict = {
+			...result.verdict,
+			pass: true,
+			unjudged: [],
+			checks: result.verdict.checks.map((c) => ({ ...c, passed: true })),
+		};
+
+		assert.ok(isGitSha(verdict.gateSha));
+
+		const report = {
+			candidateSha: result.verdict.candidateSha,
+			gateSha: verdict.gateSha,
+			ciRunId: verdict.ciRunId,
+			reportId: 1,
+			nonce: dispatchNonce(w.pin.runId, 0, 1),
+			heldoutDigest: verdict.heldoutDigest,
+			externalId: `factory-gates:${verdict.ciRunId}:${dispatchNonce(w.pin.runId, 0, 1)}`,
+		};
+
+		const validated = handoffCandidate(initial, {
+			kind: "effect_completed",
+			completion: {
+				kind: "validate",
+				request,
+				result: {
+					kind: "finished",
+					validation: result.state,
+					verdict,
+					report,
+					seats: ["code-review", "security-review", "simplify"],
+					assessment: storedAssessment({
+						runId: w.pin.runId,
+						round: 0,
+						generation: 0,
+						verdict,
+						assessment: { kind: "passed" },
+					}).read,
+				},
+			},
+		}).state;
+
+		const review = handoffCandidate(validated, observation).effect;
+		assert.ok(review?.kind === "launch_review");
+
+		const certification = certifyGeneration({
+			pin: w.pin,
+			generation: intent,
+			execution: review.execution,
+			patch: { kind: "found", receipt: w.patch, patch: w.patchText },
+			verdict,
+			report,
+			review: {
+				...review.execution.binding,
+				version: 2,
+				r8: "incomplete",
+				blocking: false,
+				seats: review.execution.seats.map((seat) => ({
+					seat,
+					findings: [],
+					judgments: [],
+					requested: "openai/gpt-6.1-sol",
+					observed: null,
+					label: "context-isolated, same model, same family, not cross-family",
+					fallback: false,
+					tokens: 10,
+				})),
+			},
+		});
+
+		const published = {
+			number: 5,
+			branch: `factory/pr/${w.pin.issue}-${w.pin.runId.slice(0, 12)}`,
+			promoted,
+			readiness: { kind: "not_ready", since: 100, reason: "validation_failed" },
+		} as const;
+
+		assert.ok(validated.kind === "selected");
+
+		const successor = {
+			...initial,
+			published,
+			history: [{ ...validated.current, certification }],
+			current: { ...initial.current, intent: w.generation },
+			work: {
+				kind: "effect",
+				request: { kind: "validate", generation: w.generation },
+			},
+		} as const;
+
+		assert.ok(
+			parseCandidateState(JSON.parse(JSON.stringify(successor))) !== null,
+		);
+
+		const completed = handoffCandidate(successor, {
+			kind: "effect_completed",
+			now: 101,
+			completion: {
+				kind: "validate",
+				request: successor.work.request,
+				result: {
+					...result,
+					validation: result.state,
+					report: null,
+					seats: [],
+				},
+			},
+		}).state;
+
+		assert.ok(completed.kind === "selected");
+		assert.equal(completed.work.kind, "held");
+
+		const comment = feedbackId(w.pin.repo, "review", 1);
+
+		const feedback = await classifyFeedback({
+			runId: w.pin.runId,
+			pr: 5,
+			head: result.verdict.candidateSha,
+			controllerLogin: CONTROLLER_LOGIN,
+			seen: [],
+			permission: async () => "write",
+			events: [
+				{
+					kind: "review",
+					id: comment,
+					pr: 5,
+					actor: "owner",
+					at: "2026-11-03T00:02:00Z",
+					state: "CHANGES_REQUESTED",
+					commit: result.verdict.candidateSha,
+					body: "Please correct the value",
+					comments: [],
+				},
+			],
+		});
+
+		assert.ok(feedback.kind === "read" && feedback.batch !== null);
+		assert.equal(feedback.batch.records[0]?.intake.kind, "actionable");
+
+		const open = {
+			...observation,
+			pr: {
+				kind: "open",
+				number: 5,
+				head: result.verdict.candidateSha,
+				refHead: result.verdict.candidateSha,
+			},
+		} as const;
+
+		const intake = handoffCandidate(completed, {
+			...open,
+			feedback: {
+				kind: "read",
+				head: result.verdict.candidateSha,
+				dismissed: [],
+				batch: await storeFeedbackBatch(w.state, feedback.batch, feedback.full),
+			},
+		});
+
+		assert.ok(intake.effect?.kind === "post_notice");
+		assert.equal(intake.effect.notice.kind, "repair_started");
+		assert.ok(
+			parseCandidateState(JSON.parse(JSON.stringify(intake.state))) !== null,
+		);
+
+		const started = handoffCandidate(intake.state, {
+			kind: "effect_completed",
+			completion: { kind: "post_notice", request: intake.effect },
+		}).state;
+
+		assert.ok(started.kind === "selected");
+		assert.equal(started.work.kind, "repair_due");
+	},
+);
 
 function diagnosisFiles(dir: string): string[] {
 	const root = join(dir, "diagnosis");

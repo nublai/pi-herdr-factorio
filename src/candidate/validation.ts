@@ -171,6 +171,7 @@ export type ValidationResult =
 			readonly verdict: Verdict;
 			readonly report?: TrustedReport;
 			readonly assessment: ReadAssessment;
+			readonly automaticRepair?: "unrepairable_check";
 	  }
 	| {
 			readonly kind: "failed";

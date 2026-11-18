@@ -186,6 +186,7 @@ export type HandoffReason =
 	| "pr_ambiguous"
 	| "workflow_unavailable"
 	| "validation_failed"
+	| "unrepairable_check"
 	| "evidence_unavailable"
 	| "repair_limit"
 	| "diagnosis_oracle"

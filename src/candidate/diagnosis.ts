@@ -1304,8 +1304,7 @@ export type MissingEvidenceReason =
 	| "materialize_mismatch"
 	| "ci_replay_disagrees"
 	| "tree_replays_disagree"
-	| "visible_base_failed"
-	| "unrepairable_check";
+	| "visible_base_failed";
 
 export type InfrastructureReason =
 	| "runner_unavailable"
@@ -2240,15 +2239,18 @@ export function classifyFailure(input: ClassifyInput): FailureClass {
 	return assessCiFailure(input).failure;
 }
 
-export const FAILURE_SENTENCES: Readonly<Record<FailureClass["kind"], string>> =
-	{
-		candidate: "Hard CI failed for this candidate. A bounded repair is next.",
-		oracle: "Stopped: acceptance checks are invalid for this contract or base.",
-		missing_evidence:
-			"Stopped: CI diagnosis could not establish reliable evidence.",
-		infrastructure:
-			"Held: validation could not execute reliably. No repair was started.",
-	};
+export const FAILURE_SENTENCES: Readonly<
+	Record<FailureClass["kind"] | "unrepairable_check", string>
+> = {
+	candidate: "Hard CI failed for this candidate. A bounded repair is next.",
+	unrepairable_check:
+		"Stopped: unrepairable_check. No repairable feedback was produced by the failed checks.",
+	oracle: "Stopped: acceptance checks are invalid for this contract or base.",
+	missing_evidence:
+		"Stopped: CI diagnosis could not establish reliable evidence.",
+	infrastructure:
+		"Held: validation could not execute reliably. No repair was started.",
+};
 
 const MISSING_REASONS: readonly MissingEvidenceReason[] = [
 	"assessment_missing",
@@ -2262,7 +2264,6 @@ const MISSING_REASONS: readonly MissingEvidenceReason[] = [
 	"ci_replay_disagrees",
 	"tree_replays_disagree",
 	"visible_base_failed",
-	"unrepairable_check",
 ];
 
 const INFRASTRUCTURE_REASONS: readonly InfrastructureReason[] = [
@@ -2345,8 +2346,6 @@ export function diagnosisDetail(failure: FailureClass): string | null {
 	if (failure.kind !== "missing_evidence") return null;
 
 	switch (failure.reason) {
-		case "unrepairable_check":
-			return "No repairable feedback was produced by the failed checks.";
 		case "ci_replay_disagrees":
 			return "CI and the gate-tree replay disagree.";
 		case "tree_replays_disagree":
@@ -2393,7 +2392,7 @@ export type DeadEndContext = Readonly<{
 }>;
 
 export function diagnosisNotice(
-	failure: FailureClass,
+	failure: FailureClass | Readonly<{ kind: "unrepairable_check" }>,
 	key: string,
 	context?: DeadEndContext,
 ) {
@@ -2402,7 +2401,9 @@ export function diagnosisNotice(
 			? failure.scenarios.filter((s) => SCENARIO_ID.test(s))
 			: [];
 
-	const detail = diagnosisDetail(failure);
+	const detail =
+		failure.kind === "unrepairable_check" ? null : diagnosisDetail(failure);
+
 	const extra = detail === null ? "" : ` ${detail}`;
 
 	const checks = (context?.failedChecks ?? []).filter((name) =>

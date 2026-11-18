@@ -110,6 +110,7 @@ export type CandidateEffectResult =
 						readonly report: TrustedReport | null;
 						readonly seats: readonly ReviewSeat[];
 						readonly assessment: ReadAssessment;
+						readonly automaticRepair?: "unrepairable_check";
 				  }
 				| {
 						readonly kind: "failed";
@@ -771,6 +772,7 @@ function failOrRepair(
 	state: Selected,
 	cause: RepairCause,
 	now: number,
+	automaticRepair?: "unrepairable_check",
 ): Selected {
 	if (state.published !== null)
 		return stopRound(
@@ -778,6 +780,9 @@ function failOrRepair(
 			cause.kind === "validation" ? "validation_failed" : "review_failed",
 			now,
 		);
+
+	if (automaticRepair === "unrepairable_check")
+		return finish(state, { kind: "failed", reason: automaticRepair });
 	const round = state.current.intent.round;
 
 	if (round === MAX_REPAIR_ROUNDS)
@@ -813,6 +818,7 @@ function assessedValidation(
 	verdict: Verdict,
 	read: ReadAssessment,
 	now: number,
+	automaticRepair?: "unrepairable_check",
 ): Selected {
 	const intent = current.intent;
 	const b = read.binding;
@@ -851,6 +857,7 @@ function assessedValidation(
 				assessed,
 				{ kind: "validation", assessment: read.ref },
 				now,
+				automaticRepair,
 			);
 		case "oracle":
 			return stopDiagnosed(assessed, "diagnosis_oracle", now);
@@ -2122,6 +2129,7 @@ function complete(
 				verdict,
 				c.result.assessment,
 				now,
+				c.result.automaticRepair,
 			);
 
 			if (

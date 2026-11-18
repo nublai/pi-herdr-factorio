@@ -264,6 +264,7 @@ const HOLD_TEXT: Readonly<Record<HandoffReason, string>> = {
 	workflow_unavailable:
 		"the run's pinned WORKFLOW.md cannot be read or verified",
 	validation_failed: "validation did not pass",
+	unrepairable_check: "the failed checks produced no repairable feedback",
 	evidence_unavailable: "required evidence is unavailable",
 	repair_limit: "the repair round allowance is used",
 	diagnosis_oracle: "the acceptance checks need attention",

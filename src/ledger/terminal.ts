@@ -265,6 +265,7 @@ const DIAGNOSIS_STOPS = {
 	diagnosis_oracle: "oracle",
 	diagnosis_infrastructure: "infrastructure",
 	validation_failed: "candidate",
+	unrepairable_check: "handoff",
 	repair_limit: "candidate",
 } as const;
 

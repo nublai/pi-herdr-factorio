@@ -387,7 +387,7 @@ function candidateValidator(
 					),
 				);
 
-				const failure = classifyFailure({
+				return classifyFailure({
 					receipt: raw ?? undefined,
 					identity: {
 						gateSha: state.baseSha,
@@ -418,10 +418,6 @@ function candidateValidator(
 					candidatePaths: patch.receipt.changedPaths,
 					baseRefusal: facts?.baseRefusal ?? null,
 				});
-
-				return failure.kind === "candidate" && feedbackOf(raw).length === 0
-					? { kind: "missing_evidence", reason: "unrepairable_check" }
-					: failure;
 			};
 
 			const diagnosed = async (verdict: Verdict): Promise<boolean> => {
@@ -507,6 +503,13 @@ function candidateValidator(
 					})) === "settled"
 				);
 			};
+
+			const automaticRepair = (verdict: Verdict) =>
+				!verdict.pass &&
+				jsonField(receiptOf(), "reason") === null &&
+				feedbackOf(receiptOf()).length === 0
+					? { automaticRepair: "unrepairable_check" as const }
+					: {};
 
 			const assess = (verdict: Verdict): ReadAssessment => {
 				const raw = receiptOf();
@@ -605,6 +608,7 @@ function candidateValidator(
 					state,
 					verdict,
 					assessment: assess(verdict),
+					...automaticRepair(verdict),
 				};
 			}
 
@@ -1013,7 +1017,13 @@ function candidateValidator(
 					: { kind: "waiting", state };
 			}
 
-			return { kind: "finished", state, verdict, assessment: assess(verdict) };
+			return {
+				kind: "finished",
+				state,
+				verdict,
+				assessment: assess(verdict),
+				...automaticRepair(verdict),
+			};
 		} catch (error) {
 			if (
 				error instanceof PublicationError &&
