@@ -15,6 +15,7 @@ import { ownerPatchValid } from "../../src/candidate/state.ts";
 import {
 	assessmentBinding,
 	checkFeedback,
+	checkRepairability,
 	CI_DEADLINE_MS,
 	collectTrustedReport,
 	collectVerdict,
@@ -344,6 +345,7 @@ function candidateValidator(
 			const failurePath = join(dir, "failure.json");
 			const receiptPath = join(dir, "receipt.json");
 			const checksPath = join(dir, "checks.json");
+			const repairabilityPath = join(dir, "check-repairability.json");
 
 			const receiptOf = () =>
 				objectOf(
@@ -504,12 +506,32 @@ function candidateValidator(
 				);
 			};
 
-			const automaticRepair = (verdict: Verdict) =>
-				!verdict.pass &&
-				jsonField(receiptOf(), "reason") === null &&
-				feedbackOf(receiptOf()).length === 0
+			const automaticRepair = (verdict: Verdict) => {
+				const evidence = present(repairabilityPath)
+					? arrayOf(parseJson(regularText(repairabilityPath, 64 * 1024)))
+					: null;
+
+				return !verdict.pass &&
+					jsonField(receiptOf(), "reason") === null &&
+					feedbackOf(receiptOf()).length === 0 &&
+					evidence !== null &&
+					verdict.checks.every(
+						(check) =>
+							check.passed ||
+							!FEEDBACK_CHECKS.some((name) => name === check.name) ||
+							evidence.some((entry) => {
+								const item = objectOf(entry);
+
+								return (
+									jsonField(item, "check") === check.name &&
+									jsonField(item, "logRead") === true &&
+									jsonField(item, "visibleFinding") === false
+								);
+							}),
+					)
 					? { automaticRepair: "unrepairable_check" as const }
 					: {};
+			};
 
 			const assess = (verdict: Verdict): ReadAssessment => {
 				const raw = receiptOf();
@@ -972,21 +994,23 @@ function candidateValidator(
 
 			keepValidationFile(receiptPath, text ?? "null\n");
 
-			// Written once: a later download may differ in which logs it fetched.
-			if (!present(checksPath))
+			const checkInput = {
+				logs,
+				failed: verdict.checks.flatMap((check) =>
+					check.passed ? [] : [check.name],
+				),
+				changedPaths: patch.receipt.changedPaths,
+				heldoutDir: heldout.directory,
+			};
+
+			if (!present(checksPath)) {
+				exclusive(checksPath, `${JSON.stringify(checkFeedback(checkInput))}\n`);
 				exclusive(
-					checksPath,
-					`${JSON.stringify(
-						checkFeedback({
-							logs,
-							failed: verdict.checks
-								.filter((check) => !check.passed)
-								.map((check) => check.name),
-							changedPaths: patch.receipt.changedPaths,
-							heldoutDir: heldout.directory,
-						}),
-					)}\n`,
+					repairabilityPath,
+					`${JSON.stringify(checkRepairability(checkInput))}\n`,
 				);
+			}
+
 			keepValidationFile(verdictPath, `${JSON.stringify(verdict)}\n`);
 
 			if (!(await diagnosed(verdict))) return { kind: "waiting", state };

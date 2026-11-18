@@ -1910,7 +1910,8 @@ async function jobWorld(
 		slow?: boolean;
 		drift?: string | null;
 		differentGateMaterializer?: boolean;
-		ciFailure?: { check: string; log: string };
+		ciFailures?: readonly { check: string; log: string }[];
+		receiptFallback?: boolean;
 		ciAbort?: "suppression_added" | "protected_path_changed";
 		successor?: boolean;
 	} = {},
@@ -2218,14 +2219,16 @@ async function jobWorld(
 		};
 	}
 
-	if (options.ciFailure !== undefined)
+	if (options.ciFailures !== undefined)
 		receipt = {
 			...receipt,
 			status: "failed",
 			reason: null,
 			checks: ci.checks.map((check) => ({
 				...check,
-				exitCode: check.name === options.ciFailure?.check ? 1 : 0,
+				exitCode: options.ciFailures?.some((f) => f.check === check.name)
+					? 1
+					: 0,
 			})),
 			heldoutFailures: [],
 		};
@@ -2323,6 +2326,24 @@ async function jobWorld(
 				created_at: "2026-11-03T00:00:00Z",
 			});
 
+		if (options.receiptFallback) {
+			if (path === "actions/runs/77/artifacts")
+				return { code: 1, stdout: "", stderr: "HTTP 503" };
+
+			if (path === "actions/runs/77/jobs")
+				return ok({ jobs: [{ name: "gates", id: 88 }] });
+
+			if (path === "actions/jobs/88/logs")
+				return {
+					code: 0,
+					stdout: JSON.stringify(receipt, null, 2)
+						.split("\n")
+						.map((line) => `2026-11-03T00:01:00Z ${line}`)
+						.join("\n"),
+					stderr: "",
+				};
+		}
+
 		throw new Error(`unexpected ${path}`);
 	};
 
@@ -2358,12 +2379,14 @@ async function jobWorld(
 			stateDir: state,
 			exec,
 			fetch,
-			receipt: async (_repo, _id, logs) => {
-				if (options.ciFailure !== undefined)
-					logs?.set(options.ciFailure.check, options.ciFailure.log);
+			receipt: options.receiptFallback
+				? undefined
+				: async (_repo, _id, logs) => {
+						for (const failure of options.ciFailures ?? [])
+							logs?.set(failure.check, failure.log);
 
-				return `${JSON.stringify(receipt)}\n`;
-			},
+						return `${JSON.stringify(receipt)}\n`;
+					},
 			diagnosis,
 		})({
 			runId,
@@ -2425,24 +2448,56 @@ function finishedAssessment(
 	return result.assessment;
 }
 
-for (const { check, log, repair } of [
+for (const { check, log, repair, fallback, extra } of [
 	{
 		check: "format",
 		log: "test/acceptance/999/checks/private.mjs format ━━━\nPRIVATE-HELDOUT-CONTENT",
 		repair: false,
+		fallback: false,
+		extra: [],
 	},
-	{ check: "main_tests", log: '{"bad":false,"failures":[]}', repair: false },
+	{
+		check: "main_tests",
+		log: '{"bad":false,"failures":[]}',
+		repair: false,
+		fallback: false,
+		extra: [],
+	},
 	{
 		check: "format",
 		log: "src/value.ts format ━━━\nPRIVATE-TOOL-OUTPUT",
 		repair: true,
+		fallback: false,
+		extra: [],
+	},
+	{
+		check: "typecheck",
+		log: "src/caller.ts(4,9): error TS2345: PRIVATE-TOOL-OUTPUT",
+		repair: true,
+		fallback: false,
+		extra: [],
+	},
+	{
+		check: "typecheck",
+		log: "src/value.ts(4,9): error TS2345: PRIVATE-TOOL-OUTPUT",
+		repair: true,
+		fallback: true,
+		extra: [],
+	},
+	{
+		check: "format",
+		log: "test/acceptance/999/checks/private.mjs format ━━━\nPRIVATE-HELDOUT-CONTENT",
+		repair: false,
+		fallback: false,
+		extra: [{ check: "main_tests", log: '{"bad":false,"failures":[]}' }],
 	},
 ])
 	scoped(
-		`#856 ${check} with ${repair ? "repairable" : "empty"} feedback ${repair ? "starts" : "stops before"} repair through the validator and candidate policy`,
+		`#856 ${check} with ${repair ? "repairable" : "empty"} feedback ${repair ? "starts" : "stops before"} repair through the validator and candidate policy${fallback ? " after artifact download failure" : extra.length > 0 ? " with count-only main_tests" : ""}`,
 		async (t) => {
 			const w = await jobWorld(t, "synthetic-wrong-value", {
-				ciFailure: { check, log },
+				ciFailures: [{ check, log }, ...extra],
+				receiptFallback: fallback,
 			});
 
 			const result = await w.step(w.owner());
@@ -2451,7 +2506,7 @@ for (const { check, log, repair } of [
 			assert.equal(result.verdict.pass, false);
 			assert.deepEqual(
 				JSON.parse(readFileSync(join(w.dir, "checks.json"), "utf8")),
-				repair ? [{ check: "format", file: "src/value.ts" }] : [],
+				repair && check === "format" ? [{ check, file: "src/value.ts" }] : [],
 			);
 			assert.deepEqual(result.assessment.assessment, {
 				kind: "failed",
@@ -2461,6 +2516,11 @@ for (const { check, log, repair } of [
 					scenarios: [],
 				},
 			});
+
+			const restored = await w.step(w.owner());
+			assert.ok(restored.kind === "finished");
+			assert.equal(restored.automaticRepair, result.automaticRepair);
+			assert.deepEqual(restored.assessment, result.assessment);
 
 			const observation = {
 				kind: "observed",
@@ -2485,22 +2545,33 @@ for (const { check, log, repair } of [
 
 			assert.ok(request.kind === "validate");
 
-			const completed = handoffCandidate(selected, {
-				kind: "effect_completed",
-				now: 101,
-				completion: {
-					kind: "validate",
-					request,
-					result: {
-						...result,
-						validation: result.state,
-						verdict: result.verdict,
-						assessment: result.assessment,
-						report: null,
-						seats: [],
+			const complete = (result: typeof restored) =>
+				handoffCandidate(selected, {
+					kind: "effect_completed",
+					now: 101,
+					completion: {
+						kind: "validate",
+						request,
+						result: {
+							...result,
+							validation: result.state,
+							verdict: result.verdict,
+							assessment: result.assessment,
+							report: null,
+							seats: [],
+						},
 					},
-				},
-			}).state;
+				}).state;
+
+			const recovered = complete(restored);
+			assert.ok(recovered.kind === "selected");
+			assert.equal(recovered.work.kind, repair ? "repair_due" : "effect");
+			assert.equal(
+				handoffCandidate(recovered, observation).effect?.kind,
+				repair ? "repair_build" : "finish_pr",
+			);
+
+			const completed = complete(result);
 
 			assert.ok(completed.kind === "selected");
 
@@ -2516,7 +2587,10 @@ for (const { check, log, repair } of [
 					result.assessment.ref,
 				);
 
-				assert.deepEqual(feedback, [{ check: "format", file: "src/value.ts" }]);
+				assert.deepEqual(
+					feedback,
+					check === "format" ? [{ check, file: "src/value.ts" }] : [],
+				);
 			} else {
 				assert.deepEqual(completed.work, {
 					kind: "effect",
@@ -2567,16 +2641,29 @@ for (const { check, log, repair } of [
 						stage: "validate",
 						class: "handoff",
 						reason: "unrepairable_check",
-						failedVisibleChecks: [check],
+						failedVisibleChecks: [
+							check,
+							...extra.map((failure) => failure.check),
+						],
 						retainedPatch: w.patch.patchDigest,
 					},
 				);
 			}
 
-			const restored = await w.step(w.owner());
-			assert.ok(restored.kind === "finished");
-			assert.equal(restored.automaticRepair, result.automaticRepair);
-			assert.deepEqual(restored.assessment, result.assessment);
+			assert.deepEqual(
+				JSON.parse(
+					readFileSync(join(w.dir, "check-repairability.json"), "utf8"),
+				),
+				check === "main_tests"
+					? []
+					: [
+							{
+								check,
+								logRead: !fallback,
+								visibleFinding: !fallback && repair,
+							},
+						],
+			);
 			assert.equal(w.fetches.length, 0);
 		},
 	);
@@ -2607,7 +2694,7 @@ scoped(
 	"#856 an open PR with empty CI feedback still starts an owner-comment repair",
 	async (t) => {
 		const w = await jobWorld(t, "synthetic-wrong-value", {
-			ciFailure: { check: "main_tests", log: '{"bad":false,"failures":[]}' },
+			ciFailures: [{ check: "main_tests", log: '{"bad":false,"failures":[]}' }],
 			successor: true,
 		});
 

@@ -615,6 +615,29 @@ const FACT_READERS: Readonly<
 	candidate_tests: testFacts,
 };
 
+export function checkRepairability(input: {
+	readonly logs: ReadonlyMap<string, string>;
+	readonly failed: readonly string[];
+	readonly heldoutDir: string;
+}) {
+	return FEEDBACK_CHECKS.flatMap((check) => {
+		if (!input.failed.includes(check)) return [];
+		const log = input.logs.get(check);
+
+		return [
+			{
+				check,
+				logRead: log !== undefined,
+				visibleFinding:
+					log !== undefined &&
+					FACT_READERS[check](log).some(
+						([file]) => !hiddenPath(file, input.heldoutDir),
+					),
+			},
+		];
+	});
+}
+
 /**
  * Fixed-form facts about the failed visible gate checks, for repair: at most
  * 20, deduplicated, shared fairly across the checks and each naming one of
