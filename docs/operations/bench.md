@@ -573,11 +573,16 @@ task bundles and a Git bundle of the desired committed factory checkout.
    mkdir -p "$HOME/bench"
    sha=$(git rev-parse HEAD)
    node host/cli/index.ts gates --repository "$PWD" \
+     --target-repo nublai/pi-herdr-factorio \
      --gate-sha "$sha" --candidate-sha "$sha" \
      --nonce bench-smoke --output "$HOME/bench/gate-smoke" \
      --replacements '[]' \
      --replacements-digest 4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
    ```
+
+   `--target-repo` names the trusted repository identity. The bench checkout is
+   unpinned Factorio source, so without it the gate refuses as
+   `unsupported_materializer` (#847).
 
    Require exit 0 and `status: "passed"` in
    `$HOME/bench/gate-smoke/receipt.json`, including an `install` check with
