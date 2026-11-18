@@ -302,7 +302,7 @@ test("L08 pins entire nonce-framed prompts without discarding untrusted payloads
 	);
 	pin(
 		prompts.map(normalizeNonce),
-		"2f9cc3ad9b2276071c6c59c8507e35fa5b1f047fe232b5da4f4700303fb3038e",
+		"c309fabb809bf2f853994893e3b415da642d297892b1e488e70b3a52d10c0119",
 	);
 });
 

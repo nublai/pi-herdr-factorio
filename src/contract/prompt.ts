@@ -809,12 +809,13 @@ export function reviewPrompt(input: SpecifyReviewInput, draft: string): string {
 	const untrusted = promptBlocks();
 
 	return [
-		"You review a draft contract for a software ticket. Flag only an ambiguity that would change an acceptance test: two readings of the ticket that need different tests. Ignore style, wording, missing nice-to-haves and implementation choices. Do not reopen a decision the draft explicitly settles consistently with the ticket. No tools.",
+		"You review a draft contract for a software ticket. Flag only an ambiguity that would change an acceptance test: two readings of the ticket that need different tests, or a missing replacement for an existing test whose exact sequence the ticket must alter. Ignore style, wording, missing nice-to-haves and implementation choices. Do not reopen a decision the draft explicitly settles consistently with the ticket. No tools.",
+		"Checklist: Which existing tests pin an exact sequence that this change alters, and are they named? Check the draft's repository evidence for full arrays of requests, events or calls, exact counts, snapshot or golden text, including digest-based pins. A missing entry in replacesTests is a finding. Name the exact test and path from that evidence and explain why the ticket must alter its expected sequence. Do not invent repository facts or test names.",
 		UNTRUSTED_RULE,
 		untrusted("issue", `${input.title}\n\n${input.body}`),
 		...clarificationBlocks(input.answers, untrusted),
 		untrusted("draft", draft),
-		'Reply with exactly JSON: {"kind":"no_finding"} or {"kind":"ambiguities","ambiguities":["<concrete ambiguity and the acceptance criterion it changes>"]}. Return 1 to 3 ambiguities, each one line of at most 300 characters. Nothing else.',
+		'Reply with exactly JSON: {"kind":"no_finding"} or {"kind":"ambiguities","ambiguities":["<concrete ambiguity and the acceptance criterion it changes, or a missing exact-sequence test replacement>"]}. Return 1 to 3 ambiguities, each one line of at most 300 characters. Nothing else.',
 	].join("\n\n");
 }
 
@@ -826,7 +827,7 @@ export function revisionPrompt(
 	const untrusted = promptBlocks();
 
 	return [
-		"Revise this draft only for the concrete acceptance-test ambiguities in the critique. Keep everything else. Use facts already in the draft and the ticket; do not invent repository facts. If they cannot settle a consequential choice, return specific questions instead. No tools.",
+		"Revise this draft only for the concrete acceptance-test ambiguities or missing exact-sequence test replacements in the critique. Add each missing test to replacesTests using its exact name and path from the draft's repository evidence and a reason tied to the ticket. Keep everything else. Use facts already in the draft and the ticket; do not invent repository facts. If they cannot settle a consequential choice, return specific questions instead. No tools.",
 		UNTRUSTED_RULE,
 		untrusted("issue", `${input.title}\n\n${input.body}`),
 		...clarificationBlocks(input.answers, untrusted),
@@ -846,7 +847,7 @@ files entries must be repository file paths, not directories.
 Questions, when a decision that changes behavior is open and the repository does not answer it:
 {"kind":"questions","questions":[{"text":"<one specific question>","cites":[{"path":"<repo path>","start":<line>,"end":<line>}]}]}
 
-Optional contract field, for a ticket that intentionally changes behavior an existing test pins: "replacesTests":[{"path":"test/existing.test.ts","test":"exact test name","reason":"One line tying the change to the ticket"}]. Read the existing tests that exercise the behavior the ticket changes, and list each test whose assertions the ticket makes wrong: its file, the exact name string its test or it call declares, and why the ticket changes it. Name only existing files in the trusted base gate policy's testGlobs inventory under test/, regardless of filename suffix, never a directory, a helper outside that inventory, .github or test/acceptance, and at most ${MAX_REPLACED_TESTS} tests. Omit the field for a purely additive change or when no existing test pins the old behavior. The builder may update only the listed tests, review judges each replacement against the ticket, and every other existing test stays mandatory.
+Optional contract field, for a ticket that intentionally changes behavior an existing test pins: "replacesTests":[{"path":"test/existing.test.ts","test":"exact test name","reason":"One line tying the change to the ticket"}]. Read the existing tests that exercise the behavior the ticket changes, and list each test whose assertions the ticket makes wrong: its file, the exact name string its test or it call declares, and why the ticket changes it. Look for full arrays of requests, events or calls, exact counts, snapshot or golden text, including digest-based pins. List each such test only when the ticket must alter its expected sequence, even if the ticket does not name it. In evidence, cite its exact test name, the pinned sequence and why the ticket must alter it, so the tool-less reviewer can check for missing replacements. Name only existing files in the trusted base gate policy's testGlobs inventory under test/, regardless of filename suffix, never a directory, a helper outside that inventory, .github or test/acceptance, and at most ${MAX_REPLACED_TESTS} tests. Omit the field for a purely additive change or when no existing test pins the old behavior. The builder may update only the listed tests, review judges each replacement against the ticket, and every other existing test stays mandatory.
 
 Rules: every string is one line of at most ${LINE_MAX} characters. behavior has 1-${MAX_BEHAVIOR} items, acceptance 1-${MAX_CRITERIA}, questions 1-${MAX_QUESTIONS}, cites at most ${MAX_CITES} per question. Every cited path must exist in the checkout. Ask a question only for a decision the repository cannot settle, and never ask what the repository already answers.`;
 
@@ -889,7 +890,7 @@ export function specifyPrompt(input: PromptInput): string {
 		`You are the factory's specify stage for ${input.repo} at commit ${input.baseSha}. The repository is checked out read-only at /workspace. You have the read, grep and ls tools.`,
 		"",
 		"Procedure:",
-		"1. Read the issue. Settle every fact you can from the repository map and the inlined files below first. Then use at most three read, grep or ls calls, only under /workspace, with offset and limit on large files. Never ask the owner what the repository answers.",
+		"1. Read the issue. Settle every fact you can from the repository map and the inlined files below first. Then use at most three read, grep or ls calls, only under /workspace, with offset and limit on large files. Search the repository for existing tests that exercise the changed code paths and pin a complete or ordered sequence. Never ask the owner what the repository answers.",
 		"2. If a decision that changes behavior is still open, reply with questions and stop.",
 		"3. Otherwise return the draft contract. The controller reviews it separately. Your final reply is the JSON object only.",
 		"",

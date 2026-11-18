@@ -90,6 +90,7 @@ import {
 	sourceExcerpts,
 	sourceFacts,
 	renderInlined,
+	specifyPrompt,
 } from "../../../src/contract/prompt.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11019,6 +11020,142 @@ describe("controller-run specify review", () => {
 			assert.deepEqual(h.calls[2]?.tools, []);
 			assert.match(h.calls[2]?.prompt ?? "", /<critique-[0-9a-f]{32}>/);
 			assert.equal(readFileSync(join(h.dir, "output.txt"), "utf8"), QUESTIONS);
+		} finally {
+			h.close();
+		}
+	});
+
+	it("revises a missing ordered-log replacement from critique without repository tools", async () => {
+		const path = "test/src/announce.test.ts";
+		const title = "pins the ordered log lines";
+		const repo = "owner/logger";
+		const sha = "b".repeat(40);
+		assert.ok(isRepoSlug(repo) && isGitSha(sha));
+
+		const source =
+			'export function announce(log) { log("start"); log("finish"); }\n';
+
+		const test = [
+			'import assert from "node:assert/strict";',
+			'import { it } from "node:test";',
+			'import { announce } from "../../src/announce.ts";',
+			`it(${JSON.stringify(title)}, () => {`,
+			"  const lines = [];",
+			"  announce((line) => lines.push(line));",
+			'  assert.deepEqual(lines, ["start", "finish"]);',
+			"});",
+		].join("\n");
+
+		const issue = {
+			title: "Log progress during announcement",
+			body: 'In src/announce.ts, announce must log "progress" between "start" and "finish".',
+			answers: null,
+			files: ["src/announce.ts", path],
+		};
+
+		const draft = {
+			kind: "contract",
+			summary: issue.title,
+			behavior: ['announce logs "progress" between "start" and "finish"'],
+			exclusions: [],
+			acceptance: [
+				{
+					kind: "new_behavior",
+					text: "The log order is start, progress, finish",
+				},
+			],
+			compatibility: [],
+			limits: [],
+			files: issue.files,
+			evidence: [
+				{
+					path: "src/announce.ts",
+					start: 1,
+					end: 1,
+					fact: "announce logs start then finish",
+				},
+				{
+					path,
+					start: 4,
+					end: 8,
+					fact: `${title} asserts the complete array [start, finish]`,
+				},
+			],
+		};
+
+		const replacement = {
+			path,
+			test: title,
+			reason: "The ticket inserts progress into the exact log array",
+		};
+
+		const finding = `${path}: ${title} pins [start, finish], which the ticket changes. Missing from replacesTests.`;
+
+		const h = setup([
+			JSON.stringify(draft),
+			JSON.stringify({ kind: "ambiguities", ambiguities: [finding] }),
+			JSON.stringify({ ...draft, replacesTests: [replacement] }),
+		]);
+
+		try {
+			mkdirSync(join(h.dir, "src"));
+			mkdirSync(join(h.dir, "test/src"), { recursive: true });
+			writeFileSync(join(h.dir, "src/announce.ts"), source);
+			writeFileSync(join(h.dir, path), test);
+
+			const result = await specifyModule.runSpecify(
+				{
+					...h.run,
+					specify: issue,
+					testFiles: [path],
+					prompt: specifyPrompt({
+						...issue,
+						repo,
+						baseSha: sha,
+						guidance: { general: "", stages: {} },
+						inlined: [inlined("src/announce.ts", source), inlined(path, test)],
+					}),
+				},
+				h.dir,
+				h.create,
+			);
+
+			assert.equal(result.kind, "passed");
+			assert.deepEqual(
+				h.calls.map((call) => call.tools),
+				[["read", "grep", "ls"], [], []],
+			);
+			const prompt = h.calls[0]?.prompt ?? "";
+			assert.match(prompt, /Search the repository for existing tests/);
+
+			for (const pin of [
+				"requests",
+				"events",
+				"calls",
+				"exact counts",
+				"snapshot",
+				"golden",
+				"digest",
+			])
+				assert.ok(prompt.includes(pin), pin);
+			assert.match(prompt, /evidence.*exact test name.*sequence/);
+			assert.ok(prompt.includes(test.split("\n")[6] ?? "missing assertion"));
+			const critique = h.calls[1]?.prompt ?? "";
+			assert.ok(
+				critique.includes(
+					"Which existing tests pin an exact sequence that this change alters, and are they named?",
+				),
+			);
+			assert.match(critique, /missing.*replacesTests.*finding/);
+			assert.ok(critique.includes(JSON.stringify(draft)));
+			const revision = h.calls[2]?.prompt ?? "";
+			assert.ok(revision.includes(finding));
+			assert.match(revision, /Add.*missing.*replacesTests/);
+			assert.deepEqual(
+				JSON.parse(readFileSync(join(h.dir, "output.txt"), "utf8"))
+					.replacesTests,
+				[replacement],
+			);
 		} finally {
 			h.close();
 		}
