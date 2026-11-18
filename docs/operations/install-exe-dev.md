@@ -104,7 +104,7 @@ Adapt the [Agents config patch](examples/onboarding/pi-herdr-agents/README.md#ex
 
 Put the new-test location in builder-visible WORKFLOW guidance. New tests must go where the target's existing test command already looks. The factory restores main's package scripts, so adding a file to `package.json` cannot register it. For Agents, use `test/maestro/<name>.test.ts` and import `../clean-host-env.ts` first.
 
-Keep per-file test generators count-stable. Under v1, an exact-count gate fails added files; under v2, increases pass only when every test passes. Use one aggregate test that retains every assertion and reports offending paths instead of varying the registered count.
+Keep per-file test generators count-stable. The trusted `main_tests` check requires each main test file's count to match the baseline exactly, so a generator that registers one test per file fails every candidate that adds a file. Use one aggregate test that retains every assertion and reports offending paths instead of varying the registered count.
 
 ### Repository selection and reruns
 

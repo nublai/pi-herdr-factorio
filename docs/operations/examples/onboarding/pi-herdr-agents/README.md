@@ -143,7 +143,7 @@ The four configured globs are `test/test.ts`, `test/*.test.ts`, `test/*.test.js`
 
 Put new tests where the target's existing test command already looks, not merely where `testGlobs` allows them. The factory restores main's package scripts, so a builder cannot register a new test by editing `package.json`. For Agents, use `test/maestro/<name>.test.ts` with `import "../clean-host-env.ts";` first. Keep this placement rule in the target's builder-visible WORKFLOW guidance.
 
-Keep per-file test generators count-stable. Under v1, an exact-count gate fails added files; under v2, increases pass only when every test passes. Use one aggregate test that checks every discovered file and reports the offending paths. Agents #157 applied that change to its environment-scrub test without dropping the guard.
+Keep per-file test generators count-stable. The trusted `main_tests` check requires each main test file's count to match the baseline exactly, so a generator that registers one test per file fails every candidate that adds a file. Use one aggregate test that checks every discovered file and reports the offending paths. Agents #157 applied that change to its environment-scrub test without dropping the guard.
 
 Before enabling, Root must prove those host/unit tests under the pinned image, read-only tree, frozen reporter, concurrency 3, and 60-second per-file limit. The gate has no network, 4 GiB RAM, 512 PIDs, and 1 GiB tmpfs. Local parser and inventory checks do not prove this compatibility.
 

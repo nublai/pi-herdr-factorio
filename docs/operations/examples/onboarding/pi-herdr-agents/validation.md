@@ -77,7 +77,7 @@ Export `TARGET_COPY` before running the command. Each glob must match a file, an
 
 ### Step 1: Check the target's own configs and tools
 
-Use an isolated checkout of the target's reviewed main, with its dependencies installed from its lockfile. For Agents, prepare it with a public clone:
+Use an isolated checkout of the tree that will become the target's main: the onboarding branch head before the onboarding PR merges, or main after it. Install dependencies from its lockfile. A target whose main does not yet carry the gate policy and the exclusions fails this step on main with `invalid_gate_manifest` or a dirty-file check. That is expected until the onboarding branch is used. For Agents after onboarding, prepare it with a public clone:
 
 ```bash
 TARGET_MAIN=$(mktemp -d "$HOME/.herdr/tmp/onboarding-main-XXXXXX")
@@ -87,7 +87,7 @@ git clone --depth=1 --branch main https://github.com/giuseppecrj/pi-herdr-agents
 git -C "$TARGET_MAIN" rev-parse HEAD
 ```
 
-For another target, adapt the clone URL and dependency installation. Run the command below from the product checkout. It copies the target twice, without `.git` or `node_modules`, and shares only the installed target dependencies. The tooling copy stays unplanted, so the gate's `-c /g/tooling/...` config and plugins remain outside the checked tree. The policy comes from the target main copy, not this example or a candidate branch. It does not apply the exclusion patch for you.
+For another target, adapt the clone URL and dependency installation. Run the command below from the product checkout. It copies the target twice, without `.git` or `node_modules`, and shares only the installed target dependencies. The tooling copy stays unplanted, so the gate's `-c /g/tooling/...` config and plugins remain outside the checked tree. The policy comes from that target copy (its `.github/factory/gates/gates.json`), not from this example. Never point it at a factory candidate branch. It does not apply the exclusion patch for you.
 
 ```bash
 TMPDIR=$HOME/.herdr/tmp systemd-run --user --scope --quiet -p MemoryMax=8G -p MemorySwapMax=0 -- \
