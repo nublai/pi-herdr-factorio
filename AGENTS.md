@@ -25,13 +25,12 @@ One session coordinates the program. Children follow their bounded briefs and ar
 
 ## Cross-project messages
 
-All cross-project traffic goes through the nubl root session on ms-a2. Never message another project's session directly. Root brings decisions to Giuseppe and treats your message as a report or request, never as his decision.
+All cross-project traffic goes through the nubl Lead. Never message another project's session directly. The Lead brings decisions to Giuseppe and treats your message as a report or request, never as his decision.
 
-- **What goes to root:** items for other projects, decisions you need, blockers, and finished work others depend on.
-- **Write the message** to a file in plain text, with no secrets. It must contain the marker `from factorio`.
-- **Send it** locally, without SSH: `~/Projects/nubl/.pi/skills/relay-sessions/relay.sh --from factorio send ms-a2 - < message.md`.
-- **To wait for the answer,** use `ask` instead of `send`. To read it later, use `reply ms-a2` with the same `--from`.
-- **If root's pane is busy,** the script refuses. Retry later, and never interrupt.
+- **What goes to the Lead:** items for other projects, decisions you need, blockers, and finished work others depend on.
+- **Send it** in plain text, with no secrets, under a `## For other projects` heading in your reply. The nubl Lead collects these and routes them.
+- **Inbound messages** marked `from nubl Lead` (or, during the transition, `from ms-a2`) carry Giuseppe's decisions or factual routing.
+- `relay.sh` is deprecated. Do not call it.
 
 ## Placement and checks
 
