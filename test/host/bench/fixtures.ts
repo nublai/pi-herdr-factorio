@@ -40,6 +40,7 @@ export async function benchFixture(
 		large?: boolean;
 		ambiguous?: boolean;
 		repositoryGatePolicy?: boolean;
+		sequencePins?: boolean;
 		historicalMaterializer?: boolean;
 		maxAttempts?: number;
 		maxTokensPerRun?: number;
@@ -60,7 +61,10 @@ export async function benchFixture(
 				? {
 						version: 2,
 						sourceRoots: ["src"],
-						testGlobs: ["test/src/**/*.test.ts"],
+						testGlobs: [
+							"test/src/**/*.test.ts",
+							...(options.sequencePins ? ["test/src/trace.ts"] : []),
+						],
 						checks: [
 							{
 								name: "typecheck",
@@ -154,6 +158,20 @@ export async function benchFixture(
 		"import {test} from 'node:test'; test('base', () => {});\n" +
 			(options.ambiguous ? "test('base', () => {});\n" : ""),
 	);
+
+	if (options.sequencePins) {
+		put(
+			repository,
+			"test/helpers/trace.ts",
+			"import { value } from '../../src/value.ts'; export const events = [value];\n",
+		);
+		put(
+			repository,
+			"test/src/trace.ts",
+			"import assert from 'node:assert/strict'; import { test } from 'node:test'; import { events } from '../helpers/trace.ts'; test('pins ordered events through a helper', () => assert.deepEqual(events, [0]));\n",
+		);
+	}
+
 	put(
 		repository,
 		"test/acceptance/published/secret.test.ts",

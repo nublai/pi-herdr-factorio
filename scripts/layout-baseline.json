@@ -3115,6 +3115,13 @@
 			"targets": [{ "path": "host/cli/index.ts", "type": "file" }]
 		},
 		{
+			"id": "test-reads-bench-run-cli",
+			"kind": "paths",
+			"reader": "test/host/bench/run.test.ts",
+			"tokens": { "new URL(\"../../../host/cli/index.ts\", import.meta.url)": 2 },
+			"targets": [{ "path": "host/cli/index.ts", "type": "file" }]
+		},
+		{
 			"id": "bench-source-root",
 			"kind": "paths",
 			"reader": "host/bench/run.ts",

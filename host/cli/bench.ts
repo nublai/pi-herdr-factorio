@@ -1,6 +1,10 @@
-import { resolve } from "node:path";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { isDigest } from "../../src/core/run.ts";
+import { parseJson, textsOf } from "../../src/core/json.ts";
+import { candidateFacts } from "../../src/contract/prompt.ts";
 import { compareTrials } from "../../src/bench/compare.ts";
 import type { PlatformProfile } from "../../src/trust/platform.ts";
 import { exportBundle, verifyBundle } from "../bench/export.ts";
@@ -10,6 +14,7 @@ import { type CliIo, EXIT } from "./platform.ts";
 const USAGE = `Usage:
   bench export --state-dir <dir> --run <id> --out <dir> [--repository <checkout>]
   bench verify <bundle>
+  bench candidates --bundle <dir> --files '<JSON draft files array>'
   bench compare <trial-dirs...>
   bench spend <trial-dirs...>
   bench run --bundle <dir> --variant <file> --state-dir <scratch> --token-cap <n> [--assets-dir <dir>]`;
@@ -25,6 +30,7 @@ function parseBenchArgs(argv: readonly string[]) {
 			out: { type: "string" },
 			repository: { type: "string" },
 			bundle: { type: "string" },
+			files: { type: "string" },
 			variant: { type: "string" },
 			"token-cap": { type: "string" },
 			"assets-dir": { type: "string" },
@@ -69,6 +75,13 @@ export async function runBenchCli(
 		Boolean(bundle) &&
 		Object.keys(values).length === 0;
 
+	const isCandidates =
+		command === "candidates" &&
+		positionals.length === 1 &&
+		Boolean(values.bundle) &&
+		values.files !== undefined &&
+		Object.keys(values).every((key) => ["bundle", "files"].includes(key));
+
 	const cap = Number(values["token-cap"]);
 
 	const isRun =
@@ -90,13 +103,45 @@ export async function runBenchCli(
 		positionals.length > 1 &&
 		Object.keys(values).length === 0;
 
-	if (!isExport && !isVerify && !isRun && !isReport) {
+	if (!isExport && !isVerify && !isRun && !isReport && !isCandidates) {
 		io.stderr(`${USAGE}\n`);
 
 		return EXIT.usage;
 	}
 
 	try {
+		if (isCandidates && values.bundle !== undefined) {
+			const files = textsOf(parseJson(values.files ?? ""));
+
+			if (files === null) throw new Error("invalid_draft_files");
+			verifyBundle(values.bundle);
+			const { unpackBase } = await import("../bench/archive.ts");
+			const { respecInputs } = await import("../bench/respec.ts");
+			const { sequenceCandidates } = await import("../sandbox/specify.ts");
+			const tree = mkdtempSync(join(tmpdir(), "bench-candidates-"));
+
+			try {
+				const listed = unpackBase(
+					readFileSync(join(values.bundle, "builder/base.tar")),
+					tree,
+				);
+
+				const { base, testFiles } = await respecInputs(tree, listed);
+
+				const candidates = await sequenceCandidates(
+					base,
+					files,
+					testFiles ?? [],
+				);
+
+				io.stdout(`${candidateFacts(candidates)}\n`);
+			} finally {
+				rmSync(tree, { recursive: true, force: true });
+			}
+
+			return EXIT.ok;
+		}
+
 		if (isReport) {
 			const { benchSpend, readBenchTrials } = await import(
 				"../bench/report.ts"

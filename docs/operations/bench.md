@@ -165,10 +165,32 @@ bundle's original base and unchanged admission snapshot, not current main or
 live issue text. Never edit a generated contract or inject `replacesTests`.
 An absent replacement list is valid, including for #789's build-only scope.
 
+Before a respec trial whose goal depends on sequence-pinning candidates, run
+this no-model probe with the draft's intended `files` list:
+
+```sh
+node host/cli/index.ts bench candidates --bundle "$BUNDLE" \
+  --files '["src/controller/orchestrator.ts"]'
+```
+
+The probe verifies the bundle, unpacks its frozen base into private temporary
+storage, and prints exactly the critique's candidate block. It uses the same
+trusted test inventory, selector, ranking, and truncation limits as respec.
+It reads no workspace, runs no tests or models, makes no network request, and
+removes its temporary tree. The bundle stays unchanged. Exit 0 means the block
+was rendered, not that any candidate needs replacement. Invalid evidence exits
+1; invalid command syntax exits 2. Keep this output private with the trial evidence.
+Require the expected test's exact path and title in the block before spending
+tokens on a candidate-dependent trial. If it is absent, stop and diagnose the
+inventory or selection rather than edit the generated contract.
+
 This mode uses production's `runSpecify`: draft, separate critique, optional
-revision, and exact named-test declaration checks. Unknown or ambiguous test
-names refuse. Questions end the trial locally; nothing is posted. The generated
-draft is wrapped unchanged in a new trial-bound contract envelope. As in
+revision, and exact named-test declaration checks. Specify receives a read-only,
+size-bounded reader of the unpacked frozen base, never the authoring workspace,
+and the trusted base policy's test inventory, including suffix-less v2 tests.
+Unknown or ambiguous test names refuse. Questions end the trial locally;
+nothing is posted. The generated draft is wrapped unchanged in a new trial-bound
+contract envelope. As in
 production, its rendered summary must fit the GitHub comment limit even though
 the bench does not post it. Specify and accept share a fresh authoring checkout
 from the offline archive adapter, with production's complete file list, including

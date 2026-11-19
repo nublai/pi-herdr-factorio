@@ -124,6 +124,7 @@ async function harness(
 				| "accept_tool_limit";
 		};
 		onFinalBaseRun?: () => void;
+		onSpecifyDraft?: (workspace: string) => void;
 		sleepAdvancesClock?: boolean;
 		respec?:
 			| "on"
@@ -388,6 +389,12 @@ async function harness(
 						config.attempt <= (options.failure.attempts ?? Infinity)
 							? options.failure
 							: undefined;
+
+					if (
+						config.stage === "specify" &&
+						basename(config.stageDir ?? "") === "draft"
+					)
+						options.onSpecifyDraft?.(config.workspace);
 
 					calls.push(model);
 					workspaces.push({
@@ -876,6 +883,66 @@ describe("bench run offline CLI", (suite) => {
 			if (stage === "specify")
 				assert.ok(prompt?.includes("test/acceptance/published/secret.test.ts"));
 		}
+	});
+
+	it("respec critique selects ordered-sequence tests through helpers from the frozen base and v2 inventory", {
+		timeout: 30000,
+	}, async (t) => {
+		const f = await harness(t, false, 1, {
+			respec: "on",
+			repositoryGatePolicy: true,
+			sequencePins: true,
+			onSpecifyDraft: (workspace) => {
+				put(
+					workspace,
+					"test/src/trace.ts",
+					"import { test } from 'node:test'; test('workspace-only trace', () => {});\n",
+				);
+				put(workspace, "test/helpers/trace.ts", "export const events = [];\n");
+			},
+		});
+
+		const result = await f.run();
+		assert.equal(result.code, 0, result.stderr);
+
+		const critique = f.prompts.find((prompt) =>
+			prompt.startsWith("You review a draft contract"),
+		);
+
+		assert.ok(critique !== undefined, "respec must reach critique");
+		assert.ok(
+			critique.includes(
+				'test/src/trace.ts > "pins ordered events through a helper"',
+			),
+			"critique must receive the frozen base's exact test title",
+		);
+		assert.ok(!critique.includes("no trusted base reader"));
+		assert.ok(!critique.includes("workspace-only trace"));
+		assert.ok(critique.includes("Candidate list truncated: false"));
+
+		const probe = execFileSync(
+			process.execPath,
+			[
+				new URL("../../../host/cli/index.ts", import.meta.url).pathname,
+				"bench",
+				"candidates",
+				"--bundle",
+				f.bundle,
+				"--files",
+				JSON.stringify(["src/value.ts"]),
+			],
+			{ encoding: "utf8", timeout: 10000 },
+		);
+
+		const start = critique.indexOf("Controller-selected sequence-pinning");
+		assert.ok(start >= 0);
+		const block = critique.slice(start, critique.indexOf("\n\n", start));
+
+		assert.equal(
+			digestOf(probe.trim()),
+			digestOf(block),
+			"probe must match the critique's complete candidate block",
+		);
 	});
 
 	it("837b respec keeps running-product tooling for draft and final base qualification", () => {
