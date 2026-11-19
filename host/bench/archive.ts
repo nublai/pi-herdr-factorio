@@ -2,8 +2,9 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isBundlePath } from "../../src/bench/bundle.ts";
 
-export function unpackBase(archive: Buffer, destination: string): void {
+export function unpackBase(archive: Buffer, destination: string): string[] {
 	const seen = new Set<string>();
+	const files: string[] = [];
 	let paxPath: string | null = null;
 
 	const field = (header: Buffer, offset: number, length: number) =>
@@ -15,7 +16,7 @@ export function unpackBase(archive: Buffer, destination: string): void {
 	for (let at = 0; at + 512 <= archive.length; ) {
 		const header = archive.subarray(at, at + 512);
 
-		if (header.every((byte) => byte === 0)) return;
+		if (header.every((byte) => byte === 0)) return files.sort();
 		const sizeText = field(header, 124, 12).trim();
 
 		if (!/^[0-7]+$/.test(sizeText)) throw new Error("base_archive_header");
@@ -80,6 +81,7 @@ export function unpackBase(archive: Buffer, destination: string): void {
 				flag: "wx",
 				mode: mode & 0o111 ? 0o700 : 0o600,
 			});
+			files.push(path);
 		} else throw new Error("base_tree_unsupported");
 	}
 

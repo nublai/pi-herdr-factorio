@@ -810,7 +810,7 @@ type SequenceCandidates = {
 	readonly truncated: boolean;
 };
 
-function candidateFacts(candidates: SequenceCandidates | null): string {
+export function candidateFacts(candidates: SequenceCandidates | null): string {
 	if (candidates === null)
 		return "Controller-selected sequence-pinning test candidates unavailable: no trusted base reader. Use the draft's repository evidence; do not infer that no existing test needs replacement.";
 

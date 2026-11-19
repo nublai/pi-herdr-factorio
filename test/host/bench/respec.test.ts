@@ -6,6 +6,7 @@ import {
 	mkdtempSync,
 	readFileSync,
 	rmSync,
+	symlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +14,7 @@ import { describe, it, type TestContext } from "node:test";
 import {
 	offlineArchiveFetch,
 	respecBench,
+	respecInputs,
 } from "../../../host/bench/respec.ts";
 import { verifyBundle } from "../../../host/bench/export.ts";
 import { checkoutWorkspace } from "../../../host/controller/checkout.ts";
@@ -20,7 +22,7 @@ import { parseWorkflow } from "../../../src/config/parse.ts";
 import { isGitSha } from "../../../src/config/schema.ts";
 import { digestOf } from "../../../src/core/run.ts";
 import { EXE_DEV_PLATFORM, isRepoSlug } from "../../../src/trust/platform.ts";
-import { benchFixture } from "./fixtures.ts";
+import { benchFixture, put } from "./fixtures.ts";
 
 async function fixture(t: TestContext) {
 	const root = mkdtempSync(join(tmpdir(), "bench-respec-"));
@@ -83,6 +85,52 @@ describe("offline respec authoring", () => {
 		assert.equal(networkCalls, 0);
 	});
 
+	it("bounds frozen base reads and refuses unlisted paths and symlinks", async (t) => {
+		const f = await fixture(t);
+		symlinkSync(
+			join(f.repository, "src/value.ts"),
+			join(f.repository, "linked.ts"),
+		);
+
+		const { base, testFiles } = await respecInputs(f.repository, [
+			"linked.ts",
+			"src/value.ts",
+			"test/src/value.test.ts",
+			".github/factory/gates/gates.json",
+		]);
+
+		assert.deepEqual(testFiles, ["test/src/value.test.ts"]);
+		assert.equal(await base.readBase("src/value.ts", 1), null);
+		assert.equal(await base.readBase("../source/src/value.ts", 1024), null);
+		assert.equal(await base.readBase("package.json", 1024), null);
+		assert.equal(await base.readBase("linked.ts", 1024), null);
+		assert.equal(
+			await base.readBase("src/value.ts", 1024),
+			"export const value = 0;\n",
+		);
+	});
+
+	it("refuses invalid, empty or overlapping trusted test inventories", async (t) => {
+		const f = await fixture(t);
+		const path = ".github/factory/gates/gates.json";
+		const files = [path, "test/src/value.test.ts"];
+
+		for (const policy of [
+			{ version: 3, testGlobs: ["test/src/**/*.test.ts"] },
+			{ version: 2, testGlobs: ["test/src/missing.test.ts"] },
+			{
+				version: 2,
+				testGlobs: ["test/src/**/*.test.ts", "test/src/value.test.ts"],
+			},
+		]) {
+			put(f.repository, path, JSON.stringify(policy));
+			await assert.rejects(
+				respecInputs(f.repository, files),
+				/test_inventory_invalid/,
+			);
+		}
+	});
+
 	it("refuses mismatched frozen snapshot or base bindings before model work", async (t) => {
 		const f = await fixture(t);
 
@@ -108,6 +156,7 @@ describe("offline respec authoring", () => {
 					bundle: f.bundle,
 					state: f.root,
 					workspace: f.repository,
+					base: f.repository,
 					task,
 					id: digestOf("new trial"),
 					assets: f.assets,

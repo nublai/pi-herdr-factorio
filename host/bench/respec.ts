@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { mkdirSync, renameSync } from "node:fs";
-import { join } from "node:path";
+import { join, matchesGlob } from "node:path";
 import type { TaskBundle } from "../../src/bench/bundle.ts";
 import type { BenchRespec } from "../../src/bench/trial.ts";
 import {
@@ -11,6 +11,7 @@ import {
 	type BaseRefusal,
 	type RetryFeedback,
 } from "../../src/candidate/diagnosis.ts";
+import { trustedTestGlobsOf } from "../../src/candidate/review.ts";
 import type { Guidance, WorkflowConfig } from "../../src/config/schema.ts";
 import {
 	ACCEPTANCE_MAX_TOKENS,
@@ -57,6 +58,7 @@ import { digestOf, type Digest } from "../../src/core/run.ts";
 import { parseRecord, snapshotDigest } from "../../src/trust/admission.ts";
 import { controllerDraftChecker } from "../controller/checkers.ts";
 import {
+	checkoutOf,
 	checkoutWorkspace,
 	type TarballFetch,
 } from "../controller/checkout.ts";
@@ -92,6 +94,46 @@ export function offlineArchiveFetch(
 	};
 }
 
+export async function respecInputs(tree: string, files: readonly string[]) {
+	const checkout = checkoutOf(tree, files);
+	const base = { files, readBase: checkout.read };
+
+	if (!files.includes(".github/factory/gates/gates.json"))
+		return { base, testFiles: undefined };
+
+	const text = await base.readBase(
+		".github/factory/gates/gates.json",
+		256 * 1024,
+	);
+
+	if (text === null) throw new Error("test_inventory_unavailable");
+	const policy = objectOf(parseJson(text));
+	const version = fieldOf(policy, "version");
+	const globs = trustedTestGlobsOf(fieldOf(policy, "testGlobs"));
+
+	if ((version !== 1 && version !== 2) || globs === null)
+		throw new Error("test_inventory_invalid");
+
+	const groups = globs.map((glob) =>
+		files.filter(
+			(path) =>
+				!path.startsWith("test/acceptance/") &&
+				!path.startsWith("test/fixtures/") &&
+				matchesGlob(path, glob),
+		),
+	);
+
+	const testFiles = groups.flat().sort();
+
+	if (
+		groups.some((files) => files.length === 0) ||
+		new Set(testFiles).size !== testFiles.length
+	)
+		throw new Error("test_inventory_invalid");
+
+	return { base, testFiles };
+}
+
 function keep(path: string, text: string): void {
 	if (!publishFile(path, text))
 		throw new Error("respec_artifact_publish_failed");
@@ -114,6 +156,7 @@ export async function respecBench(input: {
 	readonly bundle: string;
 	readonly state: string;
 	readonly workspace: string;
+	readonly base: string;
 	readonly task: TaskBundle;
 	readonly id: Digest;
 	readonly assets: string;
@@ -211,6 +254,7 @@ export async function respecBench(input: {
 	if (authoring.kind !== "ready")
 		throw new Error("respec_authoring_checkout_unavailable");
 	const { files } = authoring.checkout;
+	const { base, testFiles } = await respecInputs(input.base, files);
 	const shown: InlinedFile[] = [];
 	const set = new Set(files);
 	const readme = files.find((path) => /^readme\.md$/i.test(path));
@@ -261,6 +305,7 @@ export async function respecBench(input: {
 		prompt,
 		source: specifySourceFacts(shown),
 		specify: { title, body, answers: null, files },
+		testFiles,
 		tools: SPECIFY_TOOLS,
 		skills: SPECIFY_SKILLS,
 		settings: {
@@ -289,6 +334,7 @@ export async function respecBench(input: {
 						tools,
 						attempt,
 					),
+				base,
 			);
 
 			if (retryableStageOutcome(result.kind))

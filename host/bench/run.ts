@@ -717,6 +717,7 @@ export async function runBench(
 				bundle,
 				state,
 				workspace: authoring,
+				base,
 				task,
 				id,
 				assets: bundleDir,
